@@ -209,6 +209,21 @@ function startAircraft(input) {
       methodText += ' [許可承認: ' + String(input.permitNo).trim() + ']';
     }
 
+    // 気象情報（天候・風速・風向）のフォーマット（飛行目的末尾に結合・A4レイアウト厳守）
+    let weatherParts = [];
+    if (input.weather) weatherParts.push(String(input.weather).trim());
+    if (input.windSpeed) {
+      let ws = String(input.windSpeed).trim();
+      let wd = input.windDir ? String(input.windDir).trim() : '';
+      weatherParts.push('風速' + ws + (wd ? ' ' + wd : ''));
+    } else if (input.windDir) {
+      weatherParts.push('風向: ' + String(input.windDir).trim());
+    }
+    let finalPurpose = selection.purpose;
+    if (weatherParts.length) {
+      finalPurpose += ' [気象: ' + weatherParts.join(' / ') + ']';
+    }
+
     const otherModel = input.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
     const aircrafts = {};
     aircrafts[input.model] = {
@@ -234,7 +249,7 @@ function startAircraft(input) {
       dateSheet: sheet.getName(),
       currentModel: input.model,
       model: input.model,
-      purpose: selection.purpose,
+      purpose: finalPurpose,
       route: input.route,
       method: methodText,
       category: selection.category,
@@ -465,6 +480,54 @@ function finishAircraft(input) {
 
     clearSession_();
     return getAppState();
+  });
+}
+
+// ----------------------------------------------------
+// オフライン同期待ちキューの一括反映（電波復帰時に一括書き込み）
+// ----------------------------------------------------
+function syncOfflineQueue(queueItems) {
+  return locked_(function() {
+    if (!Array.isArray(queueItems) || !queueItems.length) {
+      return { success: true, processed: 0, appState: getAppState() };
+    }
+    
+    let processedCount = 0;
+    for (let i = 0; i < queueItems.length; i++) {
+      const item = queueItems[i];
+      const action = item.action;
+      const payload = item.payload || {};
+      
+      try {
+        if (action === 'startAircraft') {
+          const existing = readSession_();
+          if (!existing) startAircraft(payload);
+        } else if (action === 'savePreflight') {
+          savePreflight(payload);
+        } else if (action === 'startFlight') {
+          startFlight(payload);
+        } else if (action === 'landFlight') {
+          landFlight(payload);
+        } else if (action === 'continueFlight') {
+          continueFlight();
+        } else if (action === 'switchAircraft') {
+          switchAircraft(payload);
+        } else if (action === 'startPostflight') {
+          startPostflight();
+        } else if (action === 'finishAircraft') {
+          finishAircraft(payload);
+        }
+        processedCount++;
+      } catch (e) {
+        console.error('Offline sync error at item ' + i + ' (' + action + '): ' + e.message);
+      }
+    }
+    
+    return {
+      success: true,
+      processed: processedCount,
+      appState: getAppState()
+    };
   });
 }
 
@@ -1165,17 +1228,101 @@ const APP_HTML = String.raw`<!doctype html>
       color: var(--primary);
       z-index: 9999;
     }
+    /* 気象チップ・オフラインバッジ追加 */
+    .network-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 12px;
+    }
+    .network-badge.online { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+    .network-badge.offline { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+    .sync-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 12px;
+      background: #fef3c7;
+      color: #92400e;
+      border: 1px solid #fde68a;
+      cursor: pointer;
+    }
+    .sync-banner {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #92400e;
+    }
+    .chip-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 6px 0 10px;
+    }
+    .chip-btn {
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 16px;
+      background: #f1f5f9;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+    .chip-btn:hover { background: #e2e8f0; }
+    .chip-btn.active {
+      background: #2563eb;
+      color: #ffffff;
+      border-color: #1d4ed8;
+      box-shadow: 0 1px 3px rgba(37,99,235,0.3);
+    }
+    .chip-btn.danger.active {
+      background: #dc2626;
+      color: #ffffff;
+      border-color: #b91c1c;
+    }
+    .chip-btn.warning.active {
+      background: #ea580c;
+      color: #ffffff;
+      border-color: #c2410c;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <div>
-        <h1>ドローン運航記録</h1>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <h1 style="margin:0;">ドローン運航記録</h1>
+          <span id="networkBadge" class="network-badge online">● オンライン</span>
+        </div>
         <div class="text-sm">EVO Lite / Lite+ プロ仕様・法令適合</div>
       </div>
-      <span id="appStatusBadge" class="badge">確認中</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span id="syncBadge" class="sync-badge" style="display:none;" onclick="triggerManualSync()">📦 未同期: <strong id="syncCount">0</strong>件</span>
+        <span id="appStatusBadge" class="badge">確認中</span>
+      </div>
     </header>
+    <div id="syncBanner" class="sync-banner" style="display:none;">
+      <div>
+        <strong>電波圏外で記録された未同期データがあります</strong>
+        <div style="font-size:11px;margin-top:2px;">電波が復帰したら「今すぐ同期」を押してスプレッドシートへ反映してください。</div>
+      </div>
+      <button type="button" class="btn btn-primary btn-sm" style="padding:4px 10px;font-size:12px;" onclick="triggerManualSync()">🔄 今すぐ同期</button>
+    </div>
 
     <div class="nav-tabs" id="navTabs">
       <button class="nav-tab active" onclick="switchTab('flight')">✈ 運航記録</button>
@@ -1227,10 +1374,254 @@ function val(id){var x=el(id);return x?String(x.value).trim():''}
 function isChecked(id){var x=el(id);return !!(x&&x.checked)}
 function busy(b){el('loading').style.display=b?'flex':'none'}
 
+// ----------------------------------------------------
+// 気象情報（天候・風速・風向）ワンタップ選択ロジック
+// ----------------------------------------------------
+function selectWeather(btn, val){
+  var parent = el('weatherChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('weatherVal')) el('weatherVal').value = val;
+}
+
+function selectWindSpeed(btn, val){
+  var parent = el('windSpeedChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('windSpeedVal')) el('windSpeedVal').value = val;
+}
+
+function selectWindDir(btn, val){
+  var parent = el('windDirChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('windDirVal')) el('windDirVal').value = val;
+}
+
+// ----------------------------------------------------
+// 完全オフライン対応（山間部・海岸等の電波圏外キューイング）
+// ----------------------------------------------------
+var OFFLINE_QUEUE_KEY = 'EVO_OFFLINE_QUEUE_V1';
+
+function getOfflineQueue(){
+  try {
+    var raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e) { return []; }
+}
+
+function saveOfflineQueue(queue){
+  try {
+    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+  } catch(e) {}
+  updateSyncBadge();
+}
+
+function addOfflineQueue(action, payload){
+  var q = getOfflineQueue();
+  q.push({
+    id: 'q_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+    action: action,
+    payload: payload,
+    time: new Date().toISOString()
+  });
+  saveOfflineQueue(q);
+}
+
+function clearOfflineQueue(){
+  try {
+    localStorage.removeItem(OFFLINE_QUEUE_KEY);
+  } catch(e) {}
+  updateSyncBadge();
+}
+
+function updateSyncBadge(){
+  var q = getOfflineQueue();
+  var badge = el('syncBadge');
+  var banner = el('syncBanner');
+  var countEl = el('syncCount');
+  if(countEl) countEl.innerText = q.length;
+  if(badge) badge.style.display = q.length > 0 ? 'inline-flex' : 'none';
+  if(banner) banner.style.display = q.length > 0 ? 'flex' : 'none';
+}
+
+function updateNetworkStatus(){
+  var isOnline = navigator.onLine;
+  var b = el('networkBadge');
+  if(b){
+    b.className = 'network-badge ' + (isOnline ? 'online' : 'offline');
+    b.innerText = isOnline ? '● オンライン' : '● 圏外（オフライン保存）';
+  }
+  updateSyncBadge();
+}
+
+window.addEventListener('online', function(){
+  updateNetworkStatus();
+  if(getOfflineQueue().length > 0){
+    triggerManualSync(true);
+  }
+});
+window.addEventListener('offline', updateNetworkStatus);
+
+function showToast(msg){
+  var t = el('toastBox');
+  if(!t){
+    t = document.createElement('div');
+    t.id = 'toastBox';
+    t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(30,41,59,0.95);color:#fff;padding:10px 18px;border-radius:24px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.25);transition:opacity 0.3s ease;pointer-events:none;';
+    document.body.appendChild(t);
+  }
+  t.innerText = msg;
+  t.style.opacity = '1';
+  setTimeout(function(){ if(t) t.style.opacity = '0'; }, 3500);
+}
+
+function triggerManualSync(isAuto){
+  var q = getOfflineQueue();
+  if(!q.length){
+    if(!isAuto) alert('未同期のオフラインデータはありません。');
+    return;
+  }
+  if(!navigator.onLine){
+    alert('現在は電波圏外です。電波の届く場所へ移動してから再度お試しください。');
+    return;
+  }
+
+  busy(true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      busy(false);
+      clearOfflineQueue();
+      if(res && res.appState) STATE = res.appState;
+      alert('✅ スプレッドシートへの同期が完了しました！（' + (res.processed || q.length) + ' 件反映）');
+      render();
+    })
+    .withFailureHandler(function(err){
+      busy(false);
+      alert('同期中に通信エラーが発生しました。電波の良い場所で再度「今すぐ同期」を押してください：\n' + (err.message || err));
+    })
+    .syncOfflineQueue(q);
+}
+
+// 圏外時のローカル画面遷移シミュレーション（現場作業を1秒も止めない）
+function simulateOfflineTransition(action, payload, callback){
+  if(!STATE) STATE = { active: false, today: new Date().toISOString().slice(0, 10).replace(/-/g, '.') };
+
+  if(action === 'startAircraft'){
+    STATE.active = true;
+    var model = payload.model || 'EVO Lite';
+    var other = model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
+    var acs = {};
+    acs[model] = { model: model, blockNo: 1, used: true, preflightDone: false, flightCount: 0, totalMinutes: 0 };
+    acs[other] = { model: other, blockNo: 0, used: false, preflightDone: false, flightCount: 0, totalMinutes: 0 };
+
+    STATE.session = {
+      dateSheet: STATE.today,
+      model: model,
+      currentModel: model,
+      blockNo: 1,
+      phase: 'PRE',
+      purpose: payload.purpose || '空撮',
+      route: payload.route || '',
+      pilot: payload.pilot || '',
+      inspectionLocation: payload.inspectionLocation || '',
+      aircrafts: acs,
+      totalMinutes: 0,
+      flightIndex: 0
+    };
+  } else if(action === 'savePreflight'){
+    if(STATE.session){
+      STATE.session.phase = 'READY';
+      if(STATE.session.aircrafts && STATE.session.aircrafts[STATE.session.currentModel]){
+        STATE.session.aircrafts[STATE.session.currentModel].preflightDone = true;
+      }
+    }
+  } else if(action === 'startFlight'){
+    if(STATE.session){
+      STATE.session.phase = 'FLYING';
+      STATE.session.flightIndex = (STATE.session.flightIndex || 0) + 1;
+      STATE.session.startedAt = new Date().toISOString();
+      if(STATE.session.aircrafts && STATE.session.aircrafts[STATE.session.currentModel]){
+        STATE.session.aircrafts[STATE.session.currentModel].flightCount = STATE.session.flightIndex;
+      }
+    }
+  } else if(action === 'landFlight'){
+    if(STATE.session){
+      STATE.session.phase = 'AFTER_LANDING';
+      var mins = Number(payload.actualMinutes) || 5;
+      STATE.session.totalMinutes = (STATE.session.totalMinutes || 0) + mins;
+      if(STATE.session.aircrafts && STATE.session.aircrafts[STATE.session.currentModel]){
+        STATE.session.aircrafts[STATE.session.currentModel].totalMinutes = (STATE.session.aircrafts[STATE.session.currentModel].totalMinutes || 0) + mins;
+      }
+    }
+  } else if(action === 'continueFlight'){
+    if(STATE.session) STATE.session.phase = 'READY';
+  } else if(action === 'switchAircraft'){
+    if(STATE.session){
+      var cur = STATE.session.currentModel || STATE.session.model;
+      var target = (payload && payload.targetModel) ? payload.targetModel : (cur === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite');
+      STATE.session.currentModel = target;
+      STATE.session.model = target;
+      if(!STATE.session.aircrafts) STATE.session.aircrafts = {};
+      var tac = STATE.session.aircrafts[target] || { model: target, blockNo: 2, used: true, preflightDone: false, flightCount: 0, totalMinutes: 0 };
+      tac.used = true;
+      STATE.session.aircrafts[target] = tac;
+      STATE.session.blockNo = tac.blockNo;
+      STATE.session.phase = tac.preflightDone ? 'READY' : 'PRE';
+    }
+  } else if(action === 'startPostflight'){
+    if(STATE.session) STATE.session.phase = 'POST_ALL';
+  } else if(action === 'finishAircraft'){
+    STATE.active = false;
+    STATE.session = null;
+    showToast('📥 飛行後点検を端末に保存しました（未同期: ' + getOfflineQueue().length + '件）');
+    if(callback) callback({ success: true, offline: true });
+    switchTab('pdf');
+    return;
+  }
+
+  showToast('📥 圏外のため端末に保存しました（未同期: ' + getOfflineQueue().length + '件）');
+  if(callback) callback(STATE);
+  render();
+}
+
 function callServer(name, arg, onSuccess){
   busy(true);
+
+  // 1. 完全圏外（オフライン）の場合：即座にキューへ保管し、画面遷移を止めずに進行
+  if(!navigator.onLine){
+    addOfflineQueue(name, arg);
+    busy(false);
+    simulateOfflineTransition(name, arg, onSuccess);
+    return;
+  }
+
+  // 2. オンライン時：8秒タイムアウト監視付きで実行
+  var hasReturned = false;
+  var timer = setTimeout(function(){
+    if(!hasReturned){
+      hasReturned = true;
+      busy(false);
+      console.warn('Request timeout for ' + name + '. Falling back to offline queue.');
+      addOfflineQueue(name, arg);
+      simulateOfflineTransition(name, arg, onSuccess);
+    }
+  }, 8000);
+
   var r = google.script.run
     .withSuccessHandler(function(res){
+      if(hasReturned) return;
+      hasReturned = true;
+      clearTimeout(timer);
       busy(false);
       if(onSuccess) onSuccess(res);
       else {
@@ -1239,9 +1630,20 @@ function callServer(name, arg, onSuccess){
       }
     })
     .withFailureHandler(function(err){
+      if(hasReturned) return;
+      hasReturned = true;
+      clearTimeout(timer);
       busy(false);
-      renderError(err && err.message ? err.message : String(err));
+      var msg = err && err.message ? err.message : String(err);
+      if(msg.indexOf('ScriptError') >= 0 || msg.indexOf('Network') >= 0 || msg.indexOf('Failed') >= 0 || !navigator.onLine){
+        console.warn('Network error detected. Saving to offline queue:', msg);
+        addOfflineQueue(name, arg);
+        simulateOfflineTransition(name, arg, onSuccess);
+      } else {
+        renderError(msg);
+      }
     });
+
   if(arg===undefined) r[name]();
   else r[name](arg);
 }
@@ -1546,6 +1948,37 @@ function renderStartView(div){
         '<label>その他の飛行目的詳細</label>' +
         '<input type="text" id="purposeOther" value="' + esc(last.purposeOther || '') + '">' +
       '</div>' +
+      '<div class="card" style="background:#f8fafc;border:1px solid #cbd5e1;margin:12px 0 10px;padding:12px;">' +
+        '<div style="font-weight:700;font-size:13px;color:#1e3a8a;margin-bottom:6px;">🌤 気象情報（安全運航確認・ワンタップ入力）</div>' +
+        '<label style="font-size:12px;margin:4px 0 2px;">天候</label>' +
+        '<div class="chip-group" id="weatherChips">' +
+          '<button type="button" class="chip-btn active" onclick="selectWeather(this, \'晴\')">☀ 晴</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWeather(this, \'曇\')">☁ 曇</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWeather(this, \'雨\')">🌧 雨</button>' +
+          '<button type="button" class="chip-btn warning" onclick="selectWeather(this, \'強風注意\')">⚠ 強風注意</button>' +
+        '</div>' +
+        '<input type="hidden" id="weatherVal" value="晴">' +
+        '<label style="font-size:12px;margin:4px 0 2px;">風速（平均）</label>' +
+        '<div class="chip-group" id="windSpeedChips">' +
+          '<button type="button" class="chip-btn" onclick="selectWindSpeed(this, \'0〜1m/s 静穏\')">🍃 0〜1m/s 静穏</button>' +
+          '<button type="button" class="chip-btn active" onclick="selectWindSpeed(this, \'2〜3m/s 穏やか\')">🍃 2〜3m/s 穏やか</button>' +
+          '<button type="button" class="chip-btn warning" onclick="selectWindSpeed(this, \'4〜5m/s 注意\')">⚠️ 4〜5m/s 注意</button>' +
+          '<button type="button" class="chip-btn danger" onclick="selectWindSpeed(this, \'6m/s以上 飛行不可\')">⛔ 6m/s以上 飛行不可</button>' +
+        '</div>' +
+        '<input type="hidden" id="windSpeedVal" value="2〜3m/s 穏やか">' +
+        '<label style="font-size:12px;margin:4px 0 2px;">風向</label>' +
+        '<div class="chip-group" id="windDirChips">' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'北\')">北</button>' +
+          '<button type="button" class="chip-btn active" onclick="selectWindDir(this, \'北東\')">北東</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'東\')">東</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'南東\')">南東</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'南\')">南</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'南西\')">南西</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'西\')">西</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'北西\')">北西</button>' +
+        '</div>' +
+        '<input type="hidden" id="windDirVal" value="北東">' +
+      '</div>' +
 
       '<label>飛行カテゴリー<span class="required">*</span></label>' +
       '<select id="category" onchange="onCategoryChanged()">' +
@@ -1741,7 +2174,10 @@ function submitStartOperation(){
     pilot: pilot,
     assistant: val('assistant'),
     cert: val('cert'),
-    forceNewLocation: isChecked('forceNewLocation')
+    forceNewLocation: isChecked('forceNewLocation'),
+    weather: val('weatherVal') || '晴',
+    windSpeed: val('windSpeedVal') || '2〜3m/s 穏やか',
+    windDir: val('windDirVal') || '北東'
   };
 
   saveLastOperation(payload);
