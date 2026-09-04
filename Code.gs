@@ -322,10 +322,11 @@ function startFlight(input) {
       writeCheckResults_(sheet, session.preflightChecks || {}, '飛行前点検', slot.blockNo);
     }
     const startedAt = now_();
+    const takeoffTimeStr = format_(startedAt, 'HH:mm');
     writeFlightFields_(sheet, slot, {
       '使用バッテリー': 'BAT_' + battery,
       '離陸場所': input.takeoffLocation,
-      '離陸時刻': startedAt
+      '離陸時刻': takeoffTimeStr
     });
     session.phase = 'FLYING';
     session.blockNo = slot.blockNo;
@@ -349,15 +350,20 @@ function landFlight(input) {
     if (session.phase !== 'FLYING') throw new Error('飛行中の記録がありません。');
     required_(input.landingLocation, '着陸場所');
     const landingTime = now_();
+    const landingTimeStr = format_(landingTime, 'HH:mm');
     const minutes = input.actualMinutes === '' || input.actualMinutes == null
       ? Math.max(1, Math.round((landingTime - new Date(session.startedAt)) / 60000))
       : Number(input.actualMinutes);
     if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('実飛行時間を確認してください。');
     const sheet = spreadsheet_().getSheetByName(session.dateSheet);
-    const totalMinutes = aircraftTotalMinutes_(session.model) + minutes;
+    const block = flightBlocks_(sheet).filter(item => item.blockNo === session.blockNo)[0];
+    const totalMinutes = calculateAccumulatedTotalMinutes_(sheet, block, session.currentRow, session.model, minutes);
+    
     writeFlightFields_(sheet, { blockNo: session.blockNo, row: session.currentRow }, {
-      '着陸場所': input.landingLocation, '着陸時刻': landingTime, '飛行時間': minutes,
-      '総飛行時間': minutesLabel_(totalMinutes),
+      '着陸場所': input.landingLocation,
+      '着陸時刻': landingTimeStr,
+      '飛行時間': formatHoursMinutes_(minutes),
+      '総飛行時間': formatHoursMinutes_(totalMinutes),
       '安全に影響した事項': input.safetyIssue ? (input.safetyDetail || 'あり') : 'なし',
       'バッテリー異常・所感': input.batteryNote || ''
     });
@@ -704,7 +710,14 @@ function writeFlightFields_(sheet, slot, fields) {
   };
   Object.keys(fields).forEach(key => {
     const col = flightColumn_(sheet, block, aliases[key] || [key]);
-    if (col) sheet.getRange(slot.row, col).setValue(fields[key]);
+    if (col) {
+      const cell = sheet.getRange(slot.row, col);
+      if (['離陸時刻', '着陸時刻', '飛行時間', '総飛行時間'].indexOf(key) >= 0) {
+        cell.setNumberFormat('@').setValue(String(fields[key]));
+      } else {
+        cell.setValue(fields[key]);
+      }
+    }
   });
 }
 
@@ -739,6 +752,41 @@ function aircraftTotalMinutes_(model) {
     });
   }
   return total;
+}
+
+function formatHoursMinutes_(minutes) {
+  const m = Math.max(0, Math.round(Number(minutes) || 0));
+  const hours = Math.floor(m / 60);
+  const mins = m % 60;
+  return String(hours).padStart(2, '0') + ':' + String(mins).padStart(2, '0');
+}
+
+function parseMinutesFromLabel_(label) {
+  if (!label) return 0;
+  const timeMatch = String(label).trim().match(/^(\d+):(\d+)$/);
+  if (timeMatch) {
+    return Number(timeMatch[1]) * 60 + Number(timeMatch[2]);
+  }
+  let total = 0;
+  const hMatch = String(label).match(/(\d+)時間/);
+  if (hMatch) total += Number(hMatch[1]) * 60;
+  const mMatch = String(label).match(/(\d+)分/);
+  if (mMatch) total += Number(mMatch[1]);
+  return total;
+}
+
+function calculateAccumulatedTotalMinutes_(sheet, block, currentRow, currentModel, minutes) {
+  const totalCol = flightColumn_(sheet, block, ['総飛行時間']);
+  if (currentRow > block.startRow && totalCol) {
+    const prevValue = String(sheet.getRange(currentRow - 1, totalCol).getDisplayValue() || '').trim();
+    if (prevValue) {
+      const parsed = parseMinutesFromLabel_(prevValue);
+      if (parsed > 0) {
+        return parsed + minutes;
+      }
+    }
+  }
+  return aircraftTotalMinutes_(currentModel) + minutes;
 }
 
 function minutesLabel_(minutes) {
