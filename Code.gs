@@ -810,6 +810,125 @@ function appendBatteryHistory_(session, minutes, input) {
 // ----------------------------------------------------
 // 様式3：点検整備記録
 // ----------------------------------------------------
+// ----------------------------------------------------
+// 様式3（点検整備記録）のA4印刷用テンプレート叩き台シートの自動作成
+// ----------------------------------------------------
+const MAINTENANCE_TEMPLATE_NAME = '点検整備記録_原本';
+
+function createMaintenanceTemplateSheet() {
+  const ss = spreadsheet_();
+  let sheet = ss.getSheetByName(MAINTENANCE_TEMPLATE_NAME);
+  if (sheet) {
+    return { success: true, message: '既に「' + MAINTENANCE_TEMPLATE_NAME + '」シートが存在します。', sheetUrl: sheetUrl_(ss, sheet) };
+  }
+
+  sheet = ss.insertSheet(MAINTENANCE_TEMPLATE_NAME);
+
+  // 列幅の設定（A〜H列：A4縦にピッタリ収まる比率）
+  sheet.setColumnWidth(1, 100); // A: 項目名
+  sheet.setColumnWidth(2, 90);  // B: 項目名補足
+  sheet.setColumnWidth(3, 110); // C: 入力部
+  sheet.setColumnWidth(4, 110); // D: 入力部
+  sheet.setColumnWidth(5, 110); // E: 項目名
+  sheet.setColumnWidth(6, 110); // F: 項目名
+  sheet.setColumnWidth(7, 110); // G: 入力部
+  sheet.setColumnWidth(8, 110); // H: 入力部
+
+  // 全体フォント
+  sheet.getRange('A1:H30').setFontFamily('Meiryo').setFontSize(10);
+
+  // 1. 表題（タイトル）
+  sheet.getRange('A2:H2').merge()
+    .setValue('無人航空機の点検整備記録（様式3）')
+    .setFontSize(16)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle')
+    .setBackground('#1e3a8a')
+    .setFontColor('#ffffff');
+  sheet.setRowHeight(2, 40);
+
+  sheet.getRange('A3:H3').merge()
+    .setValue('※航空法第132条の88及び「無人航空機の飛行日誌の取扱要領」準拠')
+    .setFontSize(9)
+    .setFontColor('#64748b')
+    .setHorizontalAlignment('right');
+
+  // 2. 機体基本情報枠
+  sheet.getRange('A4:B4').merge().setValue('無人航空機の型式').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('C4:E4').merge().setValue('Autel EVO Lite / EVO Lite+');
+  sheet.getRange('F4').setValue('登録記号').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('G4:H4').merge().setValue('JU3268805C02 / JU3269B165D2');
+
+  // 3. 点検実施情報枠
+  sheet.getRange('A5:B5').merge().setValue('点検等実施年月日').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('C5:D5').merge().setValue('2026年9月4日');
+  sheet.getRange('E5:F5').merge().setValue('点検整備時の総飛行時間').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('G5:H5').merge().setValue('00:20（累計飛行時間）');
+
+  sheet.getRange('A6:B6').merge().setValue('点検等の作業区分').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('C6:D6').merge().setValue('定期点検（または部品交換/修理）');
+  sheet.getRange('E6:F6').merge().setValue('実 施 理 由').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('G6:H6').merge().setValue('20時間定期点検時期の到来');
+
+  sheet.getRange('A7:B7').merge().setValue('点検等実施場所').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('C7:D7').merge().setValue('自宅作業室');
+  sheet.getRange('E7:F7').merge().setValue('点検整備実施者').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('G7:H7').merge().setValue('吉田 公一');
+
+  // 4. 作業内容・詳細枠
+  sheet.getRange('A9:H9').merge()
+    .setValue('【点検、修理、改造及び整備の内容・詳細】')
+    .setBackground('#e2e8f0')
+    .setFontWeight('bold');
+
+  const detailText = '・プロペラ全枚の傷、ひび割れ、変形、回転ガタつきの有無点検（異常なし）\n' +
+    '・4本のアーム結合部ネジの締め付けトルク確認・増し締め実施\n' +
+    '・モーター回転テスト（異音・異常振動・軸ブレなし確認）\n' +
+    '・機体ファームウェアおよび送信機アプリの最新状態確認・動作テスト完了';
+  sheet.getRange('A10:H14').merge()
+    .setValue(detailText)
+    .setWrap(true)
+    .setVerticalAlignment('top');
+
+  // 5. 交換部品名
+  sheet.getRange('A15:B15').merge().setValue('交換部品名').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('C15:H15').merge().setValue('なし（または「純正プロペラ フロントCW 1枚」等）');
+
+  // 6. 確認結果（合否判定）
+  sheet.getRange('A16:B16').merge().setValue('確認結果（合否判定）').setBackground('#f1f5f9').setFontWeight('bold');
+  sheet.getRange('C16:H16').merge().setValue('☑ 適合（飛行安全に支障なし）　　□ 条件付き適合　　□ 不適合（要再整備）');
+
+  // 7. 次回予定・備考枠
+  sheet.getRange('A17:H17').merge()
+    .setValue('【次回予定時期・特記事項・備考】')
+    .setBackground('#e2e8f0')
+    .setFontWeight('bold');
+
+  const noteText = '・次回予定：総飛行時間40時間到達時、または2026年12月頃に定期点検を実施予定\n' +
+    '・バッテリー各セルの電圧バランス（3.8V〜4.2V）正常確認済み';
+  sheet.getRange('A18:H21').merge()
+    .setValue(noteText)
+    .setWrap(true)
+    .setVerticalAlignment('top');
+
+  // 罫線（枠線）の設定（A4〜H21）
+  sheet.getRange('A4:H7').setBorder(true, true, true, true, true, true, '#cbd5e1', SpreadsheetApp.BorderStyle.SOLID);
+  sheet.getRange('A9:H16').setBorder(true, true, true, true, true, true, '#cbd5e1', SpreadsheetApp.BorderStyle.SOLID);
+  sheet.getRange('A17:H21').setBorder(true, true, true, true, true, true, '#cbd5e1', SpreadsheetApp.BorderStyle.SOLID);
+
+  // 外枠を少し太く
+  sheet.getRange('A4:H7').setBorder(true, true, true, true, null, null, '#475569', SpreadsheetApp.BorderStyle.MEDIUM);
+  sheet.getRange('A9:H16').setBorder(true, true, true, true, null, null, '#475569', SpreadsheetApp.BorderStyle.MEDIUM);
+  sheet.getRange('A17:H21').setBorder(true, true, true, true, null, null, '#475569', SpreadsheetApp.BorderStyle.MEDIUM);
+
+  return {
+    success: true,
+    message: '「' + MAINTENANCE_TEMPLATE_NAME + '」シート（叩き台）を作成しました！',
+    sheetUrl: sheetUrl_(ss, sheet)
+  };
+}
+
 function getOrCreateMaintenanceSheet_(ss) {
   let sheet = ss.getSheetByName(MAINTENANCE_SHEET_NAME);
   if (!sheet) {
@@ -2698,10 +2817,13 @@ function renderMaintenanceView(div){
 
   div.innerHTML =
     '<div class="card" id="maintCard">' +
-      '<h2>点検整備記録（様式3）</h2>' +
-      '<div class="text-sm" style="margin-bottom:10px;">' +
-        '定期点検、プロペラ交換、修理、改造、ファームウェア更新等の記録です。<br>' +
-        '<strong>※総飛行時間は現在の累計値が自動で記録されます。</strong>' +
+      '<div class="flex-between">' +
+        '<h2 style="margin:0;">点検整備記録（様式3）</h2>' +
+        '<button type="button" class="btn btn-secondary btn-sm" onclick="callServer(\'createMaintenanceTemplateSheet\', undefined, onTemplateCreated)">📄 A4原本叩き台シート作成</button>' +
+      '</div>' +
+      '<div class="text-sm" style="margin:6px 0 10px;">' +
+        '定期点検（20時間毎）、プロペラ交換、修理、改造等の記録です。<br>' +
+        '<strong>※総飛行時間は現在の累計値（各自独立）が自動で記録されます。</strong>' +
       '</div>' +
 
       '<label>機体型式<span class="required">*</span></label>' +
@@ -2743,6 +2865,12 @@ function renderMaintenanceView(div){
 
       '<button class="btn btn-primary" onclick="submitMaintenance()">点検整備記録を保存する</button>' +
     '</div>';
+}
+
+function onTemplateCreated(res){
+  if(res && res.message){
+    alert(res.message);
+  }
 }
 
 function submitMaintenance(){
