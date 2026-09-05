@@ -12,10 +12,9 @@
  *    - 離陸・着陸・バッテリー個別履歴記録
  *    - 機体交代（Lite ↔ Lite+）
  *    - 同一現場・同一目的の連続飛行後に行う飛行後点検まとめ
- *    - 様式3（点検整備記録）および訂正履歴管理
- * 3. 画面構造（HTMLテンプレート）                                : 730行付近〜
- * 4. 画面スタイル（モバイル最適化・CSSデザイン）                 : 750行付近〜
- * 5. 画面操作スクリプト（Vanilla JavaScript）                   : 1200行付近〜
+ * 3. 画面構造（HTMLテンプレート）
+ * 4. 画面スタイル（モバイル最適化・CSSデザイン）
+ * 5. 画面操作スクリプト（Vanilla JavaScript）
  * ----------------------------------------------------------------------------
  */
 
@@ -24,14 +23,12 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.05.3';
+const APP_VERSION = '2026.09.05.4';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
 const BATTERY_FIRST_ROW = 13;
 const BATTERY_LAST_ROW = 212;
-const MAINTENANCE_SHEET_NAME = '点検整備記録';
-const CORRECTION_SHEET_NAME = '訂正履歴';
 
 const MODELS = {
   'EVO Lite': 'JU3268805C02',
@@ -61,7 +58,6 @@ const PRE_CHECK_NAMES = [
 
 const POST_CHECK_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
 
-const MAINTENANCE_TYPES = ['定期点検','修理','改造','整備','部品交換','ファームウェア更新','点検'];
 let LOCK_DEPTH = 0;
 
 // ============================================================================
@@ -87,15 +83,7 @@ function dateFromSheetName_(sheetName) {
   if (!match) throw new Error('日付シート名を日付へ変換できません：' + sheetName);
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
 }
-function sheetSequence_(sheetName) {
-  const match = String(sheetName || '').match(/_(\d+)$/);
-  return match ? Number(match[1]) : 1;
-}
 function commitCache_() { return CacheService.getScriptCache(); }
-function sheetUrl_(spreadsheet, sheet) {
-  if (!sheet) return '';
-  return spreadsheet.getUrl() + '#gid=' + sheet.getSheetId();
-}
 
 function trackedSetValue_(range, value) { return range.setValue(value); }
 function trackedSetValues_(range, values) { return range.setValues(values); }
@@ -163,8 +151,6 @@ function getAppState() {
     active: false,
     today: today,
     hasTodaySheet: !!todaySheet,
-    todaySheetUrl: todaySheet ? sheetUrl_(ss, todaySheet) : '',
-    spreadsheetUrl: ss.getUrl(),
     batteries: Array.from({ length: 7 }, (_, index) => ({ value: index + 1, label: 'BAT_' + (index + 1) })),
     totals: {
       'EVO Lite': { minutes: totalLite, label: minutesLabel_(totalLite) },
@@ -295,10 +281,7 @@ function finishAircraft(input) {
         confirmer: postflight.confirmer || session.pilot
       }, blockNo, abnormal);
     });
-    const completedSheetName = sheet.getName();
     const appState = getAppState();
-    appState.lastCompletedSheet = completedSheetName;
-    appState.lastCompletedSheetUrl = sheetUrl_(spreadsheet_(), sheet);
     if (commitKey) commitCache_().put(commitKey, JSON.stringify(appState), 21600);
     return appState;
   });
@@ -522,293 +505,6 @@ function appendBatteryHistory_(session, minutes, input) {
   return { sheetName: sheet.getName(), row: row };
 }
 
-// ----------------------------------------------------
-// 様式3：点検整備記録
-// ----------------------------------------------------
-// ----------------------------------------------------
-// 様式3（点検整備記録）のA4印刷用テンプレート叩き台シートの自動作成
-// ----------------------------------------------------
-const MAINTENANCE_TEMPLATE_NAME = '点検整備記録_原本';
-
-function createMaintenanceTemplateSheet() {
-  const ss = spreadsheet_();
-  let sheet = ss.getSheetByName(MAINTENANCE_TEMPLATE_NAME);
-  if (sheet) {
-    return { success: true, message: '既に「' + MAINTENANCE_TEMPLATE_NAME + '」シートが存在します。', sheetUrl: sheetUrl_(ss, sheet) };
-  }
-
-  sheet = ss.insertSheet(MAINTENANCE_TEMPLATE_NAME);
-
-  // 列幅の設定（A〜H列：A4縦にピッタリ収まる比率）
-  sheet.setColumnWidth(1, 100); // A: 項目名
-  sheet.setColumnWidth(2, 90);  // B: 項目名補足
-  sheet.setColumnWidth(3, 110); // C: 入力部
-  sheet.setColumnWidth(4, 110); // D: 入力部
-  sheet.setColumnWidth(5, 110); // E: 項目名
-  sheet.setColumnWidth(6, 110); // F: 項目名
-  sheet.setColumnWidth(7, 110); // G: 入力部
-  sheet.setColumnWidth(8, 110); // H: 入力部
-
-  // 全体フォント
-  sheet.getRange('A1:H30').setFontFamily('Meiryo').setFontSize(10);
-
-  // 1. 表題（タイトル）
-  sheet.getRange('A2:H2').merge()
-    .setValue('無人航空機の点検整備記録（様式3）')
-    .setFontSize(16)
-    .setFontWeight('bold')
-    .setHorizontalAlignment('center')
-    .setVerticalAlignment('middle')
-    .setBackground('#1e3a8a')
-    .setFontColor('#ffffff');
-  sheet.setRowHeight(2, 40);
-
-  sheet.getRange('A3:H3').merge()
-    .setValue('※航空法第132条の89及び「無人航空機の飛行日誌の取扱要領」に基づく記録様式')
-    .setFontSize(9)
-    .setFontColor('#64748b')
-    .setHorizontalAlignment('right');
-
-  // 2. 機体基本情報枠
-  sheet.getRange('A4:B4').merge().setValue('無人航空機の型式').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('C4:E4').merge().setValue('Autel EVO Lite / EVO Lite+');
-  sheet.getRange('F4').setValue('登録記号').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('G4:H4').merge().setValue('JU3268805C02 / JU3269B165D2');
-
-  // 3. 点検実施情報枠
-  sheet.getRange('A5:B5').merge().setValue('点検等実施年月日').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('C5:D5').merge().setValue('2026年9月4日');
-  sheet.getRange('E5:F5').merge().setValue('点検整備時の総飛行時間').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('G5:H5').merge().setValue('00:20（累計飛行時間）');
-
-  sheet.getRange('A6:B6').merge().setValue('点検等の作業区分').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('C6:D6').merge().setValue('定期点検（または部品交換/修理）');
-  sheet.getRange('E6:F6').merge().setValue('実 施 理 由').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('G6:H6').merge().setValue('20時間定期点検時期の到来');
-
-  sheet.getRange('A7:B7').merge().setValue('点検等実施場所').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('C7:D7').merge().setValue('自宅作業室');
-  sheet.getRange('E7:F7').merge().setValue('点検整備実施者').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('G7:H7').merge().setValue('吉田 公一');
-
-  // 4. 作業内容・詳細枠
-  sheet.getRange('A9:H9').merge()
-    .setValue('【点検、修理、改造及び整備の内容・詳細】')
-    .setBackground('#e2e8f0')
-    .setFontWeight('bold');
-
-  const detailText = '・プロペラ全枚の傷、ひび割れ、変形、回転ガタつきの有無点検（異常なし）\n' +
-    '・4本のアーム結合部ネジの締め付けトルク確認・増し締め実施\n' +
-    '・モーター回転テスト（異音・異常振動・軸ブレなし確認）\n' +
-    '・機体ファームウェアおよび送信機アプリの最新状態確認・動作テスト完了';
-  sheet.getRange('A10:H14').merge()
-    .setValue(detailText)
-    .setWrap(true)
-    .setVerticalAlignment('top');
-
-  // 5. 交換部品名
-  sheet.getRange('A15:B15').merge().setValue('交換部品名').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('C15:H15').merge().setValue('なし（または「純正プロペラ フロントCW 1枚」等）');
-
-  // 6. 確認結果（合否判定）
-  sheet.getRange('A16:B16').merge().setValue('確認結果（合否判定）').setBackground('#f1f5f9').setFontWeight('bold');
-  sheet.getRange('C16:H16').merge().setValue('☑ 適合（飛行安全に支障なし）　　□ 条件付き適合　　□ 不適合（要再整備）');
-
-  // 7. 次回予定・備考枠
-  sheet.getRange('A17:H17').merge()
-    .setValue('【次回予定時期・特記事項・備考】')
-    .setBackground('#e2e8f0')
-    .setFontWeight('bold');
-
-  const noteText = '・次回予定：総飛行時間40時間到達時、または2026年12月頃に定期点検を実施予定\n' +
-    '・バッテリー各セルの電圧バランス（3.8V〜4.2V）正常確認済み';
-  sheet.getRange('A18:H21').merge()
-    .setValue(noteText)
-    .setWrap(true)
-    .setVerticalAlignment('top');
-
-  // 罫線（枠線）の設定（A4〜H21）
-  sheet.getRange('A4:H7').setBorder(true, true, true, true, true, true, '#cbd5e1', SpreadsheetApp.BorderStyle.SOLID);
-  sheet.getRange('A9:H16').setBorder(true, true, true, true, true, true, '#cbd5e1', SpreadsheetApp.BorderStyle.SOLID);
-  sheet.getRange('A17:H21').setBorder(true, true, true, true, true, true, '#cbd5e1', SpreadsheetApp.BorderStyle.SOLID);
-
-  // 外枠を少し太く
-  sheet.getRange('A4:H7').setBorder(true, true, true, true, null, null, '#475569', SpreadsheetApp.BorderStyle.MEDIUM);
-  sheet.getRange('A9:H16').setBorder(true, true, true, true, null, null, '#475569', SpreadsheetApp.BorderStyle.MEDIUM);
-  sheet.getRange('A17:H21').setBorder(true, true, true, true, null, null, '#475569', SpreadsheetApp.BorderStyle.MEDIUM);
-
-  return {
-    success: true,
-    message: '「' + MAINTENANCE_TEMPLATE_NAME + '」シート（叩き台）を作成しました！',
-    sheetUrl: sheetUrl_(ss, sheet)
-  };
-}
-
-function getOrCreateMaintenanceSheet_(ss) {
-  let sheet = ss.getSheetByName(MAINTENANCE_SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(MAINTENANCE_SHEET_NAME);
-    sheet.appendRow([
-      '実施年月日', '機体型式', '登録記号', '総飛行時間', '点検等実施場所',
-      '実施者氏名', '作業区分', '実施理由', '作業内容・詳細',
-      '交換部品名', '確認結果（合否判定）', '次回予定・備考'
-    ]);
-    sheet.getRange(1, 1, 1, 12).setBackground('#e8eef8').setFontWeight('bold');
-    sheet.setFrozenRows(1);
-  }
-  return sheet;
-}
-
-function addMaintenanceRecord(input) {
-  return locked_(function() {
-    required_(input.model, '機体型式');
-    required_(input.type, '作業区分');
-    required_(input.reason, '実施理由');
-    required_(input.detail, '作業内容・詳細');
-    required_(input.pilot, '実施者氏名');
-    required_(input.location, '点検等実施場所');
-
-    const ss = spreadsheet_();
-    const sheet = getOrCreateMaintenanceSheet_(ss);
-    const date = input.date ? new Date(input.date) : now_();
-    const totalMinutes = aircraftTotalMinutes_(input.model);
-    const totalLabel = minutesLabel_(totalMinutes);
-    const registration = MODELS[input.model] || '';
-
-    sheet.appendRow([
-      date,
-      input.model,
-      registration,
-      totalLabel,
-      input.location,
-      input.pilot,
-      input.type,
-      input.reason,
-      input.detail,
-      input.parts || 'なし',
-      input.result || '適合（異常なし）',
-      input.note || ''
-    ]);
-
-    return {
-      success: true,
-      model: input.model,
-      totalMinutes: totalMinutes,
-      totalLabel: totalLabel
-    };
-  });
-}
-
-// ----------------------------------------------------
-// 記録訂正機能と訂正履歴シート
-// ----------------------------------------------------
-function getOrCreateCorrectionSheet_(ss) {
-  let sheet = ss.getSheetByName(CORRECTION_SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(CORRECTION_SHEET_NAME);
-    sheet.appendRow(['訂正日時', '訂正対象', 'キー/日付', '項目名', '訂正前', '訂正後', '訂正理由', '操作者']);
-    sheet.getRange(1, 1, 1, 8).setBackground('#fce8e6').setFontWeight('bold');
-    sheet.setFrozenRows(1);
-  }
-  return sheet;
-}
-
-function logCorrection_(ss, target, key, field, beforeVal, afterVal, reason, operator) {
-  const sheet = getOrCreateCorrectionSheet_(ss);
-  sheet.appendRow([now_(), target, key, field, String(beforeVal), String(afterVal), reason, operator || '']);
-}
-
-function correctSavedRecord(input) {
-  return locked_(function() {
-    required_(input.target, '訂正対象');
-    required_(input.field, '訂正項目名');
-    required_(input.reason, '訂正理由');
-    required_(input.operator, '操作者');
-    if (!Object.prototype.hasOwnProperty.call(input, 'newValue')) throw new Error('新しい値が指定されていません。');
-
-    const ss = spreadsheet_();
-    if (input.target === 'flight') {
-      if (!/^\d{4}\.\d{1,2}\.\d{1,2}(?:_\d+)?$/.test(String(input.dateSheet || ''))) {
-        throw new Error('訂正対象の日付シート名を確認してください。');
-      }
-      const sheet = ss.getSheetByName(input.dateSheet);
-      if (!sheet) throw new Error('シート ' + input.dateSheet + ' が見つかりません。');
-      const row = Number(input.row);
-      const col = Number(input.col);
-      if (!Number.isInteger(row) || !Number.isInteger(col) || row < 1 || col < 1 || row > sheet.getMaxRows() || col > sheet.getMaxColumns()) {
-        throw new Error('訂正対象の行番号・列番号を確認してください。');
-      }
-      const cell = sheet.getRange(row, col);
-      const before = cell.getDisplayValue();
-      cell.setValue(input.newValue);
-      logCorrection_(ss, '飛行記録', input.dateSheet + ' R' + row + 'C' + col, input.field, before, input.newValue, input.reason, input.operator);
-    } else if (input.target === 'battery') {
-      const batteryNo = Number(input.batteryNo);
-      if (!Number.isInteger(batteryNo) || batteryNo < 1 || batteryNo > 7) throw new Error('バッテリー番号を確認してください。');
-      const sheet = ss.getSheetByName(BATTERY_SHEET_PREFIX + input.batteryNo);
-      if (!sheet) throw new Error('バッテリーシートが見つかりません。');
-      const row = Number(input.row);
-      const col = Number(input.col);
-      if (!Number.isInteger(row) || !Number.isInteger(col) || row < BATTERY_FIRST_ROW || row > BATTERY_LAST_ROW || col < 1 || col > sheet.getMaxColumns()) {
-        throw new Error('訂正対象の行番号・列番号を確認してください。');
-      }
-      const cell = sheet.getRange(row, col);
-      const before = cell.getDisplayValue();
-      cell.setValue(input.newValue);
-      logCorrection_(ss, 'バッテリー履歴', 'BAT_' + input.batteryNo + ' R' + row + 'C' + col, input.field, before, input.newValue, input.reason, input.operator);
-    } else {
-      throw new Error('未知の訂正対象です。');
-    }
-    return { success: true };
-  });
-}
-
-// ----------------------------------------------------
-// PDF出力・過去日誌検索
-// ----------------------------------------------------
-function getPdfUrl(dateStr) {
-  const date = dateStr ? String(dateStr).trim() : format_(now_(), 'yyyy.M.d');
-  const ss = spreadsheet_();
-  const sheet = ss.getSheetByName(date);
-  if (!sheet) throw new Error('日付シート「' + date + '」が見つかりません。');
-
-  const sheetId = sheet.getSheetId();
-  const url = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/export?' +
-    'exportFormat=pdf&format=pdf' +
-    '&size=A4' +
-    '&portrait=false' +
-    '&fitw=true' +
-    '&gridlines=true' +
-    '&printtitle=false' +
-    '&sheetnames=false' +
-    '&fzr=false' +
-    '&gid=' + sheetId;
-  return { date: date, pdfUrl: url, sheetUrl: sheetUrl_(ss, sheet) };
-}
-
-function searchFlightLogs(query) {
-  const ss = spreadsheet_();
-  const sheets = ss.getSheets();
-  const results = [];
-  const q = String(query || '').trim();
-
-  sheets.forEach(sh => {
-    const name = sh.getName();
-    if (/^\d{4}\.\d{1,2}\.\d{1,2}(?:_\d+)?$/.test(name)) {
-      if (!q || name.indexOf(q) >= 0) {
-        results.push({
-          date: name,
-          sheetUrl: sheetUrl_(ss, sh)
-        });
-      }
-    }
-  });
-  return results.sort((a, b) => {
-    const dateDiff = dateFromSheetName_(b.date).getTime() - dateFromSheetName_(a.date).getTime();
-    return dateDiff || sheetSequence_(b.date) - sheetSequence_(a.date);
-  });
-}
-
 // ============================================================================
 // 3. 画面構造（HTML）＆ モバイルデザインスタイル（CSS）
 // ============================================================================
@@ -888,29 +584,6 @@ const APP_HTML = String.raw`<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
-    }
-    .nav-tabs {
-      display: flex;
-      gap: 6px;
-      margin-bottom: 10px;
-      overflow-x: auto;
-    }
-    .nav-tab {
-      flex: 1;
-      text-align: center;
-      padding: 8px 4px;
-      font-size: 13px;
-      font-weight: 600;
-      border-radius: 8px;
-      background: #edf2f7;
-      color: #4a5568;
-      border: none;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .nav-tab.active {
-      background: var(--primary);
-      color: #fff;
     }
     label {
       display: block;
@@ -1234,12 +907,6 @@ const APP_HTML = String.raw`<!doctype html>
       </div>
     </header>
     <button type="button" id="globalBackButton" class="global-back-btn" onclick="goBackFromAnywhere()">← 一つ前の画面に戻る</button>
-    <div class="nav-tabs" id="navTabs">
-      <button class="nav-tab active" onclick="switchTab('flight')">✈ 運航記録</button>
-      <button class="nav-tab" onclick="switchTab('maintenance')">🛠 点検整備（様式3）</button>
-      <button class="nav-tab" onclick="switchTab('pdf')">📄 日誌PDF・検索</button>
-      <button class="nav-tab" onclick="switchTab('correction')">✏️ 記録訂正</button>
-    </div>
 
     <div id="app">
       <div class="card">読み込み中...</div>
@@ -1253,10 +920,6 @@ const APP_HTML = String.raw`<!doctype html>
 // 4. 画面操作スクリプト（Vanilla JavaScript）
 // ============================================================================
 var STATE = __INITIAL_STATE__;
-var CURRENT_TAB = 'flight';
-var TAB_HISTORY = [];
-var LAST_COMPLETED_SHEET = '';
-var LAST_COMPLETED_SHEET_URL = '';
 
 var PRE_NAMES = ['機体全般','プロペラ・フレーム','通信系統','推進系統','電源系統','自動制御系統','バッテリー','操縦装置','灯火','カメラ','リモートID'];
 var POST_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
@@ -1282,8 +945,6 @@ var POST_CHECK_DETAILS = {
 var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行'];
 var METHOD_NAMES = ['通常飛行（特定飛行なし）','屋内練習','空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SPECIAL_METHODS = ['空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
-var MAINTENANCE_TYPES = ['定期点検','修理','改造','整備','部品交換','ファームウェア更新','点検'];
-
 var SAFETY_TAGS = [
   '突風による一時ホバリング',
   '鳥類の異常接近・回避',
@@ -1688,24 +1349,7 @@ function confirmResetSession(){
   }
 }
 
-function switchTab(tab, recordHistory){
-  if(tab !== CURRENT_TAB && recordHistory !== false) TAB_HISTORY.push(CURRENT_TAB);
-  CURRENT_TAB = tab;
-  var btns = el('navTabs').getElementsByClassName('nav-tab');
-  btns[0].className = tab==='flight' ? 'nav-tab active' : 'nav-tab';
-  btns[1].className = tab==='maintenance' ? 'nav-tab active' : 'nav-tab';
-  btns[2].className = tab==='pdf' ? 'nav-tab active' : 'nav-tab';
-  btns[3].className = tab==='correction' ? 'nav-tab active' : 'nav-tab';
-  render();
-}
-
 function goBackFromAnywhere(){
-  if(CURRENT_TAB !== 'flight'){
-    var previousTab = TAB_HISTORY.length ? TAB_HISTORY.pop() : 'flight';
-    switchTab(previousTab, false);
-    return;
-  }
-
   var session = STATE && STATE.session;
   if(session){
     captureCurrentScreenDraft();
@@ -1713,10 +1357,6 @@ function goBackFromAnywhere(){
     return;
   }
 
-  if(TAB_HISTORY.length){
-    switchTab(TAB_HISTORY.pop(), false);
-    return;
-  }
   alert('これより前の画面はありません。');
 }
 
@@ -1843,33 +1483,11 @@ function render(){
   var hasActiveOperation = !!(STATE && STATE.active && STATE.session);
 
   // 運航の初期画面には「一つ前」が存在しないため表示しない。
-  // 運航開始後、または別タブを開いている時だけ共通の戻るボタンを表示する。
   if(backButton){
-    backButton.style.display = (CURRENT_TAB !== 'flight' || hasActiveOperation) ? 'block' : 'none';
+    backButton.style.display = hasActiveOperation ? 'block' : 'none';
   }
 
   if(TIMER_INTERVAL){ clearInterval(TIMER_INTERVAL); TIMER_INTERVAL = null; }
-
-  if(CURRENT_TAB === 'maintenance'){
-    badge.className = 'badge';
-    badge.innerText = '様式3 整備記録';
-    renderMaintenanceView(appDiv);
-    return;
-  }
-  if(CURRENT_TAB === 'pdf'){
-    badge.className = 'badge';
-    badge.innerText = '日誌・PDF';
-    renderPdfView(appDiv);
-    return;
-  }
-  if(CURRENT_TAB === 'correction'){
-    badge.className = 'badge';
-    badge.innerText = '記録訂正';
-    renderCorrectionView(appDiv);
-    return;
-  }
-
-  // CURRENT_TAB === 'flight'
   if(!STATE){
     badge.className = 'badge';
     badge.innerText = '接続中';
@@ -2340,8 +1958,7 @@ function renderPreAbnormalView(div){
   div.innerHTML = sessionHeaderHtml() +
     '<div class="card error-box">' +
       '<h2>飛行前点検で異常を記録しました</h2>' +
-      '<p>この機体は離陸できません。必要な点検・整備と記録を完了してから、新しい運航を開始してください。</p>' +
-      '<button class="btn btn-secondary" onclick="switchTab(\'maintenance\')">点検整備記録を開く</button>' +
+      '<p>この機体は離陸できません。必要な点検・整備を行い、点検整備記録はスプレッドシートの「点検整備記録_原本」を使用して記録してください。</p>' +
       '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="cancelSessionPrompt()">この運航を終了する</button>' +
     '</div>';
 }
@@ -2762,9 +2379,8 @@ function submitAllPostflight(){
     checks: aircraftPayload[s.model] ? aircraftPayload[s.model].checks : {}
   }, function(res){
     STATE = res;
-    LAST_COMPLETED_SHEET = (res && res.lastCompletedSheet) || LAST_COMPLETED_SHEET;
-    LAST_COMPLETED_SHEET_URL = (res && res.lastCompletedSheetUrl) || LAST_COMPLETED_SHEET_URL;
-    switchTab('pdf', false);
+    render();
+    alert('運航記録をスプレッドシートへ保存しました。');
   });
 }
 
@@ -2772,258 +2388,6 @@ function cancelSessionPrompt(){
   if(confirm('現在の運航入力を取り消しますか？\n（入力中の内容は保存されません）')){
     callServer('cancelCurrentSession');
   }
-}
-
-// ----------------------------------------------------
-// 7. 様式3：点検整備記録タブ
-// ----------------------------------------------------
-function renderMaintenanceView(div){
-  var typesHtml = MAINTENANCE_TYPES.map(function(t){
-    return '<option value="' + esc(t) + '">' + esc(t) + '</option>';
-  }).join('');
-
-  div.innerHTML =
-    '<div class="card" id="maintCard">' +
-      '<div class="flex-between">' +
-        '<h2 style="margin:0;">点検整備記録（様式3）</h2>' +
-        '<button type="button" class="btn btn-secondary btn-sm" onclick="callServer(\'createMaintenanceTemplateSheet\', undefined, onTemplateCreated)">📄 A4原本叩き台シート作成</button>' +
-      '</div>' +
-      '<div class="text-sm" style="margin:6px 0 10px;">' +
-        '定期点検（20時間毎）、プロペラ交換、修理、改造等の記録です。<br>' +
-        '<strong>※総飛行時間は現在の累計値（各自独立）が自動で記録されます。</strong>' +
-      '</div>' +
-
-      '<label>機体型式<span class="required">*</span></label>' +
-      '<select id="mModel">' +
-        '<option value="EVO Lite">EVO Lite（JU3268805C02）</option>' +
-        '<option value="EVO Lite+">EVO Lite+（JU3269B165D2）</option>' +
-      '</select>' +
-
-      '<label>実施年月日<span class="required">*</span></label>' +
-      '<input type="date" id="mDate" value="' + getTodayYmd() + '">' +
-
-      '<label>作業区分<span class="required">*</span></label>' +
-      '<select id="mType">' + typesHtml + '</select>' +
-
-      '<label>実施理由<span class="required">*</span></label>' +
-      '<input type="text" id="mReason" placeholder="例：飛行後点検でのキズ発見、定期点検時期到来、メーカ更新">' +
-
-      '<label>作業内容・詳細<span class="required">*</span></label>' +
-      '<textarea id="mDetail" placeholder="例：右前プロペラを新品（予備パーツA）に交換し、回転確認を実施"></textarea>' +
-
-      '<label>交換部品名</label>' +
-      '<input type="text" id="mParts" placeholder="例：純正プロペラ（フロントCW）1枚">' +
-
-      '<label>点検等実施場所<span class="required">*</span></label>' +
-      '<input type="text" id="mLocation" placeholder="例：自宅作業室、現地整備スペース" value="自宅作業室">' +
-
-      '<label>実施者氏名<span class="required">*</span></label>' +
-      '<input type="text" id="mPilot" value="吉田 公一">' +
-
-      '<label>確認結果（合否判定）</label>' +
-      '<select id="mResult">' +
-        '<option value="適合（異常なし）">適合（異常なし）</option>' +
-        '<option value="条件付き適合">条件付き適合</option>' +
-        '<option value="不適合（要再整備）">不適合（要再整備）</option>' +
-      '</select>' +
-
-      '<label>次回予定・備考</label>' +
-      '<input type="text" id="mNote" placeholder="例：次回50時間点検、次回フライト時振動注意">' +
-
-      '<button class="btn btn-primary" onclick="submitMaintenance()">点検整備記録を保存する</button>' +
-    '</div>';
-}
-
-function onTemplateCreated(res){
-  if(res && res.message){
-    alert(res.message);
-  }
-}
-
-function submitMaintenance(){
-  clearFormErrors('maintCard');
-  var errors = [];
-
-  if(!val('mModel')) errors.push({ id: 'mModel', label: '機体型式', message: '機体を選択してください。' });
-  if(!val('mDate')) errors.push({ id: 'mDate', label: '実施年月日', message: '実施年月日を選択してください。' });
-  if(!val('mType')) errors.push({ id: 'mType', label: '作業区分', message: '作業区分を選択してください。' });
-  if(!val('mReason')) errors.push({ id: 'mReason', label: '実施理由', message: '実施理由を入力してください。' });
-  if(!val('mDetail')) errors.push({ id: 'mDetail', label: '作業内容・詳細', message: '作業内容の詳細を入力してください。' });
-  if(!val('mLocation')) errors.push({ id: 'mLocation', label: '点検等実施場所', message: '実施場所を入力してください。' });
-  if(!val('mPilot')) errors.push({ id: 'mPilot', label: '実施者氏名', message: '実施者氏名を入力してください。' });
-
-  if(errors.length > 0){
-    showFormErrors('maintCard', errors);
-    return;
-  }
-
-  var payload = {
-    model: val('mModel'),
-    date: val('mDate'),
-    type: val('mType'),
-    reason: val('mReason'),
-    detail: val('mDetail'),
-    parts: val('mParts'),
-    location: val('mLocation'),
-    pilot: val('mPilot'),
-    result: val('mResult'),
-    note: val('mNote')
-  };
-  callServer('addMaintenanceRecord', payload, function(res){
-    alert('点検整備記録（様式3）を保存しました。\n（記録時点の総飛行時間：' + res.totalLabel + '）');
-    switchTab('flight');
-  });
-}
-
-// ----------------------------------------------------
-// 8. 記録訂正タブ
-// ----------------------------------------------------
-function renderCorrectionView(div){
-  var last = loadLastOperation() || {};
-  div.innerHTML =
-    '<div class="card" id="correctionCard">' +
-      '<h2>記録訂正（訂正履歴を自動保存）</h2>' +
-      '<div class="warn-box">スプレッドシートで対象セルの行番号・列番号を確認して入力してください。訂正前の値、訂正後の値、理由、操作者が「訂正履歴」へ保存されます。</div>' +
-      '<label>訂正対象<span class="required">*</span></label>' +
-      '<select id="cTarget" onchange="onCorrectionTargetChanged()">' +
-        '<option value="flight">飛行記録・日常点検記録</option>' +
-        '<option value="battery">バッテリー履歴</option>' +
-      '</select>' +
-      '<div id="cFlightTarget">' +
-        '<label>日付シート名<span class="required">*</span></label>' +
-        '<input type="text" id="cDateSheet" value="' + esc((STATE && STATE.today) || '') + '" placeholder="例：2026.9.4 または 2026.9.4_2">' +
-      '</div>' +
-      '<div id="cBatteryTarget" style="display:none;">' +
-        '<label>バッテリー番号<span class="required">*</span></label>' +
-        '<select id="cBatteryNo">' + [1,2,3,4,5,6,7].map(function(n){ return '<option value="' + n + '">BAT_' + n + '</option>'; }).join('') + '</select>' +
-      '</div>' +
-      '<div class="grid-2">' +
-        '<div><label>行番号<span class="required">*</span></label><input type="number" id="cRow" min="1"></div>' +
-        '<div><label>列番号<span class="required">*</span></label><input type="number" id="cCol" min="1"></div>' +
-      '</div>' +
-      '<label>項目名<span class="required">*</span></label>' +
-      '<input type="text" id="cField" placeholder="例：着陸時刻、飛行時間、点検結果">' +
-      '<label>訂正後の値<span class="required">*</span></label>' +
-      '<input type="text" id="cNewValue">' +
-      '<label class="check-item"><input type="checkbox" id="cClearValue"><span>値を空欄に訂正する</span></label>' +
-      '<label>訂正理由<span class="required">*</span></label>' +
-      '<textarea id="cReason" placeholder="誤記の原因と訂正理由を具体的に記載"></textarea>' +
-      '<label>操作者<span class="required">*</span></label>' +
-      '<input type="text" id="cOperator" value="' + esc(last.pilot || '') + '">' +
-      '<button class="btn btn-primary" onclick="submitCorrection()">訂正して履歴を保存する</button>' +
-    '</div>';
-}
-
-function onCorrectionTargetChanged(){
-  var isFlight = val('cTarget') === 'flight';
-  el('cFlightTarget').style.display = isFlight ? 'block' : 'none';
-  el('cBatteryTarget').style.display = isFlight ? 'none' : 'block';
-}
-
-function submitCorrection(){
-  clearFormErrors('correctionCard');
-  var errors = [];
-  var target = val('cTarget');
-  if(target === 'flight' && !val('cDateSheet')) errors.push({ id:'cDateSheet', label:'日付シート名', message:'訂正対象の日付シート名を入力してください。' });
-  if(!val('cRow')) errors.push({ id:'cRow', label:'行番号', message:'訂正対象の行番号を入力してください。' });
-  if(!val('cCol')) errors.push({ id:'cCol', label:'列番号', message:'訂正対象の列番号を入力してください。' });
-  if(!val('cField')) errors.push({ id:'cField', label:'項目名', message:'訂正する項目名を入力してください。' });
-  if(!isChecked('cClearValue') && !val('cNewValue')) errors.push({ id:'cNewValue', label:'訂正後の値', message:'訂正後の値を入力するか、空欄に訂正を選択してください。' });
-  if(!val('cReason')) errors.push({ id:'cReason', label:'訂正理由', message:'訂正理由を入力してください。' });
-  if(!val('cOperator')) errors.push({ id:'cOperator', label:'操作者', message:'操作者氏名を入力してください。' });
-  if(errors.length){ showFormErrors('correctionCard', errors); return; }
-
-  var targetLabel = target === 'flight' ? val('cDateSheet') : 'BAT_' + val('cBatteryNo');
-  var correctedValue = isChecked('cClearValue') ? '（空欄）' : val('cNewValue');
-  if(!confirm(targetLabel + ' の R' + val('cRow') + 'C' + val('cCol') + ' を「' + correctedValue + '」へ訂正します。\nよろしいですか？')) return;
-
-  callServer('correctSavedRecord', {
-    target: target,
-    dateSheet: val('cDateSheet'),
-    batteryNo: val('cBatteryNo'),
-    row: val('cRow'),
-    col: val('cCol'),
-    field: val('cField'),
-    newValue: isChecked('cClearValue') ? '' : val('cNewValue'),
-    reason: val('cReason'),
-    operator: val('cOperator')
-  }, function(){
-    alert('訂正を反映し、「訂正履歴」へ記録しました。');
-    renderCorrectionView(el('app'));
-  });
-}
-
-// ----------------------------------------------------
-// 9. PDF出力・過去日誌検索タブ
-// ----------------------------------------------------
-function renderPdfView(div){
-  var today = STATE ? STATE.today : '';
-  var pdfSheet = LAST_COMPLETED_SHEET || today;
-  div.innerHTML =
-    '<div class="card">' +
-      '<h2>飛行日誌 PDF即時出力・携行</h2>' +
-      '<div class="text-sm" style="margin-bottom:12px;">' +
-        '航空法により特定飛行を行う際は飛行日誌の携行・提示が義務付けられています。<br>' +
-        '山間部など<strong>電波の届かない現場に備え、あらかじめPDFを端末にダウンロード</strong>しておくことが推奨されます。' +
-      '</div>' +
-
-      '<div class="status-box">' +
-        '表示対象（' + esc(pdfSheet) + '）の飛行日誌：<br>' +
-        '<button class="btn btn-success btn-sm" style="margin-top:6px;" onclick="openTodayPdf()">📄 本日の日誌PDFを即時表示・保存</button> ' +
-        ((LAST_COMPLETED_SHEET_URL || (STATE && STATE.todaySheetUrl)) ? '<a href="' + (LAST_COMPLETED_SHEET_URL || STATE.todaySheetUrl) + '" target="_blank" class="btn btn-secondary btn-sm" style="margin-top:6px;text-decoration:none;">📊 スプレッドシートで直接開く</a>' : '') +
-      '</div>' +
-
-      '<h3 style="font-size:15px;margin:16px 0 6px;">過去の飛行日誌を検索・出力</h3>' +
-      '<div class="flex-row">' +
-        '<input type="text" id="searchLogQuery" placeholder="例：2026.9 または 日付" value="' + esc(today) + '">' +
-        '<button class="btn btn-primary btn-sm" onclick="doSearchLogs()">検索</button>' +
-      '</div>' +
-
-      '<div id="logSearchResults" style="margin-top:12px;"></div>' +
-
-      '<div style="margin-top:20px;border-top:1px solid #edf2f7;padding-top:12px;">' +
-        '<a href="' + (STATE ? STATE.spreadsheetUrl : '#') + '" target="_blank" class="text-sm" style="color:var(--primary);text-decoration:none;">' +
-          '➡ スプレッドシート本体（原本）を開く' +
-        '</a>' +
-      '</div>' +
-    '</div>';
-
-  doSearchLogs();
-}
-
-function openTodayPdf(){
-  callServer('getPdfUrl', LAST_COMPLETED_SHEET || null, function(res){
-    window.open(res.pdfUrl, '_blank');
-  });
-}
-
-function doSearchLogs(){
-  var q = val('searchLogQuery');
-  callServer('searchFlightLogs', q, function(list){
-    var target = el('logSearchResults');
-    if(!list || !list.length){
-      target.innerHTML = '<div class="text-sm" style="color:var(--muted);padding:8px 0;">該当する日付シートがありません。</div>';
-      return;
-    }
-    var h = '<div class="check-list">';
-    list.forEach(function(item){
-      h += '<div class="check-item flex-row" style="justify-content:space-between;">' +
-        '<div><strong>' + esc(item.date) + '</strong> の飛行日誌</div>' +
-        '<div>' +
-          '<button class="btn btn-success btn-sm" onclick="openDatePdf(\'' + esc(item.date) + '\')">PDF</button> ' +
-          '<a href="' + item.sheetUrl + '" target="_blank" class="btn btn-secondary btn-sm" style="text-decoration:none;">シート</a>' +
-        '</div>' +
-      '</div>';
-    });
-    h += '</div>';
-    target.innerHTML = h;
-  });
-}
-
-function openDatePdf(d){
-  callServer('getPdfUrl', d, function(res){
-    window.open(res.pdfUrl, '_blank');
-  });
 }
 
 // ----------------------------------------------------
@@ -3035,14 +2399,6 @@ function formatTimeStr(iso){
   var h = ('0' + d.getHours()).slice(-2);
   var m = ('0' + d.getMinutes()).slice(-2);
   return h + ':' + m;
-}
-
-function getTodayYmd(){
-  var d = new Date();
-  var y = d.getFullYear();
-  var m = ('0' + (d.getMonth() + 1)).slice(-2);
-  var day = ('0' + d.getDate()).slice(-2);
-  return y + '-' + m + '-' + day;
 }
 
 // 初回起動：進行中の運航下書き1件だけを端末から復元する。
