@@ -6,12 +6,12 @@
  * 【全体構成マップ（目次）】
  * ----------------------------------------------------------------------------
  * 1. 基本設定・定数（機体型式、登録記号、法令点検項目）         : 40行付近〜
- * 2. サーバー側ロジック（スプレッドシート書き込み・セッション管理）: 100行付近〜
+ * 2. サーバー側ロジック（全運航終了時の一括書き込み）          : 100行付近〜
  *    - 運航開始（同日複数現場の連番シート対応）
  *    - 飛行前点検（ワンタップ全て正常）
  *    - 離陸・着陸・バッテリー個別履歴記録
  *    - 機体交代（Lite ↔ Lite+）
- *    - 夕方の飛行後点検まとめ（本日使用機体のみ）
+ *    - 同一現場・同一目的の連続飛行後に行う飛行後点検まとめ
  *    - 様式3（点検整備記録）および訂正履歴管理
  * 3. 画面構造（HTMLテンプレート）                                : 730行付近〜
  * 4. 画面スタイル（モバイル最適化・CSSデザイン）                 : 750行付近〜
@@ -24,7 +24,8 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const SESSION_KEY = 'EVO_LITE_FLIGHT_SESSION';
+const APP_VERSION = '2026.09.05.3';
+const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
 const BATTERY_FIRST_ROW = 13;
@@ -61,16 +62,19 @@ const PRE_CHECK_NAMES = [
 const POST_CHECK_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
 
 const MAINTENANCE_TYPES = ['定期点検','修理','改造','整備','部品交換','ファームウェア更新','点検'];
+let LOCK_DEPTH = 0;
 
 // ============================================================================
-// 2. サーバー側ロジック（スプレッドシート書き込み・セッション管理）
+// 2. サーバー側ロジック（全運航終了時のスプレッドシート一括書き込み）
 // ============================================================================
 function doGet() {
   const initialState = JSON.stringify(getAppState())
     .replace(/</g, '\\u003c')
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
-  return HtmlService.createHtmlOutput(APP_HTML.replace('__INITIAL_STATE__', initialState))
+  return HtmlService.createHtmlOutput(
+    APP_HTML.replace('__INITIAL_STATE__', initialState).replace('__APP_VERSION__', APP_VERSION)
+  )
     .setTitle('ドローン運航記録')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
 }
@@ -78,19 +82,24 @@ function doGet() {
 function spreadsheet_() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
 function now_() { return new Date(); }
 function format_(value, pattern) { return Utilities.formatDate(new Date(value), TZ, pattern); }
-function documentProperties_() { return PropertiesService.getScriptProperties(); }
+function dateFromSheetName_(sheetName) {
+  const match = String(sheetName || '').match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/);
+  if (!match) throw new Error('日付シート名を日付へ変換できません：' + sheetName);
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+function sheetSequence_(sheetName) {
+  const match = String(sheetName || '').match(/_(\d+)$/);
+  return match ? Number(match[1]) : 1;
+}
+function commitCache_() { return CacheService.getScriptCache(); }
 function sheetUrl_(spreadsheet, sheet) {
   if (!sheet) return '';
   return spreadsheet.getUrl() + '#gid=' + sheet.getSheetId();
 }
 
-function readSession_() {
-  const text = documentProperties_().getProperty(SESSION_KEY);
-  return text ? JSON.parse(text) : null;
-}
-function writeSession_(session) { documentProperties_().setProperty(SESSION_KEY, JSON.stringify(session)); }
-function clearSession_() { documentProperties_().deleteProperty(SESSION_KEY); }
-
+function trackedSetValue_(range, value) { return range.setValue(value); }
+function trackedSetValues_(range, values) { return range.setValues(values); }
+function trackedSetNumberFormat_(range, format) { return range.setNumberFormat(format); }
 function required_(value, label) {
   if (value == null || String(value).trim() === '') throw new Error(label + 'は必須です。');
 }
@@ -136,13 +145,14 @@ function validateOperationSelection_(input) {
 }
 
 function locked_(work) {
+  if (LOCK_DEPTH > 0) return work();
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
-  try { return work(); } finally { lock.releaseLock(); }
+  LOCK_DEPTH++;
+  try { return work(); } finally { LOCK_DEPTH--; lock.releaseLock(); }
 }
 
 function getAppState() {
-  const session = readSession_();
   const today = format_(now_(), 'yyyy.M.d');
   const ss = spreadsheet_();
   const todaySheet = ss.getSheetByName(today);
@@ -150,7 +160,7 @@ function getAppState() {
   const totalLitePlus = aircraftTotalMinutes_('EVO Lite+');
 
   return {
-    active: !!session,
+    active: false,
     today: today,
     hasTodaySheet: !!todaySheet,
     todaySheetUrl: todaySheet ? sheetUrl_(ss, todaySheet) : '',
@@ -160,388 +170,138 @@ function getAppState() {
       'EVO Lite': { minutes: totalLite, label: minutesLabel_(totalLite) },
       'EVO Lite+': { minutes: totalLitePlus, label: minutesLabel_(totalLitePlus) }
     },
-    session: session
+    session: null
   };
-}
-
-function resetSession() {
-  return locked_(function() {
-    clearSession_();
-    return getAppState();
-  });
-}
-
-function startAircraft(input) {
-  return locked_(function() {
-    const existing = readSession_();
-    if (existing) {
-      const phaseNames = {
-        'PRE': '飛行前点検の途中',
-        'READY': '離陸待機中',
-        'FLYING': '飛行中（着陸未記録）',
-        'AFTER_LANDING': '着陸後（次フライト選択中）',
-        'POST_ALL': '飛行後点検中'
-      };
-      const phaseStr = phaseNames[existing.phase] || existing.phase;
-      throw new Error('SESSION_EXISTS::' + JSON.stringify({
-        model: existing.model,
-        dateSheet: existing.dateSheet,
-        blockNo: existing.blockNo,
-        phase: existing.phase,
-        phaseName: phaseStr,
-        route: existing.route,
-        pilot: existing.pilot
-      }));
-    }
-    required_(input.model, '機体');
-    if (!MODELS[input.model]) throw new Error('機体の選択を確認してください。');
-    required_(input.route, '飛行経路・場所');
-    required_(input.inspectionLocation, '点検実施場所');
-    required_(input.pilot, '操縦者（機長）氏名');
-    const selection = validateOperationSelection_(input);
-    const ss = spreadsheet_();
-    const sheet = getOrCreateDateSheet_(ss, now_(), !!input.forceNewLocation);
-    const blockNo = chooseAvailableBlock_(sheet);
-    if (!blockNo) throw new Error('本日のNo.1 / No.2は両方使用済みです。');
-
-    let methodText = selection.methods.join(' / ');
-    if (input.permitNo) {
-      methodText += ' [許可承認: ' + String(input.permitNo).trim() + ']';
-    }
-
-    // 気象情報（天候・風速・風向）のフォーマット（飛行目的末尾に結合・A4レイアウト厳守）
-    let weatherParts = [];
-    if (input.weather) weatherParts.push(String(input.weather).trim());
-    if (input.windSpeed) {
-      let ws = String(input.windSpeed).trim();
-      let wd = input.windDir ? String(input.windDir).trim() : '';
-      weatherParts.push('風速' + ws + (wd ? ' ' + wd : ''));
-    } else if (input.windDir) {
-      weatherParts.push('風向: ' + String(input.windDir).trim());
-    }
-    let finalPurpose = selection.purpose;
-    if (weatherParts.length) {
-      finalPurpose += ' [気象: ' + weatherParts.join(' / ') + ']';
-    }
-
-    const otherModel = input.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
-    const aircrafts = {};
-    aircrafts[input.model] = {
-      model: input.model,
-      blockNo: blockNo,
-      used: true,
-      preflightDone: false,
-      flightCount: 0,
-      totalMinutes: 0,
-      preflightChecks: null
-    };
-    aircrafts[otherModel] = {
-      model: otherModel,
-      blockNo: 0,
-      used: false,
-      preflightDone: false,
-      flightCount: 0,
-      totalMinutes: 0,
-      preflightChecks: null
-    };
-
-    const session = {
-      dateSheet: sheet.getName(),
-      currentModel: input.model,
-      model: input.model,
-      purpose: finalPurpose,
-      route: input.route,
-      method: methodText,
-      category: selection.category,
-      permitNo: input.permitNo || '',
-      inspectionLocation: input.inspectionLocation,
-      pilot: input.pilot,
-      assistant: input.assistant || '',
-      cert: input.cert || '',
-      phase: 'PRE',
-      blockNo: blockNo,
-      flightIndex: 0,
-      currentRow: 0,
-      currentBattery: 0,
-      startedAt: '',
-      totalMinutes: 0,
-      preflightChecks: null,
-      aircrafts: aircrafts
-    };
-    writeHeaderFields_(sheet, session, blockNo);
-    writeSession_(session);
-    return getAppState();
-  });
-}
-
-function savePreflight(input) {
-  return locked_(function() {
-    const session = activeSession_('飛行前点検');
-    if (session.phase !== 'PRE') throw new Error('飛行前点検は完了済みです。');
-    const checks = input.checks || {};
-    const missing = PRE_CHECK_NAMES.filter(name => !checks[name]);
-    if (missing.length) throw new Error('未点検の項目があります：' + missing.join('、'));
-    
-    const abnormal = PRE_CHECK_NAMES.some(name => checks[name] !== '正常');
-    const ss = spreadsheet_();
-    const sheet = ss.getSheetByName(session.dateSheet);
-    writeCheckResults_(sheet, checks, '飛行前点検', session.blockNo);
-
-    if (session.aircrafts && session.aircrafts[session.currentModel]) {
-      session.aircrafts[session.currentModel].preflightChecks = checks;
-      session.aircrafts[session.currentModel].preflightDone = true;
-    }
-    session.preflightChecks = checks;
-
-    if (abnormal) {
-      required_(input.abnormalDetail, '異常がある場合の特記事項');
-      setAfterLabelInBlock_(sheet, session.blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.abnormalDetail);
-      session.abnormalPreflight = true;
-      session.phase = 'PRE_ABNORMAL';
-      writeSession_(session);
-      throw new Error('飛行前点検で異常が記録されました。教則・法令に基づき点検整備を完了するまで飛行開始できません。');
-    }
-
-    session.phase = 'READY';
-    writeSession_(session);
-    return getAppState();
-  });
-}
-
-function startFlight(input) {
-  return locked_(function() {
-    const session = activeSession_('飛行開始');
-    if (session.phase !== 'READY') throw new Error('飛行開始できる状態ではありません。');
-    const battery = Number(input.battery);
-    if (!Number.isInteger(battery) || battery < 1 || battery > 7) throw new Error('使用バッテリーを選択してください。');
-    required_(input.takeoffLocation, '離陸場所');
-    const sheet = spreadsheet_().getSheetByName(session.dateSheet);
-    const slot = nextFlightSlot_(sheet, session.blockNo);
-    if (slot.blockNo !== session.blockNo) {
-      writeHeaderFields_(sheet, session, slot.blockNo);
-      writeCheckResults_(sheet, session.preflightChecks || {}, '飛行前点検', slot.blockNo);
-    }
-    const startedAt = now_();
-    const takeoffTimeStr = format_(startedAt, 'HH:mm');
-    writeFlightFields_(sheet, slot, {
-      '使用バッテリー': 'BAT_' + battery,
-      '離陸場所': input.takeoffLocation,
-      '離陸時刻': takeoffTimeStr
-    });
-    session.phase = 'FLYING';
-    session.blockNo = slot.blockNo;
-    session.flightIndex = slot.index;
-    session.currentRow = slot.row;
-    session.currentBattery = battery;
-    session.startedAt = startedAt.toISOString();
-
-    if (session.aircrafts && session.aircrafts[session.currentModel]) {
-      session.aircrafts[session.currentModel].flightCount = slot.index;
-    }
-
-    writeSession_(session);
-    return getAppState();
-  });
-}
-
-function landFlight(input) {
-  return locked_(function() {
-    const session = activeSession_('着陸記録');
-    if (session.phase !== 'FLYING') throw new Error('飛行中の記録がありません。');
-    required_(input.landingLocation, '着陸場所');
-    const landingTime = now_();
-    const landingTimeStr = format_(landingTime, 'HH:mm');
-    const minutes = input.actualMinutes === '' || input.actualMinutes == null
-      ? Math.max(1, Math.round((landingTime - new Date(session.startedAt)) / 60000))
-      : Number(input.actualMinutes);
-    if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('実飛行時間を確認してください。');
-    const sheet = spreadsheet_().getSheetByName(session.dateSheet);
-    const block = flightBlocks_(sheet).filter(item => item.blockNo === session.blockNo)[0];
-    const totalMinutes = calculateAccumulatedTotalMinutes_(sheet, block, session.currentRow, session.model, minutes);
-    
-    writeFlightFields_(sheet, { blockNo: session.blockNo, row: session.currentRow }, {
-      '着陸場所': input.landingLocation,
-      '着陸時刻': landingTimeStr,
-      '飛行時間': formatHoursMinutes_(minutes),
-      '総飛行時間': formatHoursMinutes_(totalMinutes),
-      '安全に影響した事項': input.safetyIssue ? (input.safetyDetail || 'あり') : 'なし',
-      'バッテリー異常・所感': input.batteryNote || ''
-    });
-    appendBatteryHistory_(session, minutes, input);
-    session.phase = 'AFTER_LANDING';
-    session.totalMinutes += minutes;
-    session.currentBattery = 0;
-    session.startedAt = '';
-
-    if (session.aircrafts && session.aircrafts[session.currentModel]) {
-      session.aircrafts[session.currentModel].totalMinutes += minutes;
-    }
-
-    writeSession_(session);
-    return getAppState();
-  });
-}
-
-function continueFlight() {
-  return locked_(function() {
-    const session = activeSession_('継続飛行');
-    if (session.phase !== 'AFTER_LANDING') throw new Error('継続飛行できる状態ではありません。');
-    session.phase = 'READY';
-    writeSession_(session);
-    return getAppState();
-  });
-}
-
-function switchAircraft(input) {
-  return locked_(function() {
-    const session = activeSession_('機体交代');
-    if (session.phase !== 'AFTER_LANDING' && session.phase !== 'READY') {
-      throw new Error('飛行中または点検中は機体を交代できません。');
-    }
-    const currentModel = session.currentModel || session.model;
-    const targetModel = (input && input.targetModel) ? input.targetModel : (currentModel === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite');
-    if (!MODELS[targetModel]) throw new Error('対象機体が見つかりません：' + targetModel);
-    if (targetModel === currentModel) return getAppState();
-
-    if (!session.aircrafts) session.aircrafts = {};
-    let targetAc = session.aircrafts[targetModel];
-    const sheet = spreadsheet_().getSheetByName(session.dateSheet);
-
-    if (!targetAc || !targetAc.blockNo) {
-      const newBlock = chooseAvailableBlock_(sheet);
-      if (!newBlock) throw new Error('本日のシート（No.1/No.2）に空きブロックがありません。');
-      targetAc = {
-        model: targetModel,
-        blockNo: newBlock,
-        used: true,
-        preflightDone: false,
-        flightCount: 0,
-        totalMinutes: 0,
-        preflightChecks: null
-      };
-      session.aircrafts[targetModel] = targetAc;
-      const tempSessionForHeader = Object.assign({}, session, { model: targetModel });
-      writeHeaderFields_(sheet, tempSessionForHeader, newBlock);
-    } else {
-      targetAc.used = true;
-    }
-
-    session.currentModel = targetModel;
-    session.model = targetModel;
-    session.blockNo = targetAc.blockNo;
-    session.totalMinutes = targetAc.totalMinutes;
-    session.flightIndex = targetAc.flightCount;
-
-    if (!targetAc.preflightDone) {
-      session.phase = 'PRE';
-      session.preflightChecks = null;
-    } else {
-      session.phase = 'READY';
-      session.preflightChecks = targetAc.preflightChecks;
-    }
-
-    writeSession_(session);
-    return getAppState();
-  });
-}
-
-function startPostflight() {
-  return locked_(function() {
-    const session = activeSession_('飛行後点検開始');
-    session.phase = 'POST_ALL';
-    writeSession_(session);
-    return getAppState();
-  });
 }
 
 function finishAircraft(input) {
   return locked_(function() {
-    const session = activeSession_('飛行後点検');
-    const sheet = spreadsheet_().getSheetByName(session.dateSheet);
+    const session = input && input.session;
+    const postflight = input && input.postflight;
+    if (!session || !postflight) throw new Error('確定する運航データがありません。');
+    const commitKey = session.draftId ? COMMIT_RESULT_PREFIX + session.draftId : '';
+    const previousResult = commitKey ? commitCache_().get(commitKey) : '';
+    if (previousResult) return JSON.parse(previousResult);
+    required_(session.model, '機体');
+    required_(session.route, '飛行経路・場所');
+    required_(session.pilot, '操縦者');
+    required_(postflight.inspectionLocation, '飛行後の点検実施場所');
+    required_(postflight.confirmer, '飛行後の点検確認者');
 
-    const aircraftDataMap = input.aircrafts || {};
-    const usedModels = Object.keys(session.aircrafts || {}).filter(function(m) {
-      return session.aircrafts[m] && session.aircrafts[m].used;
+    const ss = spreadsheet_();
+    const operationDate = session.operationDate
+      ? dateFromSheetName_(session.operationDate)
+      : now_();
+    let sheet = getOrCreateDateSheet_(ss, operationDate, !!session.forceNewLocation);
+    const usedModels = Object.keys(session.aircrafts || {}).filter(function(model) {
+      return session.aircrafts[model] && session.aircrafts[model].used;
     });
     const modelsToProcess = usedModels.length ? usedModels : [session.model];
+    if (modelsToProcess.length > 2) throw new Error('1回の運航で記録できる機体は2機までです。');
+    if (modelsToProcess.some(function(model) {
+      const count = (session.flights || []).filter(function(flight) { return flight.model === model; }).length;
+      return count > 7;
+    })) throw new Error('1機あたりの飛行記録は7回までです。');
+    modelsToProcess.forEach(function(model) {
+      const ac = session.aircrafts && session.aircrafts[model];
+      const missingPre = PRE_CHECK_NAMES.filter(function(name) {
+        return !ac || !ac.preflightChecks || !ac.preflightChecks[name];
+      });
+      if (missingPre.length) throw new Error(model + 'の飛行前点検が未完了です。');
+      const post = postflight.aircrafts && postflight.aircrafts[model];
+      const missingPost = POST_CHECK_NAMES.filter(function(name) {
+        return !post || !post.checks || !post.checks[name];
+      });
+      if (missingPost.length) throw new Error(model + 'の飛行後点検が未完了です。');
+    });
+    (session.flights || []).forEach(function(flight) {
+      if (!MODELS[flight.model]) throw new Error('飛行記録の機体を確認してください。');
+      if (!Number.isInteger(Number(flight.battery)) || Number(flight.battery) < 1 || Number(flight.battery) > 7) {
+        throw new Error('飛行記録のバッテリーを確認してください。');
+      }
+      required_(flight.takeoffLocation, '離陸場所');
+      required_(flight.landingLocation, '着陸場所');
+      required_(flight.takeoffAt, '離陸時刻');
+      required_(flight.landingAt, '着陸時刻');
+    });
+
+    if (modelsToProcess.length > (blockUsed_(sheet, 1) ? 0 : 1) + (blockUsed_(sheet, 2) ? 0 : 1)) {
+      sheet = getOrCreateDateSheet_(ss, operationDate, true);
+    }
+
+    const aircraftDataMap = postflight.aircrafts || {};
+    const blockByModel = {};
+    modelsToProcess.forEach(function(model) {
+      const blockNo = chooseAvailableBlock_(sheet);
+      if (!blockNo) throw new Error('運航記録を書き込める空き枠がありません。');
+      blockByModel[model] = blockNo;
+      const modelSession = Object.assign({}, session, {
+        model: model,
+        dateSheet: sheet.getName(),
+        blockNo: blockNo
+      });
+      writeHeaderFields_(sheet, modelSession, blockNo);
+      const ac = session.aircrafts && session.aircrafts[model];
+      writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', blockNo);
+    });
+
+    const cumulativeByModel = {};
+    modelsToProcess.forEach(function(model) { cumulativeByModel[model] = aircraftTotalMinutes_(model); });
+    const nextRowByModel = {};
+    modelsToProcess.forEach(function(model) {
+      const block = flightBlocks_(sheet).filter(function(item) { return item.blockNo === blockByModel[model]; })[0];
+      nextRowByModel[model] = block.startRow;
+    });
+
+    // 通信は最後に1回だけ行うが、日付シートには各飛行を使用した分だけ1行ずつ残す。
+    // 同じ内容をBAT管理シートにも個別保存し、飛行記録とバッテリー履歴を両立する。
+    (session.flights || []).forEach(function(flight) {
+      const model = flight.model;
+      const blockNo = blockByModel[model];
+      if (!blockNo) return;
+      const minutes = Number(flight.actualMinutes) || 0;
+      if (minutes <= 0) throw new Error('実飛行時間を確認してください。');
+      cumulativeByModel[model] += minutes;
+      const row = nextRowByModel[model]++;
+      writeFlightFields_(sheet, { blockNo: blockNo, row: row }, {
+        '使用バッテリー': 'BAT_' + Number(flight.battery),
+        '離陸場所': flight.takeoffLocation,
+        '着陸場所': flight.landingLocation,
+        '離陸時刻': format_(flight.takeoffAt, 'HH:mm'),
+        '着陸時刻': format_(flight.landingAt, 'HH:mm'),
+        '飛行時間': formatHoursMinutes_(minutes),
+        '総飛行時間': formatHoursMinutes_(cumulativeByModel[model]),
+        '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
+        'バッテリー異常・所感': flight.batteryNote || ''
+      });
+      appendBatteryHistory_({
+        dateSheet: sheet.getName(), model: model, purpose: session.purpose,
+        route: session.route, currentBattery: Number(flight.battery)
+      }, minutes, { cycle: flight.cycle || '', batteryNote: flight.batteryNote || '' });
+    });
 
     modelsToProcess.forEach(function(model) {
-      const ac = (session.aircrafts && session.aircrafts[model]) ? session.aircrafts[model] : { blockNo: session.blockNo };
-      const blockNo = ac.blockNo || session.blockNo;
-      if (!blockNo) return;
-
-      const acInput = aircraftDataMap[model] || input;
-      const checks = acInput.checks || input.checks || {};
+      const blockNo = blockByModel[model];
+      const acInput = aircraftDataMap[model] || postflight;
+      const checks = acInput.checks || postflight.checks || {};
       const abnormal = POST_CHECK_NAMES.some(function(name) { return checks[name] !== '正常'; });
 
       writeCheckResults_(sheet, checks, '飛行後点検', blockNo);
       writeOptionalFields_(sheet, {
-        inspectionLocation: input.inspectionLocation || session.inspectionLocation,
+        inspectionLocation: postflight.inspectionLocation || session.inspectionLocation,
         defectLocation: acInput.defectLocation || '',
         defectDetail: acInput.defectDetail || '',
         actionDetail: acInput.actionDetail || '',
-        confirmer: input.confirmer || session.pilot
+        confirmer: postflight.confirmer || session.pilot
       }, blockNo, abnormal);
     });
-
-    clearSession_();
-    return getAppState();
+    const completedSheetName = sheet.getName();
+    const appState = getAppState();
+    appState.lastCompletedSheet = completedSheetName;
+    appState.lastCompletedSheetUrl = sheetUrl_(spreadsheet_(), sheet);
+    if (commitKey) commitCache_().put(commitKey, JSON.stringify(appState), 21600);
+    return appState;
   });
-}
-
-// ----------------------------------------------------
-// オフライン同期待ちキューの一括反映（電波復帰時に一括書き込み）
-// ----------------------------------------------------
-function syncOfflineQueue(queueItems) {
-  return locked_(function() {
-    if (!Array.isArray(queueItems) || !queueItems.length) {
-      return { success: true, processed: 0, appState: getAppState() };
-    }
-    
-    let processedCount = 0;
-    for (let i = 0; i < queueItems.length; i++) {
-      const item = queueItems[i];
-      const action = item.action;
-      const payload = item.payload || {};
-      
-      try {
-        if (action === 'startAircraft') {
-          const existing = readSession_();
-          if (!existing) startAircraft(payload);
-        } else if (action === 'savePreflight') {
-          savePreflight(payload);
-        } else if (action === 'startFlight') {
-          startFlight(payload);
-        } else if (action === 'landFlight') {
-          landFlight(payload);
-        } else if (action === 'continueFlight') {
-          continueFlight();
-        } else if (action === 'switchAircraft') {
-          switchAircraft(payload);
-        } else if (action === 'startPostflight') {
-          startPostflight();
-        } else if (action === 'finishAircraft') {
-          finishAircraft(payload);
-        }
-        processedCount++;
-      } catch (e) {
-        console.error('Offline sync error at item ' + i + ' (' + action + '): ' + e.message);
-      }
-    }
-    
-    return {
-      success: true,
-      processed: processedCount,
-      appState: getAppState()
-    };
-  });
-}
-
-function cancelCurrentSession() { clearSession_(); return getAppState(); }
-function activeSession_(action) {
-  const session = readSession_();
-  if (!session) throw new Error(action + 'のセッションがありません。');
-  return session;
 }
 
 function getOrCreateDateSheet_(spreadsheet, date, forceNew) {
@@ -618,7 +378,7 @@ function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
   const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
   const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
   if (targetCol > block_(blockNo).endCol) return false;
-  sheet.getRange(cell.row, targetCol).setValue(value == null ? '' : value);
+  trackedSetValue_(sheet.getRange(cell.row, targetCol), value == null ? '' : value);
   return true;
 }
 
@@ -629,15 +389,14 @@ function writeHeaderFields_(sheet, session, blockNo) {
     const current = String(cell.getDisplayValue() || '').replace(/^[□☑✓]\s*/, '').trim();
     if (current.indexOf('Autel Robotics Co., Ltd.') >= 0) {
       const selected = current.indexOf('/ ' + session.model + ' /') >= 0;
-      cell.setValue((selected ? '☑ ' : '□ ') + current);
+      trackedSetValue_(cell, (selected ? '☑ ' : '□ ') + current);
     }
   });
 
   const dateCell = findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true);
   if (dateCell) {
-    const date = new Date(String(session.dateSheet).replace(/\./g, '-'));
-    sheet.getRange(dateCell.row, dateCell.col)
-      .setValue('飛行・点検実施年月日：' + format_(date, 'yyyy年M月d日'));
+    const date = dateFromSheetName_(session.dateSheet);
+    trackedSetValue_(sheet.getRange(dateCell.row, dateCell.col), '飛行・点検実施年月日：' + format_(date, 'yyyy年M月d日'));
   }
   setAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
   setAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
@@ -651,7 +410,7 @@ function writeHeaderFields_(sheet, session, blockNo) {
 
   const certLabel = findInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], false);
   if (certLabel && String(sheet.getRange(certLabel.row, certLabel.col).getDisplayValue()).trim() === '技能証明番号') {
-    sheet.getRange(certLabel.row, certLabel.col).setValue('技能証明書番号');
+    trackedSetValue_(sheet.getRange(certLabel.row, certLabel.col), '技能証明書番号');
   }
   setAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
 }
@@ -660,8 +419,9 @@ function writeCheckResults_(sheet, checks, section, blockNo) {
   const names = section === '飛行前点検' ? PRE_CHECK_NAMES : POST_CHECK_NAMES;
   const checkCol = block_(blockNo).startCol + (section === '飛行前点検' ? 6 : 12);
   names.forEach(name => {
-    const label = findInBlock_(sheet, blockNo, [name], false);
-    if (label) sheet.getRange(label.row, checkCol).setValue(checks[name] === '正常' ? '☑' : '□');
+    const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）'] : [name];
+    const label = findInBlock_(sheet, blockNo, labels, false);
+    if (label) trackedSetValue_(sheet.getRange(label.row, checkCol), checks[name] === '正常' ? '☑' : '□');
   });
 }
 
@@ -679,25 +439,6 @@ function flightColumn_(sheet, block, labels) {
   return labelColumn_(sheet, block.headerRow, block.startCol, block.endCol, labels);
 }
 
-function nextFlightSlot_(sheet, preferredBlockNo) {
-  const values = sheetValues_(sheet);
-  const allBlocks = flightBlocks_(sheet);
-  const order = Number(preferredBlockNo) === 2 ? [2] : [1, 2];
-  for (const blockNo of order) {
-    const block = allBlocks.filter(item => item.blockNo === blockNo)[0];
-    if (!block) continue;
-    if (blockNo !== Number(preferredBlockNo) && blockUsed_(sheet, blockNo)) continue;
-    const batteryCol = flightColumn_(sheet, block, ['使用バッテリー']);
-    if (!batteryCol) continue;
-    for (let row = block.startRow; row <= block.endRow; row++) {
-      if (!String((values[row - 1] || [])[batteryCol - 1] || '').trim()) {
-        return { blockNo: block.blockNo, row: row, index: row - block.startRow + 1 };
-      }
-    }
-  }
-  throw new Error('No.1 / No.2 の飛行記録欄がすべて使用済みです。');
-}
-
 function writeFlightFields_(sheet, slot, fields) {
   const block = flightBlocks_(sheet).filter(item => item.blockNo === slot.blockNo)[0];
   if (!block) throw new Error('飛行記録ブロックを確認できません。');
@@ -713,9 +454,10 @@ function writeFlightFields_(sheet, slot, fields) {
     if (col) {
       const cell = sheet.getRange(slot.row, col);
       if (['離陸時刻', '着陸時刻', '飛行時間', '総飛行時間'].indexOf(key) >= 0) {
-        cell.setNumberFormat('@').setValue(String(fields[key]));
+        trackedSetNumberFormat_(cell, '@');
+        trackedSetValue_(cell, String(fields[key]));
       } else {
-        cell.setValue(fields[key]);
+        trackedSetValue_(cell, fields[key]);
       }
     }
   });
@@ -728,16 +470,16 @@ function writeOptionalFields_(sheet, input, blockNo, abnormal) {
 
   const normalCell = findInBlock_(sheet, blockNo, ['□ 異常なし','☑ 異常なし'], false);
   const defectCell = findInBlock_(sheet, blockNo, ['□ 不具合あり','☑ 不具合あり'], false);
-  if (normalCell) sheet.getRange(normalCell.row, normalCell.col).setValue(abnormal ? '□ 異常なし' : '☑ 異常なし');
-  if (defectCell) sheet.getRange(defectCell.row, defectCell.col).setValue(abnormal ? '☑ 不具合あり' : '□ 不具合あり');
+  if (normalCell) trackedSetValue_(sheet.getRange(normalCell.row, normalCell.col), abnormal ? '□ 異常なし' : '☑ 異常なし');
+  if (defectCell) trackedSetValue_(sheet.getRange(defectCell.row, defectCell.col), abnormal ? '☑ 不具合あり' : '□ 不具合あり');
 
   if (abnormal || String(input.actionDetail || '').trim()) {
     const offset = block_(blockNo).startCol - 3;
-    sheet.getRange(44, 4 + offset).setValue(new Date());
-    sheet.getRange(44, 6 + offset).setValue(input.defectDetail || input.defectLocation || '');
-    if (String(input.actionDetail || '').trim()) sheet.getRange(44, 10 + offset).setValue(new Date());
-    sheet.getRange(44, 12 + offset).setValue(input.actionDetail || '');
-    sheet.getRange(44, 15 + offset).setValue(input.confirmer || '');
+    trackedSetValue_(sheet.getRange(44, 4 + offset), new Date());
+    trackedSetValue_(sheet.getRange(44, 6 + offset), input.defectDetail || input.defectLocation || '');
+    if (String(input.actionDetail || '').trim()) trackedSetValue_(sheet.getRange(44, 10 + offset), new Date());
+    trackedSetValue_(sheet.getRange(44, 12 + offset), input.actionDetail || '');
+    trackedSetValue_(sheet.getRange(44, 15 + offset), input.confirmer || '');
   }
 }
 
@@ -761,34 +503,6 @@ function formatHoursMinutes_(minutes) {
   return String(hours).padStart(2, '0') + ':' + String(mins).padStart(2, '0');
 }
 
-function parseMinutesFromLabel_(label) {
-  if (!label) return 0;
-  const timeMatch = String(label).trim().match(/^(\d+):(\d+)$/);
-  if (timeMatch) {
-    return Number(timeMatch[1]) * 60 + Number(timeMatch[2]);
-  }
-  let total = 0;
-  const hMatch = String(label).match(/(\d+)時間/);
-  if (hMatch) total += Number(hMatch[1]) * 60;
-  const mMatch = String(label).match(/(\d+)分/);
-  if (mMatch) total += Number(mMatch[1]);
-  return total;
-}
-
-function calculateAccumulatedTotalMinutes_(sheet, block, currentRow, currentModel, minutes) {
-  const totalCol = flightColumn_(sheet, block, ['総飛行時間']);
-  if (currentRow > block.startRow && totalCol) {
-    const prevValue = String(sheet.getRange(currentRow - 1, totalCol).getDisplayValue() || '').trim();
-    if (prevValue) {
-      const parsed = parseMinutesFromLabel_(prevValue);
-      if (parsed > 0) {
-        return parsed + minutes;
-      }
-    }
-  }
-  return aircraftTotalMinutes_(currentModel) + minutes;
-}
-
 function minutesLabel_(minutes) {
   const value = Math.max(0, Math.round(Number(minutes) || 0));
   return Math.floor(value / 60) + '時間' + (value % 60) + '分';
@@ -801,10 +515,11 @@ function appendBatteryHistory_(session, minutes, input) {
   let row = BATTERY_FIRST_ROW;
   while (row <= BATTERY_LAST_ROW && String((values[row - 1] || [])[0] || '').trim()) row++;
   if (row > BATTERY_LAST_ROW) throw new Error(sheet.getName() + ' の履歴入力欄が上限に達しています。');
-  sheet.getRange(row, 1, 1, 8).setValues([[
-    new Date(session.dateSheet.replace(/\./g, '-')), session.model, session.purpose, minutes,
+  trackedSetValues_(sheet.getRange(row, 1, 1, 8), [[
+    dateFromSheetName_(session.dateSheet), session.model, session.purpose, minutes,
     input.cycle || '', input.batteryNote || '', session.route, ''
   ]]);
+  return { sheetName: sheet.getName(), row: row };
 }
 
 // ----------------------------------------------------
@@ -849,7 +564,7 @@ function createMaintenanceTemplateSheet() {
   sheet.setRowHeight(2, 40);
 
   sheet.getRange('A3:H3').merge()
-    .setValue('※航空法第132条の88及び「無人航空機の飛行日誌の取扱要領」準拠')
+    .setValue('※航空法第132条の89及び「無人航空機の飛行日誌の取扱要領」に基づく記録様式')
     .setFontSize(9)
     .setFontColor('#64748b')
     .setHorizontalAlignment('right');
@@ -1008,23 +723,35 @@ function correctSavedRecord(input) {
     required_(input.target, '訂正対象');
     required_(input.field, '訂正項目名');
     required_(input.reason, '訂正理由');
-    required_(input.newValue, '新しい値');
+    required_(input.operator, '操作者');
+    if (!Object.prototype.hasOwnProperty.call(input, 'newValue')) throw new Error('新しい値が指定されていません。');
 
     const ss = spreadsheet_();
     if (input.target === 'flight') {
+      if (!/^\d{4}\.\d{1,2}\.\d{1,2}(?:_\d+)?$/.test(String(input.dateSheet || ''))) {
+        throw new Error('訂正対象の日付シート名を確認してください。');
+      }
       const sheet = ss.getSheetByName(input.dateSheet);
       if (!sheet) throw new Error('シート ' + input.dateSheet + ' が見つかりません。');
       const row = Number(input.row);
       const col = Number(input.col);
+      if (!Number.isInteger(row) || !Number.isInteger(col) || row < 1 || col < 1 || row > sheet.getMaxRows() || col > sheet.getMaxColumns()) {
+        throw new Error('訂正対象の行番号・列番号を確認してください。');
+      }
       const cell = sheet.getRange(row, col);
       const before = cell.getDisplayValue();
       cell.setValue(input.newValue);
       logCorrection_(ss, '飛行記録', input.dateSheet + ' R' + row + 'C' + col, input.field, before, input.newValue, input.reason, input.operator);
     } else if (input.target === 'battery') {
+      const batteryNo = Number(input.batteryNo);
+      if (!Number.isInteger(batteryNo) || batteryNo < 1 || batteryNo > 7) throw new Error('バッテリー番号を確認してください。');
       const sheet = ss.getSheetByName(BATTERY_SHEET_PREFIX + input.batteryNo);
       if (!sheet) throw new Error('バッテリーシートが見つかりません。');
       const row = Number(input.row);
       const col = Number(input.col);
+      if (!Number.isInteger(row) || !Number.isInteger(col) || row < BATTERY_FIRST_ROW || row > BATTERY_LAST_ROW || col < 1 || col > sheet.getMaxColumns()) {
+        throw new Error('訂正対象の行番号・列番号を確認してください。');
+      }
       const cell = sheet.getRange(row, col);
       const before = cell.getDisplayValue();
       cell.setValue(input.newValue);
@@ -1067,7 +794,7 @@ function searchFlightLogs(query) {
 
   sheets.forEach(sh => {
     const name = sh.getName();
-    if (/^\d{4}\.\d{1,2}\.\d{1,2}$/.test(name)) {
+    if (/^\d{4}\.\d{1,2}\.\d{1,2}(?:_\d+)?$/.test(name)) {
       if (!q || name.indexOf(q) >= 0) {
         results.push({
           date: name,
@@ -1076,7 +803,10 @@ function searchFlightLogs(query) {
       }
     }
   });
-  return results.sort((a, b) => b.date.localeCompare(a.date));
+  return results.sort((a, b) => {
+    const dateDiff = dateFromSheetName_(b.date).getTime() - dateFromSheetName_(a.date).getTime();
+    return dateDiff || sheetSequence_(b.date) - sheetSequence_(a.date);
+  });
 }
 
 // ============================================================================
@@ -1238,6 +968,23 @@ const APP_HTML = String.raw`<!doctype html>
       display: inline-block;
     }
     .btn-sm { padding: 5px 9px; font-size: 12px; width: auto; margin: 0; display: inline-block; }
+    .global-back-btn {
+      position: sticky;
+      top: 8px;
+      z-index: 20;
+      width: 100%;
+      margin: 0 0 10px;
+      padding: 10px 12px;
+      border: 1px solid #94a3b8;
+      border-radius: 8px;
+      background: #fff;
+      color: #334155;
+      font-size: 14px;
+      font-weight: 700;
+      text-align: left;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+    }
     .check-list {
       display: grid;
       gap: 5px;
@@ -1258,6 +1005,34 @@ const APP_HTML = String.raw`<!doctype html>
       height: 19px;
       margin-right: 9px;
       accent-color: var(--primary);
+      flex: 0 0 auto;
+    }
+    .check-item-detailed {
+      align-items: flex-start;
+    }
+    .check-item-detailed input {
+      margin-top: 2px;
+    }
+    .check-copy {
+      display: grid;
+      grid-template-columns: minmax(120px, 165px) minmax(0, 1fr);
+      gap: 8px;
+      width: 100%;
+      line-height: 1.45;
+    }
+    .check-label {
+      font-weight: 700;
+      color: #1f2937;
+    }
+    .check-detail {
+      font-weight: 400;
+      color: #475569;
+    }
+    @media (max-width: 520px) {
+      .check-copy {
+        grid-template-columns: 1fr;
+        gap: 1px;
+      }
     }
     .status-box {
       background: #ebf8ff;
@@ -1395,7 +1170,7 @@ const APP_HTML = String.raw`<!doctype html>
       color: var(--primary);
       z-index: 9999;
     }
-    /* 気象チップ・オフラインバッジ追加 */
+    /* 気象チップ・通信状態表示 */
     .network-badge {
       display: inline-flex;
       align-items: center;
@@ -1407,30 +1182,6 @@ const APP_HTML = String.raw`<!doctype html>
     }
     .network-badge.online { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
     .network-badge.offline { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
-    .sync-badge {
-      display: inline-flex;
-      align-items: center;
-      padding: 3px 8px;
-      font-size: 11px;
-      font-weight: 700;
-      border-radius: 12px;
-      background: #fef3c7;
-      color: #92400e;
-      border: 1px solid #fde68a;
-      cursor: pointer;
-    }
-    .sync-banner {
-      background: #fffbeb;
-      border: 1px solid #fde68a;
-      border-radius: 8px;
-      padding: 10px 12px;
-      margin-bottom: 12px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 13px;
-      color: #92400e;
-    }
     .chip-group {
       display: flex;
       flex-wrap: wrap;
@@ -1476,25 +1227,18 @@ const APP_HTML = String.raw`<!doctype html>
           <h1 style="margin:0;">ドローン運航記録</h1>
           <span id="networkBadge" class="network-badge online">● オンライン</span>
         </div>
-        <div class="text-sm">EVO Lite / Lite+ プロ仕様・法令適合</div>
+        <div class="text-sm">EVO Lite / Lite+ 現場運用版 v__APP_VERSION__</div>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <span id="syncBadge" class="sync-badge" style="display:none;" onclick="triggerManualSync()">📦 未同期: <strong id="syncCount">0</strong>件</span>
         <span id="appStatusBadge" class="badge">確認中</span>
       </div>
     </header>
-    <div id="syncBanner" class="sync-banner" style="display:none;">
-      <div>
-        <strong>電波圏外で記録された未同期データがあります</strong>
-        <div style="font-size:11px;margin-top:2px;">電波が復帰したら「今すぐ同期」を押してスプレッドシートへ反映してください。</div>
-      </div>
-      <button type="button" class="btn btn-primary btn-sm" style="padding:4px 10px;font-size:12px;" onclick="triggerManualSync()">🔄 今すぐ同期</button>
-    </div>
-
+    <button type="button" id="globalBackButton" class="global-back-btn" onclick="goBackFromAnywhere()">← 一つ前の画面に戻る</button>
     <div class="nav-tabs" id="navTabs">
       <button class="nav-tab active" onclick="switchTab('flight')">✈ 運航記録</button>
       <button class="nav-tab" onclick="switchTab('maintenance')">🛠 点検整備（様式3）</button>
       <button class="nav-tab" onclick="switchTab('pdf')">📄 日誌PDF・検索</button>
+      <button class="nav-tab" onclick="switchTab('correction')">✏️ 記録訂正</button>
     </div>
 
     <div id="app">
@@ -1510,9 +1254,31 @@ const APP_HTML = String.raw`<!doctype html>
 // ============================================================================
 var STATE = __INITIAL_STATE__;
 var CURRENT_TAB = 'flight';
+var TAB_HISTORY = [];
+var LAST_COMPLETED_SHEET = '';
+var LAST_COMPLETED_SHEET_URL = '';
 
 var PRE_NAMES = ['機体全般','プロペラ・フレーム','通信系統','推進系統','電源系統','自動制御系統','バッテリー','操縦装置','灯火','カメラ','リモートID'];
 var POST_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
+var PRE_CHECK_DETAILS = {
+  '機体全般': { label: '機体全般', detail: '取付状態、ネジの緩み・脱落、登録記号の表示状態' },
+  'プロペラ・フレーム': { label: 'プロペラ・フレーム', detail: '損傷、亀裂、ゆがみがないこと' },
+  '通信系統': { label: '通信系統', detail: '機体とプロポの通信状態が正常であること' },
+  '推進系統': { label: '推進系統', detail: 'モーターの作動、異音などに異常がないこと' },
+  '電源系統': { label: '電源系統', detail: '機体側の電源系統が正常で、Autel Skyに電源警告がないこと' },
+  '自動制御系統': { label: '自動制御系統', detail: 'GPS／GNSS測位、ホームポイント、障害物回避、コンパス' },
+  'バッテリー': { label: 'バッテリー', detail: '選択したBAT番号、確実な装着・ロック、残量・温度・警告表示、プロポ残量' },
+  '操縦装置': { label: '操縦装置（プロポ）', detail: '外観、スティック、スイッチ、表示、Mode 2、手動操作介入' },
+  '灯火': { label: '灯火', detail: '点灯・表示が正常であること' },
+  'カメラ': { label: 'カメラ', detail: '映像表示・作動が正常であること' },
+  'リモートID': { label: 'リモートID', detail: '登録情報が設定され、送信機能が正常に作動していること' }
+};
+var POST_CHECK_DETAILS = {
+  '機体全般': { label: '機体全般', detail: 'ゴミ・汚れ等の付着、各機器の取付状態' },
+  'プロペラ・フレーム': { label: 'プロペラ・フレーム', detail: '損傷、亀裂、ゆがみがないこと' },
+  '発熱': { label: '発熱', detail: '機体本体・バッテリー・モーターに異常な発熱がないこと' },
+  'その他': { label: 'その他', detail: '飛行後に認めた異常・不具合がないこと' }
+};
 var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行'];
 var METHOD_NAMES = ['通常飛行（特定飛行なし）','屋内練習','空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SPECIAL_METHODS = ['空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
@@ -1574,222 +1340,242 @@ function selectWindDir(btn, val){
   if(el('windDirVal')) el('windDirVal').value = val;
 }
 
-// ----------------------------------------------------
-// 完全オフライン対応（山間部・海岸等の電波圏外キューイング）
-// ----------------------------------------------------
-var OFFLINE_QUEUE_KEY = 'EVO_OFFLINE_QUEUE_V1';
+var ACTIVE_OPERATION_DRAFT_KEY = 'EVO_LITE_ACTIVE_OPERATION_V2';
+var LOCAL_FLIGHT_ACTIONS = [
+  'startAircraft','savePreflight','confirmBatteryChange','startFlight','completeLanding','landFlight','continueFlight',
+  'switchAircraft','startPostflight','goBack','cancelCurrentSession'
+];
 
-function getOfflineQueue(){
-  try {
-    var raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch(e) { return []; }
+function cloneData(data){ return JSON.parse(JSON.stringify(data)); }
+
+function persistOperationDraft(){
+  try{
+    if(STATE && STATE.active && STATE.session){
+      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, JSON.stringify(STATE.session));
+    }else{
+      localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY);
+    }
+  }catch(e){}
 }
 
-function saveOfflineQueue(queue){
-  try {
-    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
-  } catch(e) {}
-  updateSyncBadge();
+function restoreOperationDraft(){
+  try{
+    var raw = localStorage.getItem(ACTIVE_OPERATION_DRAFT_KEY);
+    if(!raw) return;
+    var session = JSON.parse(raw);
+    if(session && session.phase){
+      // v2026.09.05.2 より前の途中データも、その場で捨てずに再開できるよう補完する。
+      // 旧 READY 画面では使用 BAT が pendingFlightInput に入っていたため、
+      // 新しい「飛行前点検時に BAT を確定する」項目へ引き継ぐ。
+      if(!session.selectedBattery && session.pendingFlightInput && session.pendingFlightInput.battery){
+        session.selectedBattery = Number(session.pendingFlightInput.battery) || 0;
+      }
+      if(typeof session.selectedBatteryCycle === 'undefined'){
+        session.selectedBatteryCycle = session.pendingFlightInput && session.pendingFlightInput.cycle
+          ? session.pendingFlightInput.cycle : '';
+      }
+      // BAT を特定できない旧 READY データは、入力を失わず飛行前点検へ戻して選び直す。
+      if(session.phase === 'READY' && !session.selectedBattery){
+        session.phase = 'PRE';
+      }
+      STATE.active = true;
+      STATE.session = session;
+      persistOperationDraft();
+    }
+  }catch(e){}
 }
 
-function addOfflineQueue(action, payload){
-  var q = getOfflineQueue();
-  q.push({
-    id: 'q_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
-    action: action,
-    payload: payload,
-    time: new Date().toISOString()
-  });
-  saveOfflineQueue(q);
-}
-
-function clearOfflineQueue(){
-  try {
-    localStorage.removeItem(OFFLINE_QUEUE_KEY);
-  } catch(e) {}
-  updateSyncBadge();
-}
-
-function updateSyncBadge(){
-  var q = getOfflineQueue();
-  var badge = el('syncBadge');
-  var banner = el('syncBanner');
-  var countEl = el('syncCount');
-  if(countEl) countEl.innerText = q.length;
-  if(badge) badge.style.display = q.length > 0 ? 'inline-flex' : 'none';
-  if(banner) banner.style.display = q.length > 0 ? 'flex' : 'none';
+function clearOperationDraft(){
+  try{ localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY); }catch(e){}
 }
 
 function updateNetworkStatus(){
-  var isOnline = navigator.onLine;
-  var b = el('networkBadge');
-  if(b){
-    b.className = 'network-badge ' + (isOnline ? 'online' : 'offline');
-    b.innerText = isOnline ? '● オンライン' : '● 圏外（オフライン保存）';
-  }
-  updateSyncBadge();
+  var online = navigator.onLine;
+  var badge = el('networkBadge');
+  if(!badge) return;
+  badge.className = 'network-badge ' + (online ? 'online' : 'offline');
+  badge.innerText = online ? '● オンライン' : '● 圏外（入力は端末に保持）';
 }
 
-window.addEventListener('online', function(){
-  updateNetworkStatus();
-  if(getOfflineQueue().length > 0){
-    triggerManualSync(true);
-  }
-});
+window.addEventListener('online', updateNetworkStatus);
 window.addEventListener('offline', updateNetworkStatus);
 
-function showToast(msg){
-  var t = el('toastBox');
-  if(!t){
-    t = document.createElement('div');
-    t.id = 'toastBox';
-    t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(30,41,59,0.95);color:#fff;padding:10px 18px;border-radius:24px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.25);transition:opacity 0.3s ease;pointer-events:none;';
-    document.body.appendChild(t);
-  }
-  t.innerText = msg;
-  t.style.opacity = '1';
-  setTimeout(function(){ if(t) t.style.opacity = '0'; }, 3500);
+function pushDraftHistory(session){
+  var history = Array.isArray(session.navigationHistory) ? session.navigationHistory.slice() : [];
+  var snapshot = cloneData(session);
+  delete snapshot.navigationHistory;
+  history.push(snapshot);
+  session.navigationHistory = history;
 }
 
-function triggerManualSync(isAuto){
-  var q = getOfflineQueue();
-  if(!q.length){
-    if(!isAuto) alert('未同期のオフラインデータはありません。');
-    return;
-  }
-  if(!navigator.onLine){
-    alert('現在は電波圏外です。電波の届く場所へ移動してから再度お試しください。');
-    return;
-  }
+function localFlightAction(name, payload, onSuccess){
+  payload = payload || {};
+  var session = STATE && STATE.session;
 
-  busy(true);
-  google.script.run
-    .withSuccessHandler(function(res){
-      busy(false);
-      clearOfflineQueue();
-      if(res && res.appState) STATE = res.appState;
-      alert('✅ スプレッドシートへの同期が完了しました！（' + (res.processed || q.length) + ' 件反映）');
-      render();
-    })
-    .withFailureHandler(function(err){
-      busy(false);
-      alert('同期中に通信エラーが発生しました。電波の良い場所で再度「今すぐ同期」を押してください：\n' + (err.message || err));
-    })
-    .syncOfflineQueue(q);
-}
-
-// 圏外時のローカル画面遷移シミュレーション（現場作業を1秒も止めない）
-function simulateOfflineTransition(action, payload, callback){
-  if(!STATE) STATE = { active: false, today: new Date().toISOString().slice(0, 10).replace(/-/g, '.') };
-
-  if(action === 'startAircraft'){
-    STATE.active = true;
-    var model = payload.model || 'EVO Lite';
+  if(name === 'startAircraft'){
+    var model = payload.model;
     var other = model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
-    var acs = {};
-    acs[model] = { model: model, blockNo: 1, used: true, preflightDone: false, flightCount: 0, totalMinutes: 0 };
-    acs[other] = { model: other, blockNo: 0, used: false, preflightDone: false, flightCount: 0, totalMinutes: 0 };
-
-    STATE.session = {
-      dateSheet: STATE.today,
-      model: model,
-      currentModel: model,
-      blockNo: 1,
-      phase: 'PRE',
-      purpose: payload.purpose || '空撮',
-      route: payload.route || '',
-      pilot: payload.pilot || '',
-      inspectionLocation: payload.inspectionLocation || '',
-      aircrafts: acs,
-      totalMinutes: 0,
-      flightIndex: 0
+    var weather = [];
+    if(payload.weather) weather.push(payload.weather);
+    if(payload.windSpeed) weather.push('風速' + payload.windSpeed + (payload.windDir ? ' ' + payload.windDir : ''));
+    var purpose = payload.purpose === 'その他' ? 'その他：' + payload.purposeOther : payload.purpose;
+    if(weather.length) purpose += ' [気象: ' + weather.join(' / ') + ']';
+    var method = (payload.method || []).join(' / ');
+    if(payload.permitNo) method += ' [許可承認: ' + payload.permitNo + ']';
+    var aircrafts = {};
+    aircrafts[model] = { model:model, used:true, preflightDone:false, flightCount:0, totalMinutes:0, preflightChecks:null };
+    aircrafts[other] = { model:other, used:false, preflightDone:false, flightCount:0, totalMinutes:0, preflightChecks:null };
+    session = {
+      draftId:'op_' + Date.now(), operationDate:STATE.today, dateSheet:STATE.today,
+      forceNewLocation:!!payload.forceNewLocation, currentModel:model, model:model,
+      purpose:purpose, route:payload.route, method:method, category:payload.category,
+      permitNo:payload.permitNo || '', inspectionLocation:payload.inspectionLocation,
+      pilot:payload.pilot, assistant:payload.assistant || '', cert:payload.cert || '',
+      phase:'PRE', blockNo:0, flightIndex:0, currentBattery:0, startedAt:'',
+      selectedBattery:0, selectedBatteryCycle:'',
+      totalMinutes:0, preflightChecks:null, flights:[], navigationHistory:[null], aircrafts:aircrafts
     };
-  } else if(action === 'savePreflight'){
-    if(STATE.session){
-      STATE.session.phase = 'READY';
-      if(STATE.session.aircrafts && STATE.session.aircrafts[STATE.session.currentModel]){
-        STATE.session.aircrafts[STATE.session.currentModel].preflightDone = true;
-      }
+    STATE.active = true;
+    STATE.session = session;
+  }else if(!session){
+    alert('進行中の運航がありません。');
+    return;
+  }else if(name === 'savePreflight'){
+    session.preflightChecks = cloneData(payload.checks || {});
+    session.preflightAbnormalDetail = payload.abnormalDetail || '';
+    session.selectedBattery = Number(payload.battery);
+    session.selectedBatteryCycle = payload.cycle || '';
+    session.abnormalPreflight = PRE_NAMES.some(function(item){ return session.preflightChecks[item] !== '正常'; });
+    if(session.aircrafts[session.currentModel]){
+      session.aircrafts[session.currentModel].preflightChecks = cloneData(session.preflightChecks);
+      session.aircrafts[session.currentModel].preflightDone = !session.abnormalPreflight;
     }
-  } else if(action === 'startFlight'){
-    if(STATE.session){
-      STATE.session.phase = 'FLYING';
-      STATE.session.flightIndex = (STATE.session.flightIndex || 0) + 1;
-      STATE.session.startedAt = new Date().toISOString();
-      if(STATE.session.aircrafts && STATE.session.aircrafts[STATE.session.currentModel]){
-        STATE.session.aircrafts[STATE.session.currentModel].flightCount = STATE.session.flightIndex;
-      }
+    pushDraftHistory(session);
+    session.phase = session.abnormalPreflight ? 'PRE_ABNORMAL' : 'READY';
+  }else if(name === 'confirmBatteryChange'){
+    session.pendingBatteryChangeInput = cloneData(payload);
+    pushDraftHistory(session);
+    session.selectedBattery = Number(payload.battery);
+    session.selectedBatteryCycle = payload.cycle || '';
+    session.pendingFlightInput = null;
+    session.phase = 'READY';
+  }else if(name === 'startFlight'){
+    var selectedBattery = Number(payload.battery || session.selectedBattery);
+    session.pendingFlightInput = { battery:selectedBattery, takeoffLocation:payload.takeoffLocation };
+    pushDraftHistory(session);
+    session.pendingBatteryChangeInput = null;
+    var ac = session.aircrafts[session.currentModel];
+    var takeoffAt = new Date().toISOString();
+    ac.flightCount = Number(ac.flightCount || 0) + 1;
+    session.flightIndex = ac.flightCount;
+    session.currentBattery = selectedBattery;
+    session.startedAt = takeoffAt;
+    session.flights.push({
+      model:session.currentModel, index:session.flightIndex, battery:selectedBattery,
+      cycle:session.selectedBatteryCycle || '', takeoffLocation:payload.takeoffLocation, takeoffAt:takeoffAt
+    });
+    session.phase = 'FLYING';
+  }else if(name === 'completeLanding'){
+    pushDraftHistory(session);
+    var activeFlight = session.flights[session.flights.length - 1];
+    if(activeFlight && !activeFlight.landingAt) activeFlight.landingAt = new Date().toISOString();
+    session.phase = 'LANDING';
+  }else if(name === 'landFlight'){
+    session.pendingLandingInput = cloneData(payload);
+    pushDraftHistory(session);
+    var flight = session.flights[session.flights.length - 1];
+    var minutes = Number(payload.actualMinutes) || Math.max(1, Math.round((new Date() - new Date(session.startedAt)) / 60000));
+    flight.landingLocation = payload.landingLocation;
+    flight.landingAt = flight.landingAt || new Date().toISOString();
+    flight.actualMinutes = minutes;
+    flight.safetyIssue = !!payload.safetyIssue;
+    flight.safetyDetail = payload.safetyDetail || '';
+    flight.batteryNote = payload.batteryNote || '';
+    session.totalMinutes = Number(session.totalMinutes || 0) + minutes;
+    session.aircrafts[session.currentModel].totalMinutes = Number(session.aircrafts[session.currentModel].totalMinutes || 0) + minutes;
+    session.currentBattery = 0;
+    session.startedAt = '';
+    session.phase = 'AFTER_LANDING';
+  }else if(name === 'continueFlight'){
+    pushDraftHistory(session);
+    session.pendingFlightInput = null;
+    session.pendingLandingInput = null;
+    session.selectedBattery = 0;
+    session.selectedBatteryCycle = '';
+    session.phase = 'BATTERY_CHANGE';
+  }else if(name === 'switchAircraft'){
+    pushDraftHistory(session);
+    var target = payload.targetModel;
+    var targetAc = session.aircrafts[target] || { model:target, used:false, preflightDone:false, flightCount:0, totalMinutes:0, preflightChecks:null };
+    targetAc.used = true;
+    session.aircrafts[target] = targetAc;
+    session.currentModel = target;
+    session.model = target;
+    session.flightIndex = targetAc.flightCount || 0;
+    session.totalMinutes = targetAc.totalMinutes || 0;
+    session.preflightChecks = targetAc.preflightChecks || null;
+    session.pendingFlightInput = null;
+    session.pendingBatteryChangeInput = null;
+    session.selectedBattery = 0;
+    session.selectedBatteryCycle = '';
+    session.phase = targetAc.preflightDone ? 'BATTERY_CHANGE' : 'PRE';
+  }else if(name === 'startPostflight'){
+    pushDraftHistory(session);
+    session.phase = 'POST_ALL';
+  }else if(name === 'goBack'){
+    var history = Array.isArray(session.navigationHistory) ? session.navigationHistory.slice() : [];
+    if(!history.length){ alert('これより前の画面はありません。'); return; }
+    var previous = history.pop();
+    if(previous){
+      previous.preflightChecks = cloneData(session.preflightChecks || previous.preflightChecks || {});
+      previous.preflightAbnormalDetail = session.preflightAbnormalDetail || '';
+      previous.selectedBattery = session.selectedBattery || previous.selectedBattery || 0;
+      previous.selectedBatteryCycle = session.selectedBatteryCycle || '';
+      previous.pendingFlightInput = cloneData(session.pendingFlightInput || previous.pendingFlightInput || {});
+      previous.pendingBatteryChangeInput = cloneData(session.pendingBatteryChangeInput || previous.pendingBatteryChangeInput || {});
+      previous.pendingLandingInput = cloneData(session.pendingLandingInput || previous.pendingLandingInput || {});
+      previous.pendingPostflightInput = cloneData(session.pendingPostflightInput || previous.pendingPostflightInput || {});
+      previous.navigationHistory = history;
+      STATE.session = previous;
+    }else{
+      STATE.active = false;
+      STATE.session = null;
     }
-  } else if(action === 'landFlight'){
-    if(STATE.session){
-      STATE.session.phase = 'AFTER_LANDING';
-      var mins = Number(payload.actualMinutes) || 5;
-      STATE.session.totalMinutes = (STATE.session.totalMinutes || 0) + mins;
-      if(STATE.session.aircrafts && STATE.session.aircrafts[STATE.session.currentModel]){
-        STATE.session.aircrafts[STATE.session.currentModel].totalMinutes = (STATE.session.aircrafts[STATE.session.currentModel].totalMinutes || 0) + mins;
-      }
-    }
-  } else if(action === 'continueFlight'){
-    if(STATE.session) STATE.session.phase = 'READY';
-  } else if(action === 'switchAircraft'){
-    if(STATE.session){
-      var cur = STATE.session.currentModel || STATE.session.model;
-      var target = (payload && payload.targetModel) ? payload.targetModel : (cur === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite');
-      STATE.session.currentModel = target;
-      STATE.session.model = target;
-      if(!STATE.session.aircrafts) STATE.session.aircrafts = {};
-      var tac = STATE.session.aircrafts[target] || { model: target, blockNo: 2, used: true, preflightDone: false, flightCount: 0, totalMinutes: 0 };
-      tac.used = true;
-      STATE.session.aircrafts[target] = tac;
-      STATE.session.blockNo = tac.blockNo;
-      STATE.session.phase = tac.preflightDone ? 'READY' : 'PRE';
-    }
-  } else if(action === 'startPostflight'){
-    if(STATE.session) STATE.session.phase = 'POST_ALL';
-  } else if(action === 'finishAircraft'){
+  }else if(name === 'cancelCurrentSession'){
     STATE.active = false;
     STATE.session = null;
-    showToast('📥 飛行後点検を端末に保存しました（未同期: ' + getOfflineQueue().length + '件）');
-    if(callback) callback({ success: true, offline: true });
-    switchTab('pdf');
-    return;
   }
 
-  showToast('📥 圏外のため端末に保存しました（未同期: ' + getOfflineQueue().length + '件）');
-  if(callback) callback(STATE);
-  render();
+  persistOperationDraft();
+  if(onSuccess) onSuccess(STATE);
+  else render();
 }
 
 function callServer(name, arg, onSuccess){
-  busy(true);
-
-  // 1. 完全圏外（オフライン）の場合：即座にキューへ保管し、画面遷移を止めずに進行
-  if(!navigator.onLine){
-    addOfflineQueue(name, arg);
-    busy(false);
-    simulateOfflineTransition(name, arg, onSuccess);
+  if(LOCAL_FLIGHT_ACTIONS.indexOf(name) >= 0){
+    localFlightAction(name, arg, onSuccess);
     return;
   }
 
-  // 2. オンライン時：8秒タイムアウト監視付きで実行
-  var hasReturned = false;
-  var timer = setTimeout(function(){
-    if(!hasReturned){
-      hasReturned = true;
-      busy(false);
-      console.warn('Request timeout for ' + name + '. Falling back to offline queue.');
-      addOfflineQueue(name, arg);
-      simulateOfflineTransition(name, arg, onSuccess);
+  if(name === 'finishAircraft'){
+    if(!navigator.onLine){
+      alert('現在は圏外です。入力内容は端末に残っています。電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
+      return;
     }
-  }, 8000);
+    STATE.session.pendingPostflightInput = cloneData(arg || {});
+    persistOperationDraft();
+    arg = { session:cloneData(STATE.session), postflight:arg || {} };
+  }
 
+  busy(true);
   var r = google.script.run
     .withSuccessHandler(function(res){
-      if(hasReturned) return;
-      hasReturned = true;
-      clearTimeout(timer);
       busy(false);
+      if(name === 'finishAircraft'){
+        clearOperationDraft();
+        STATE.active = false;
+        STATE.session = null;
+      }
       if(onSuccess) onSuccess(res);
       else {
         STATE = res;
@@ -1797,18 +1583,10 @@ function callServer(name, arg, onSuccess){
       }
     })
     .withFailureHandler(function(err){
-      if(hasReturned) return;
-      hasReturned = true;
-      clearTimeout(timer);
       busy(false);
       var msg = err && err.message ? err.message : String(err);
-      if(msg.indexOf('ScriptError') >= 0 || msg.indexOf('Network') >= 0 || msg.indexOf('Failed') >= 0 || !navigator.onLine){
-        console.warn('Network error detected. Saving to offline queue:', msg);
-        addOfflineQueue(name, arg);
-        simulateOfflineTransition(name, arg, onSuccess);
-      } else {
-        renderError(msg);
-      }
+      if(name === 'finishAircraft') alert('保存できませんでした。入力内容は端末に残っています。電波を確認して、もう一度保存してください。\n\n' + msg);
+      else renderError(msg);
     });
 
   if(arg===undefined) r[name]();
@@ -1910,13 +1688,80 @@ function confirmResetSession(){
   }
 }
 
-function switchTab(tab){
+function switchTab(tab, recordHistory){
+  if(tab !== CURRENT_TAB && recordHistory !== false) TAB_HISTORY.push(CURRENT_TAB);
   CURRENT_TAB = tab;
   var btns = el('navTabs').getElementsByClassName('nav-tab');
   btns[0].className = tab==='flight' ? 'nav-tab active' : 'nav-tab';
   btns[1].className = tab==='maintenance' ? 'nav-tab active' : 'nav-tab';
   btns[2].className = tab==='pdf' ? 'nav-tab active' : 'nav-tab';
+  btns[3].className = tab==='correction' ? 'nav-tab active' : 'nav-tab';
   render();
+}
+
+function goBackFromAnywhere(){
+  if(CURRENT_TAB !== 'flight'){
+    var previousTab = TAB_HISTORY.length ? TAB_HISTORY.pop() : 'flight';
+    switchTab(previousTab, false);
+    return;
+  }
+
+  var session = STATE && STATE.session;
+  if(session){
+    captureCurrentScreenDraft();
+    callServer('goBack');
+    return;
+  }
+
+  if(TAB_HISTORY.length){
+    switchTab(TAB_HISTORY.pop(), false);
+    return;
+  }
+  alert('これより前の画面はありません。');
+}
+
+function captureCurrentScreenDraft(){
+  var s = STATE && STATE.session;
+  if(!s) return;
+  if(s.phase === 'PRE'){
+    var checks = {};
+    for(var i=0; i<PRE_NAMES.length; i++) checks[PRE_NAMES[i]] = isChecked('pre' + i) ? '正常' : '異常';
+    s.preflightChecks = checks;
+    s.preflightAbnormalDetail = val('abnormalDetail');
+    s.selectedBattery = Number(val('preflightBattery')) || 0;
+    s.selectedBatteryCycle = val('preflightCycle');
+  }else if(s.phase === 'BATTERY_CHANGE'){
+    s.pendingBatteryChangeInput = {
+      battery:val('changeBattery'), cycle:val('changeBatteryCycle'),
+      installed:isChecked('batteryInstalled'), statusOk:isChecked('batteryStatusOk')
+    };
+  }else if(s.phase === 'READY'){
+    s.pendingFlightInput = { battery:s.selectedBattery, takeoffLocation:val('takeoffLocation') };
+  }else if(s.phase === 'LANDING'){
+    s.pendingLandingInput = {
+      landingLocation:val('landingLocation'), actualMinutes:val('actualMinutes'),
+      safetyIssue:isChecked('safetyIssue'), safetyDetail:val('safetyDetail'),
+      batteryNote:val('batteryNote')
+    };
+  }else if(s.phase === 'POST_ALL'){
+    var aircrafts = {};
+    var usedModels = Object.keys(s.aircrafts || {}).filter(function(model){ return s.aircrafts[model] && s.aircrafts[model].used; });
+    usedModels.forEach(function(model, modelIndex){
+      var prefix = 'post_' + modelIndex + '_';
+      var postChecks = {};
+      for(var j=0; j<POST_NAMES.length; j++) postChecks[POST_NAMES[j]] = isChecked(prefix + j) ? '正常' : '異常';
+      aircrafts[model] = {
+        checks:postChecks,
+        defectLocation:val(prefix + 'defectLocation'),
+        defectDetail:val(prefix + 'defectDetail'),
+        actionDetail:val(prefix + 'actionDetail')
+      };
+    });
+    s.pendingPostflightInput = {
+      inspectionLocation:val('postLocation'), confirmer:val('confirmer'), aircrafts:aircrafts
+    };
+  }
+  persistOperationDraft();
 }
 
 // ----------------------------------------------------
@@ -1994,6 +1839,14 @@ function fetchCurrentGps(targetId, targetRouteId){
 function render(){
   var appDiv = el('app');
   var badge = el('appStatusBadge');
+  var backButton = el('globalBackButton');
+  var hasActiveOperation = !!(STATE && STATE.active && STATE.session);
+
+  // 運航の初期画面には「一つ前」が存在しないため表示しない。
+  // 運航開始後、または別タブを開いている時だけ共通の戻るボタンを表示する。
+  if(backButton){
+    backButton.style.display = (CURRENT_TAB !== 'flight' || hasActiveOperation) ? 'block' : 'none';
+  }
 
   if(TIMER_INTERVAL){ clearInterval(TIMER_INTERVAL); TIMER_INTERVAL = null; }
 
@@ -2007,6 +1860,12 @@ function render(){
     badge.className = 'badge';
     badge.innerText = '日誌・PDF';
     renderPdfView(appDiv);
+    return;
+  }
+  if(CURRENT_TAB === 'correction'){
+    badge.className = 'badge';
+    badge.innerText = '記録訂正';
+    renderCorrectionView(appDiv);
     return;
   }
 
@@ -2027,8 +1886,11 @@ function render(){
     badge.innerText = '運航中';
     var phase = STATE.session.phase;
     if(phase === 'PRE') renderPreView(appDiv);
+    else if(phase === 'PRE_ABNORMAL') renderPreAbnormalView(appDiv);
+    else if(phase === 'BATTERY_CHANGE') renderBatteryChangeView(appDiv);
     else if(phase === 'READY') renderReadyView(appDiv);
     else if(phase === 'FLYING') renderFlyingView(appDiv);
+    else if(phase === 'LANDING') renderLandingView(appDiv);
     else if(phase === 'POST_ALL') renderPostView(appDiv);
     else renderAfterLandingView(appDiv);
   }
@@ -2046,9 +1908,12 @@ function renderStartView(div){
     var s = STATE.session;
     var phaseNames = {
       'PRE': '飛行前点検',
+      'BATTERY_CHANGE': 'バッテリー交換後確認',
       'READY': '離陸待機中',
       'FLYING': '飛行中',
-      'AFTER_LANDING': '着陸後'
+      'LANDING': '着陸後入力',
+      'AFTER_LANDING': '着陸後',
+      'POST_ALL': '飛行後点検'
     };
     sessionNoticeHtml =
       '<div class="warn-box" style="margin-bottom:12px; border-left:5px solid #f59e0b; background:#fffbeb;">' +
@@ -2360,9 +2225,12 @@ function submitStartOperation(){
 // ----------------------------------------------------
 function sessionHeaderHtml(){
   var s = STATE.session;
+  var recordLabel = s.blockNo
+    ? s.dateSheet + ' No.' + s.blockNo
+    : s.operationDate + '（全運航終了時に一括保存）';
   return '<div class="card status-box" style="margin-bottom:8px;">' +
     '<div class="flex-between">' +
-      '<div><strong>' + esc(s.dateSheet) + ' No.' + s.blockNo + '</strong> ｜ ' + esc(s.model) + '</div>' +
+      '<div><strong>' + esc(recordLabel) + '</strong> ｜ ' + esc(s.model) + '</div>' +
       '<div class="flex-row" style="gap:6px;align-items:center;">' +
         '<span class="badge active">' + esc(s.category) + '</span>' +
         '<button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelSessionPrompt()">↩ 運航中止</button>' +
@@ -2376,25 +2244,42 @@ function sessionHeaderHtml(){
 // 2. 飛行前点検画面（様式2）
 // ----------------------------------------------------
 function renderPreView(div){
-  var checksHtml = PRE_NAMES.map(function(name, i){
-    return '<label class="check-item"><input type="checkbox" id="pre' + i + '" checked onchange="onPreCheckChanged()"><span>' + esc(name) + '</span></label>';
+  var s = STATE.session;
+  var savedChecks = (s && s.preflightChecks) || {};
+  var batteryOptions = '<option value="">装着しているBATを選択</option>' + STATE.batteries.map(function(b){
+    return '<option value="' + b.value + '"' + (String(s.selectedBattery || '') === String(b.value) ? ' selected' : '') + '>' + esc(b.label) + '</option>';
   }).join('');
+  var checksHtml = PRE_NAMES.map(function(name, i){
+    var check = PRE_CHECK_DETAILS[name] || { label: name, detail: '' };
+    var checked = savedChecks[name] ? savedChecks[name] === '正常' : false;
+    return '<label class="check-item check-item-detailed"><input type="checkbox" id="pre' + i + '"' + (checked ? ' checked' : '') + ' onchange="onPreCheckChanged()">' +
+      '<span class="check-copy"><span class="check-label">' + esc(check.label) + '</span>' +
+      '<span class="check-detail">' + esc(check.detail) + '</span></span></label>';
+  }).join('');
+  var hasSavedAbnormal = PRE_NAMES.some(function(name){ return savedChecks[name] === '異常'; });
+  var savedAbnormalDetail = (STATE.session && STATE.session.preflightAbnormalDetail) || '';
 
   div.innerHTML = sessionHeaderHtml() +
     '<div class="card" id="preCard">' +
       '<h2>飛行前点検（様式2）</h2>' +
-      '<div class="text-sm" style="margin-bottom:8px;">飛行前点検11項目を確認し、良否を判定してください。</div>' +
+      '<div class="text-sm" style="margin-bottom:8px;">機体に使用するバッテリーを装着・電源投入してから、11項目を確認してください。</div>' +
+      '<div class="card" style="background:#f8fafc;margin:8px 0 12px;border:1px solid #cbd5e1;">' +
+        '<label>機体に装着しているバッテリー<span class="required">*</span></label>' +
+        '<select id="preflightBattery">' + batteryOptions + '</select>' +
+        '<label>現在のサイクル数（任意・確認できる場合のみ）</label>' +
+        '<input type="number" id="preflightCycle" min="0" value="' + esc(s.selectedBatteryCycle || '') + '" placeholder="Autel Skyで確認できなければ空欄でOK">' +
+      '</div>' +
       '<div class="check-list">' + checksHtml + '</div>' +
 
       '<div class="flex-row" style="margin:8px 0;">' +
-        '<button type="button" class="btn btn-secondary btn-sm" onclick="setAllChecks(\'pre\', ' + PRE_NAMES.length + ', true)">全て正常（ワンタップ）</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" onclick="setAllChecks(\'pre\', ' + PRE_NAMES.length + ', true)">全て正常（実機確認済み）</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" onclick="setAllChecks(\'pre\', ' + PRE_NAMES.length + ', false)">全て解除</button>' +
       '</div>' +
 
-      '<div id="preAbnormalBox" style="display:none;" class="warn-box">' +
+      '<div id="preAbnormalBox" style="display:' + (hasSavedAbnormal ? 'block' : 'none') + ';" class="warn-box">' +
         '<strong>⚠ 異常箇所の特記事項</strong>' +
         '<div class="text-sm">異常がある場合、航空法および教則に基づき飛行を中止し、整備を行う必要があります。</div>' +
-        '<textarea id="abnormalDetail" placeholder="異常の内容・部位を具体的に記載してください"></textarea>' +
+        '<textarea id="abnormalDetail" placeholder="異常の内容・部位を具体的に記載してください">' + esc(savedAbnormalDetail) + '</textarea>' +
       '</div>' +
 
       '<button class="btn btn-primary" onclick="submitPreflight()">飛行前点検を完了して離陸準備へ</button>' +
@@ -2423,6 +2308,9 @@ function submitPreflight(){
   clearFormErrors('preCard');
   var errors = [];
 
+  var battery = val('preflightBattery');
+  if(!battery) errors.push({ id: 'preflightBattery', label: '装着バッテリー', message: '機体に装着しているバッテリーを選択してください。' });
+
   var hasAbnormal = false;
   var checks = {};
   for(var i=0; i<PRE_NAMES.length; i++){
@@ -2442,34 +2330,80 @@ function submitPreflight(){
 
   callServer('savePreflight', {
     checks: checks,
-    abnormalDetail: val('abnormalDetail')
+    abnormalDetail: val('abnormalDetail'),
+    battery: battery,
+    cycle: val('preflightCycle')
   });
 }
 
+function renderPreAbnormalView(div){
+  div.innerHTML = sessionHeaderHtml() +
+    '<div class="card error-box">' +
+      '<h2>飛行前点検で異常を記録しました</h2>' +
+      '<p>この機体は離陸できません。必要な点検・整備と記録を完了してから、新しい運航を開始してください。</p>' +
+      '<button class="btn btn-secondary" onclick="switchTab(\'maintenance\')">点検整備記録を開く</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="cancelSessionPrompt()">この運航を終了する</button>' +
+    '</div>';
+}
+
 // ----------------------------------------------------
-// 3. 飛行開始待機画面（離陸前）
+// 3. バッテリー交換確認／飛行開始待機画面（離陸前）
 // ----------------------------------------------------
+function renderBatteryChangeView(div){
+  var s = STATE.session;
+  var previousInput = s.pendingBatteryChangeInput || {};
+  var batteryOptions = '<option value="">交換後のBATを選択</option>' + STATE.batteries.map(function(b){
+    return '<option value="' + b.value + '"' + (String(previousInput.battery || '') === String(b.value) ? ' selected' : '') + '>' + esc(b.label) + '</option>';
+  }).join('');
+
+  div.innerHTML = sessionHeaderHtml() +
+    '<div class="card" id="batteryChangeCard">' +
+      '<h2>バッテリー交換後の確認</h2>' +
+      '<div class="text-sm" style="margin-bottom:10px;">同じ現場・同じ目的で連続飛行するため、正式な飛行前点検は繰り返しません。交換したバッテリーだけ確認します。</div>' +
+      '<label>交換後のバッテリー<span class="required">*</span></label>' +
+      '<select id="changeBattery">' + batteryOptions + '</select>' +
+      '<label>現在のサイクル数（任意・確認できる場合のみ）</label>' +
+      '<input type="number" id="changeBatteryCycle" min="0" value="' + esc(previousInput.cycle || '') + '" placeholder="Autel Skyで確認できなければ空欄でOK">' +
+      '<div class="check-list" style="margin-top:10px;">' +
+        '<label class="check-item"><input type="checkbox" id="batteryInstalled"' + (previousInput.installed ? ' checked' : '') + '><span>バッテリーが確実に装着・ロックされている</span></label>' +
+        '<label class="check-item"><input type="checkbox" id="batteryStatusOk"' + (previousInput.statusOk ? ' checked' : '') + '><span>残量・温度・警告表示に異常がない</span></label>' +
+      '</div>' +
+      '<button class="btn btn-primary" style="font-size:17px;padding:14px;margin-top:12px;" onclick="submitBatteryChange()">確認して離陸準備へ</button>' +
+    '</div>';
+}
+
+function submitBatteryChange(){
+  clearFormErrors('batteryChangeCard');
+  var errors = [];
+  var battery = val('changeBattery');
+  if(!battery) errors.push({ id:'changeBattery', label:'交換後のバッテリー', message:'交換したバッテリーを選択してください。' });
+  if(!isChecked('batteryInstalled')) errors.push({ id:'batteryInstalled', label:'装着・ロック', message:'実機を確認してチェックしてください。' });
+  if(!isChecked('batteryStatusOk')) errors.push({ id:'batteryStatusOk', label:'残量・警告表示', message:'Autel Skyの表示を確認してチェックしてください。' });
+  if(errors.length){ showFormErrors('batteryChangeCard', errors); return; }
+  callServer('confirmBatteryChange', {
+    battery:battery, cycle:val('changeBatteryCycle'), installed:true, statusOk:true
+  });
+}
+
 function renderReadyView(div){
   var s = STATE.session;
-  var bOptions = STATE.batteries.map(function(b){
-    return '<option value="' + b.value + '">' + esc(b.label) + '</option>';
-  }).join('');
+  var previousInput = s.pendingFlightInput || {};
 
   div.innerHTML = sessionHeaderHtml() +
     '<div class="card" id="readyCard">' +
       '<h2>飛行開始待機（第' + (s.flightIndex + 1) + '飛行）</h2>' +
-      '<div class="status-box">飛行前点検完了：適合（安全飛行可能）</div>' +
+      '<div class="status-box">離陸前確認完了：適合（安全飛行可能）</div>' +
 
-      '<label>使用バッテリー選択<span class="required">*</span></label>' +
-      '<select id="flightBattery">' + bOptions + '</select>' +
+      '<div class="status-box">使用バッテリー：<strong>BAT_' + esc(s.selectedBattery) + '</strong>' +
+        (s.selectedBatteryCycle !== '' ? ' ｜ サイクル数：<strong>' + esc(s.selectedBatteryCycle) + '</strong>' : '') + '</div>' +
 
       '<div class="flex-between">' +
         '<label>離陸場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'takeoffLocation\', null)">📍 GPSで現在地更新</button>' +
+        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'takeoffLocation\', null)">📍 GPSで現在地更新（任意）</button>' +
       '</div>' +
-      '<input type="text" id="takeoffLocation" value="' + esc(s.route) + '">' +
+      '<input type="text" id="takeoffLocation" value="' + esc(previousInput.takeoffLocation || s.route) + '">' +
 
-      '<button class="btn btn-success" style="font-size:18px;padding:14px;margin-top:14px;" onclick="submitStartFlight()">🛫 離陸を記録（フライト開始）</button>' +
+      '<button class="btn btn-success" style="font-size:18px;padding:14px;margin-top:14px;" onclick="submitStartFlight()">🛫 離陸開始</button>' +
       '<div class="flex-row" style="margin-top:10px;">' +
         '<button type="button" class="btn btn-secondary btn-sm" onclick="onSwitchAircraftClick(\'' + esc(s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite') + '\')">🔄 機体を交代する（' + esc(s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite') + 'へ）</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" onclick="callServer(\'startPostflight\')">🏁 飛行せず終了（飛行後点検へ）</button>' +
@@ -2482,8 +2416,8 @@ function submitStartFlight(){
   clearFormErrors('readyCard');
   var errors = [];
 
-  var battery = val('flightBattery');
-  if(!battery) errors.push({ id: 'flightBattery', label: '使用バッテリー', message: 'バッテリーを選択してください。' });
+  var battery = Number(STATE.session.selectedBattery || 0);
+  if(!battery) errors.push({ id: '', label: '使用バッテリー', message: '一つ前の画面に戻り、使用バッテリーを確認してください。' });
 
   var takeoffLocation = val('takeoffLocation');
   if(!takeoffLocation) errors.push({ id: 'takeoffLocation', label: '離陸場所', message: '離陸場所を入力してください。' });
@@ -2500,58 +2434,79 @@ function submitStartFlight(){
 }
 
 // ----------------------------------------------------
-// 4. 飛行中・着陸記録画面（ストップウォッチ連動）
+// 4. 飛行中画面（操縦に集中）／着陸後入力画面
 // ----------------------------------------------------
 function renderFlyingView(div){
   var s = STATE.session;
   var startTime = new Date(s.startedAt);
-  var elapsedMinutes = Math.max(1, Math.round((new Date() - startTime) / 60000));
+
+  div.innerHTML = sessionHeaderHtml() +
+    '<div class="card">' +
+      '<h2>飛行中（第' + (s.flightIndex) + '飛行）</h2>' +
+      '<div class="status-box" style="background:#f0fff4;color:#22543d;border-left-color:#38a169;line-height:1.7;">' +
+        '使用中バッテリー：<strong>BAT_' + s.currentBattery + '</strong> ｜ 離陸時刻：<strong>' + formatTimeStr(s.startedAt) + '</strong><br>' +
+        '経過時間：<strong id="flightTimerDisplay" style="font-size:22px;">00:00</strong>' +
+      '</div>' +
+      '<div class="warn-box" style="margin-top:12px;background:#eff6ff;border-left-color:#2563eb;color:#1e3a8a;">' +
+        '<strong>飛行中は画面操作をせず、操縦と周囲確認に集中してください。</strong>' +
+      '</div>' +
+      '<button class="btn btn-warning" style="font-size:18px;padding:16px;margin-top:16px;" onclick="callServer(\'completeLanding\')">🛬 着陸完了（プロペラ停止後）</button>' +
+    '</div>';
+
+  updateTimerDisplay(startTime);
+  TIMER_INTERVAL = setInterval(function(){ updateTimerDisplay(startTime); }, 1000);
+}
+
+function renderLandingView(div){
+  var s = STATE.session;
+  var previousInput = s.pendingLandingInput || {};
+  var startTime = new Date(s.startedAt);
+  var activeFlight = s.flights && s.flights.length ? s.flights[s.flights.length - 1] : null;
+  var landingTime = activeFlight && activeFlight.landingAt ? new Date(activeFlight.landingAt) : new Date();
+  var elapsedMinutes = Math.max(1, Math.round((landingTime - startTime) / 60000));
+  var displayedMinutes = previousInput.actualMinutes || elapsedMinutes;
 
   var tagChips = SAFETY_TAGS.map(function(t){
     return '<span class="tag-chip" onclick="addSafetyTag(\'' + esc(t) + '\')">＋ ' + esc(t) + '</span>';
   }).join('');
 
   div.innerHTML = sessionHeaderHtml() +
-    '<div class="card" id="flyingCard">' +
-      '<h2>飛行中・着陸記録（第' + (s.flightIndex + 1) + '飛行）</h2>' +
+    '<div class="card" id="landingCard">' +
+      '<h2>着陸後の記録（第' + s.flightIndex + '飛行）</h2>' +
       '<div class="status-box" style="background:#f0fff4;color:#22543d;border-left-color:#38a169;line-height:1.6;">' +
         '使用中バッテリー：<strong>BAT_' + s.currentBattery + '</strong> ｜ 離陸時刻：<strong>' + formatTimeStr(s.startedAt) + '</strong><br>' +
-        '<span class="text-sm" style="color:#276749;">🛡 飛行中はプロポ操作に専念してください。着陸後にプロペラが停止してから記録を行ってください。</span>' +
+        '<span class="text-sm" style="color:#276749;">プロペラ停止後に、着陸内容を入力してください。</span>' +
       '</div>' +
 
       '<div class="flex-between">' +
         '<label>着陸場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'landingLocation\', null)">📍 GPSで現在地取得</button>' +
+        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'landingLocation\', null)">📍 GPSで現在地取得（任意）</button>' +
       '</div>' +
-      '<input type="text" id="landingLocation" value="' + esc(s.route) + '">' +
+      '<input type="text" id="landingLocation" value="' + esc(previousInput.landingLocation || s.route) + '">' +
 
       '<label>実飛行時間（分）<span class="required">*</span></label>' +
-      '<div class="text-sm" style="color:#64748b;margin-bottom:4px;">送信機（Autel Explorer）アプリに表示された飛行時間を入力してください。</div>' +
-      '<input type="number" id="actualMinutes" value="' + elapsedMinutes + '" min="1" style="font-size:18px;font-weight:700;">' +
+      '<div class="text-sm" style="color:#64748b;margin-bottom:4px;">送信機（Autel Sky）に表示された飛行時間を入力してください。</div>' +
+      '<input type="number" id="actualMinutes" value="' + displayedMinutes + '" min="1" style="font-size:18px;font-weight:700;">' +
 
       '<label class="check-item" style="margin:12px 0 6px;">' +
-        '<input type="checkbox" id="safetyIssue" onchange="onSafetyChanged()">' +
+        '<input type="checkbox" id="safetyIssue"' + (previousInput.safetyIssue ? ' checked' : '') + ' onchange="onSafetyChanged()">' +
         '<span>飛行の安全に影響のあった事項あり</span>' +
       '</label>' +
 
-      '<div id="safetyDetailBox" style="display:none;">' +
+      '<div id="safetyDetailBox" style="display:' + (previousInput.safetyIssue ? 'block' : 'none') + ';">' +
         '<label>クイックタグ選択（ワンタップ挿入）：</label>' +
         '<div class="tags-container">' + tagChips + '</div>' +
-        '<textarea id="safetyDetail" placeholder="タグを選択または事象を記載してください"></textarea>' +
+        '<textarea id="safetyDetail" placeholder="タグを選択または事象を記載してください">' + esc(previousInput.safetyDetail || '') + '</textarea>' +
       '</div>' +
 
-      '<div class="grid-2" style="margin-top:10px;background:#f8fafc;padding:10px;border-radius:6px;">' +
-        '<div>' +
-          '<label style="color:#64748b;font-size:12px;">使用後サイクル数（任意・空欄可）</label>' +
-          '<input type="number" id="cycle" placeholder="未入力でOK">' +
-        '</div>' +
+      '<div style="margin-top:10px;background:#f8fafc;padding:10px;border-radius:6px;">' +
         '<div>' +
           '<label style="color:#64748b;font-size:12px;">バッテリー異常・所感（任意・空欄可）</label>' +
-          '<input type="text" id="batteryNote" placeholder="未入力でOK">' +
+          '<input type="text" id="batteryNote" value="' + esc(previousInput.batteryNote || '') + '" placeholder="未入力でOK">' +
         '</div>' +
       '</div>' +
 
-      '<button class="btn btn-warning" style="font-size:18px;padding:14px;margin-top:14px;" onclick="submitLandFlight()">🛬 着陸を記録する</button>' +
+      '<button class="btn btn-warning" style="font-size:18px;padding:14px;margin-top:14px;" onclick="submitLandFlight()">📝 着陸内容を確定して次へ</button>' +
     '</div>';
 }
 
@@ -2583,7 +2538,7 @@ function addSafetyTag(tag){
 }
 
 function submitLandFlight(){
-  clearFormErrors('flyingCard');
+  clearFormErrors('landingCard');
   var errors = [];
 
   var landingLocation = val('landingLocation');
@@ -2599,10 +2554,10 @@ function submitLandFlight(){
     errors.push({ id: 'safetyDetail', label: '安全影響事項の詳細', message: '安全影響事項「あり」が選択されています。内容を入力してください（タグ選択も可能）。' });
   }
 
-  // ※バッテリーサイクル数および所感は完全任意（未入力チェックなしで素通り）
+  // ※バッテリー所感は完全任意（未入力チェックなしで素通り）
 
   if(errors.length > 0){
-    showFormErrors('flyingCard', errors);
+    showFormErrors('landingCard', errors);
     return;
   }
 
@@ -2611,7 +2566,6 @@ function submitLandFlight(){
     actualMinutes: actualMinutes,
     safetyIssue: isChecked('safetyIssue'),
     safetyDetail: val('safetyDetail'),
-    cycle: val('cycle'),
     batteryNote: val('batteryNote')
   });
 }
@@ -2632,20 +2586,22 @@ function renderAfterLandingView(div){
       '<div class="status-box">' +
         '現在の機体（' + esc(s.model) + '）本日累計：<strong>' + s.totalMinutes + ' 分</strong>（' + (s.flightIndex) + ' 回完了）' +
       '</div>' +
-      '<p class="text-sm">次のアクションを選択してください：</p>' +
+      '<p class="text-sm">次に行う操作を選んでください。</p>' +
 
-      '<button class="btn btn-primary" style="font-size:15px;padding:12px;" onclick="callServer(\'continueFlight\')">🔋 バッテリー交換して続ける（' + esc(s.model) + ' で第' + (s.flightIndex + 1) + '飛行へ）</button>' +
+      '<button class="btn btn-primary" style="font-size:18px;padding:15px;" onclick="callServer(\'continueFlight\')">🔋 同じ機体で続ける（バッテリー交換）</button>' +
+      '<div class="text-sm" style="margin:5px 0 0;color:#64748b;">' + esc(s.model) + ' の第' + (s.flightIndex + 1) + '飛行へ進みます。</div>' +
       
-      '<button class="btn btn-warning" style="margin-top:12px;font-size:15px;padding:12px;background:#e65100;border:none;color:#fff;" onclick="onSwitchAircraftClick(\'' + esc(otherModel) + '\')">🔄 もう1機の機体（' + esc(otherModel) + '）に交代する ' + otherBadge + '</button>' +
+      '<button class="btn btn-secondary" style="margin-top:14px;font-size:15px;padding:12px;" onclick="onSwitchAircraftClick(\'' + esc(otherModel) + '\')">🔄 機体を交代する（' + esc(otherModel) + '）' + otherBadge + '</button>' +
 
-      '<button class="btn btn-secondary" style="margin-top:12px;font-size:15px;padding:12px;" onclick="callServer(\'startPostflight\')">🏁 本日の全運航を終了（飛行後点検へ）</button>' +
+      '<div style="margin-top:20px;padding-top:14px;border-top:1px solid #cbd5e1;">' +
+        '<div class="text-sm" style="margin-bottom:6px;color:#475569;">本日の飛行を終える場合</div>' +
+        '<button class="btn btn-secondary" style="font-size:15px;padding:12px;" onclick="callServer(\'startPostflight\')">🏁 全飛行を終了して飛行後点検へ</button>' +
+      '</div>' +
     '</div>';
 }
 
 function onSwitchAircraftClick(targetModel){
-  if(confirm('機体を「' + targetModel + '」に交代しますか？\n\n・現在の機体の飛行実績は安全に保存されます。\n・交代先が未点検の場合は飛行前点検が開きます。')){
-    callServer('switchAircraft', { targetModel: targetModel });
-  }
+  callServer('switchAircraft', { targetModel: targetModel });
 }
 
 // ----------------------------------------------------
@@ -2655,14 +2611,22 @@ function renderPostView(div){
   var appDiv = div || el('app');
   var s = STATE.session;
   var acs = s.aircrafts || {};
+  var previousPost = s.pendingPostflightInput || {};
+  var previousAircrafts = previousPost.aircrafts || {};
   var usedModels = Object.keys(acs).filter(function(m){ return acs[m] && acs[m].used; });
   if(usedModels.length === 0 && s.model) usedModels = [s.model];
 
   var aircraftCardsHtml = usedModels.map(function(model, mIdx){
     var ac = acs[model] || {};
+    var previousAc = previousAircrafts[model] || {};
+    var previousChecks = previousAc.checks || {};
     var prefix = 'post_' + mIdx + '_';
     var checksHtml = POST_NAMES.map(function(name, i){
-      return '<label class="check-item"><input type="checkbox" id="' + prefix + i + '" checked onchange="onAnyPostCheckChanged()"><span>' + esc(name) + '</span></label>';
+      var check = POST_CHECK_DETAILS[name] || { label: name, detail: '' };
+      var checked = previousChecks[name] ? previousChecks[name] === '正常' : false;
+      return '<label class="check-item check-item-detailed"><input type="checkbox" id="' + prefix + i + '"' + (checked ? ' checked' : '') + ' onchange="onAnyPostCheckChanged()">' +
+        '<span class="check-copy"><span class="check-label">' + esc(check.label) + '</span>' +
+        '<span class="check-detail">' + esc(check.detail) + '</span></span></label>';
     }).join('');
 
     var blockLabel = ac.blockNo ? '（No.' + ac.blockNo + '枠）' : '';
@@ -2679,34 +2643,34 @@ function renderPostView(div){
         '<button type="button" class="btn btn-secondary btn-sm" onclick="setPostChecksForModel(' + mIdx + ', true)">この機体を全て正常</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" onclick="setPostChecksForModel(' + mIdx + ', false)">解除</button>' +
       '</div>' +
-      '<div id="' + prefix + 'abnormalBox" style="display:none;" class="warn-box">' +
+      '<div id="' + prefix + 'abnormalBox" style="display:' + (previousAc.abnormal ? 'block' : 'none') + ';" class="warn-box">' +
         '<strong>不具合・事象の記録（' + esc(model) + '）</strong>' +
-        '<label>不具合箇所</label><input type="text" id="' + prefix + 'defectLocation" placeholder="プロペラ後縁、モーター基部等">' +
-        '<label>事象等の内容<span class="required">*</span></label><textarea id="' + prefix + 'defectDetail"></textarea>' +
-        '<label>処置内容</label><textarea id="' + prefix + 'actionDetail" placeholder="清掃、部品交換予定、飛行停止等"></textarea>' +
+        '<label>不具合箇所</label><input type="text" id="' + prefix + 'defectLocation" value="' + esc(previousAc.defectLocation || '') + '" placeholder="プロペラ後縁、モーター基部等">' +
+        '<label>事象等の内容<span class="required">*</span></label><textarea id="' + prefix + 'defectDetail">' + esc(previousAc.defectDetail || '') + '</textarea>' +
+        '<label>処置内容</label><textarea id="' + prefix + 'actionDetail" placeholder="清掃、部品交換予定、飛行停止等">' + esc(previousAc.actionDetail || '') + '</textarea>' +
       '</div>' +
     '</div>';
   }).join('');
 
   appDiv.innerHTML = sessionHeaderHtml() +
     '<div class="card" id="postMainCard">' +
-      '<h2>本日の飛行後点検（様式2）</h2>' +
-      '<p class="text-sm">本日飛行させた機体の点検を行い、本日の運航日誌を確定します。</p>' +
+      '<h2>今回の運航の飛行後点検（様式2）</h2>' +
+      '<p class="text-sm">今回の同一現場・同一目的の連続飛行で使用した機体を、撤収前に点検します。</p>' +
       
       '<div style="margin-bottom:14px;">' +
-        '<button type="button" class="btn btn-success" style="font-size:15px;padding:12px;width:100%;font-weight:700;" onclick="setAllPostChecksAllModels(true)">✨ 本日使用した全機体「全て正常」（ワンタップ）</button>' +
+        '<button type="button" class="btn btn-success" style="font-size:15px;padding:12px;width:100%;font-weight:700;" onclick="setAllPostChecksAllModels(true)">✨ 今回使用した全機体「全て正常（実機確認済み）」</button>' +
       '</div>' +
 
       aircraftCardsHtml +
 
       '<div class="card" style="background:#f8fafc;margin-top:14px;border:1px solid #cbd5e1;">' +
         '<label>点検実施場所<span class="required">*</span></label>' +
-        '<input type="text" id="postLocation" value="' + esc(s.inspectionLocation || s.route) + '">' +
+        '<input type="text" id="postLocation" value="' + esc(previousPost.inspectionLocation || s.inspectionLocation || s.route) + '">' +
         '<label>点検確認者氏名（機長）<span class="required">*</span></label>' +
-        '<input type="text" id="confirmer" value="' + esc(s.pilot ? s.pilot.split('（')[0].trim() : '吉田 公一') + '">' +
+        '<input type="text" id="confirmer" value="' + esc(previousPost.confirmer || (s.pilot ? s.pilot.split('（')[0].trim() : '吉田 公一')) + '">' +
       '</div>' +
 
-      '<button class="btn btn-primary" style="font-size:16px;padding:14px;margin-top:14px;" onclick="submitAllPostflight()">✅ 飛行後点検を保存し、本日の運航日誌を確定する</button>' +
+      '<button class="btn btn-primary" style="font-size:16px;padding:14px;margin-top:14px;" onclick="submitAllPostflight()">✅ 全記録を一括保存し、今回の運航日誌を確定する</button>' +
     '</div>';
 }
 
@@ -2744,6 +2708,7 @@ function onAnyPostCheckChanged(){
 
 function submitAllPostflight(){
   clearFormErrors('postMainCard');
+  onAnyPostCheckChanged();
   var errors = [];
   var postLocation = val('postLocation');
   if(!postLocation) errors.push({ id: 'postLocation', label: '点検実施場所', message: '点検実施場所を入力してください。' });
@@ -2797,7 +2762,9 @@ function submitAllPostflight(){
     checks: aircraftPayload[s.model] ? aircraftPayload[s.model].checks : {}
   }, function(res){
     STATE = res;
-    switchTab('pdf');
+    LAST_COMPLETED_SHEET = (res && res.lastCompletedSheet) || LAST_COMPLETED_SHEET;
+    LAST_COMPLETED_SHEET_URL = (res && res.lastCompletedSheetUrl) || LAST_COMPLETED_SHEET_URL;
+    switchTab('pdf', false);
   });
 }
 
@@ -2909,10 +2876,89 @@ function submitMaintenance(){
 }
 
 // ----------------------------------------------------
-// 8. PDF出力・過去日誌検索タブ
+// 8. 記録訂正タブ
+// ----------------------------------------------------
+function renderCorrectionView(div){
+  var last = loadLastOperation() || {};
+  div.innerHTML =
+    '<div class="card" id="correctionCard">' +
+      '<h2>記録訂正（訂正履歴を自動保存）</h2>' +
+      '<div class="warn-box">スプレッドシートで対象セルの行番号・列番号を確認して入力してください。訂正前の値、訂正後の値、理由、操作者が「訂正履歴」へ保存されます。</div>' +
+      '<label>訂正対象<span class="required">*</span></label>' +
+      '<select id="cTarget" onchange="onCorrectionTargetChanged()">' +
+        '<option value="flight">飛行記録・日常点検記録</option>' +
+        '<option value="battery">バッテリー履歴</option>' +
+      '</select>' +
+      '<div id="cFlightTarget">' +
+        '<label>日付シート名<span class="required">*</span></label>' +
+        '<input type="text" id="cDateSheet" value="' + esc((STATE && STATE.today) || '') + '" placeholder="例：2026.9.4 または 2026.9.4_2">' +
+      '</div>' +
+      '<div id="cBatteryTarget" style="display:none;">' +
+        '<label>バッテリー番号<span class="required">*</span></label>' +
+        '<select id="cBatteryNo">' + [1,2,3,4,5,6,7].map(function(n){ return '<option value="' + n + '">BAT_' + n + '</option>'; }).join('') + '</select>' +
+      '</div>' +
+      '<div class="grid-2">' +
+        '<div><label>行番号<span class="required">*</span></label><input type="number" id="cRow" min="1"></div>' +
+        '<div><label>列番号<span class="required">*</span></label><input type="number" id="cCol" min="1"></div>' +
+      '</div>' +
+      '<label>項目名<span class="required">*</span></label>' +
+      '<input type="text" id="cField" placeholder="例：着陸時刻、飛行時間、点検結果">' +
+      '<label>訂正後の値<span class="required">*</span></label>' +
+      '<input type="text" id="cNewValue">' +
+      '<label class="check-item"><input type="checkbox" id="cClearValue"><span>値を空欄に訂正する</span></label>' +
+      '<label>訂正理由<span class="required">*</span></label>' +
+      '<textarea id="cReason" placeholder="誤記の原因と訂正理由を具体的に記載"></textarea>' +
+      '<label>操作者<span class="required">*</span></label>' +
+      '<input type="text" id="cOperator" value="' + esc(last.pilot || '') + '">' +
+      '<button class="btn btn-primary" onclick="submitCorrection()">訂正して履歴を保存する</button>' +
+    '</div>';
+}
+
+function onCorrectionTargetChanged(){
+  var isFlight = val('cTarget') === 'flight';
+  el('cFlightTarget').style.display = isFlight ? 'block' : 'none';
+  el('cBatteryTarget').style.display = isFlight ? 'none' : 'block';
+}
+
+function submitCorrection(){
+  clearFormErrors('correctionCard');
+  var errors = [];
+  var target = val('cTarget');
+  if(target === 'flight' && !val('cDateSheet')) errors.push({ id:'cDateSheet', label:'日付シート名', message:'訂正対象の日付シート名を入力してください。' });
+  if(!val('cRow')) errors.push({ id:'cRow', label:'行番号', message:'訂正対象の行番号を入力してください。' });
+  if(!val('cCol')) errors.push({ id:'cCol', label:'列番号', message:'訂正対象の列番号を入力してください。' });
+  if(!val('cField')) errors.push({ id:'cField', label:'項目名', message:'訂正する項目名を入力してください。' });
+  if(!isChecked('cClearValue') && !val('cNewValue')) errors.push({ id:'cNewValue', label:'訂正後の値', message:'訂正後の値を入力するか、空欄に訂正を選択してください。' });
+  if(!val('cReason')) errors.push({ id:'cReason', label:'訂正理由', message:'訂正理由を入力してください。' });
+  if(!val('cOperator')) errors.push({ id:'cOperator', label:'操作者', message:'操作者氏名を入力してください。' });
+  if(errors.length){ showFormErrors('correctionCard', errors); return; }
+
+  var targetLabel = target === 'flight' ? val('cDateSheet') : 'BAT_' + val('cBatteryNo');
+  var correctedValue = isChecked('cClearValue') ? '（空欄）' : val('cNewValue');
+  if(!confirm(targetLabel + ' の R' + val('cRow') + 'C' + val('cCol') + ' を「' + correctedValue + '」へ訂正します。\nよろしいですか？')) return;
+
+  callServer('correctSavedRecord', {
+    target: target,
+    dateSheet: val('cDateSheet'),
+    batteryNo: val('cBatteryNo'),
+    row: val('cRow'),
+    col: val('cCol'),
+    field: val('cField'),
+    newValue: isChecked('cClearValue') ? '' : val('cNewValue'),
+    reason: val('cReason'),
+    operator: val('cOperator')
+  }, function(){
+    alert('訂正を反映し、「訂正履歴」へ記録しました。');
+    renderCorrectionView(el('app'));
+  });
+}
+
+// ----------------------------------------------------
+// 9. PDF出力・過去日誌検索タブ
 // ----------------------------------------------------
 function renderPdfView(div){
   var today = STATE ? STATE.today : '';
+  var pdfSheet = LAST_COMPLETED_SHEET || today;
   div.innerHTML =
     '<div class="card">' +
       '<h2>飛行日誌 PDF即時出力・携行</h2>' +
@@ -2922,9 +2968,9 @@ function renderPdfView(div){
       '</div>' +
 
       '<div class="status-box">' +
-        '本日（' + esc(today) + '）の飛行日誌：<br>' +
+        '表示対象（' + esc(pdfSheet) + '）の飛行日誌：<br>' +
         '<button class="btn btn-success btn-sm" style="margin-top:6px;" onclick="openTodayPdf()">📄 本日の日誌PDFを即時表示・保存</button> ' +
-        (STATE && STATE.todaySheetUrl ? '<a href="' + STATE.todaySheetUrl + '" target="_blank" class="btn btn-secondary btn-sm" style="margin-top:6px;text-decoration:none;">📊 スプレッドシートで直接開く</a>' : '') +
+        ((LAST_COMPLETED_SHEET_URL || (STATE && STATE.todaySheetUrl)) ? '<a href="' + (LAST_COMPLETED_SHEET_URL || STATE.todaySheetUrl) + '" target="_blank" class="btn btn-secondary btn-sm" style="margin-top:6px;text-decoration:none;">📊 スプレッドシートで直接開く</a>' : '') +
       '</div>' +
 
       '<h3 style="font-size:15px;margin:16px 0 6px;">過去の飛行日誌を検索・出力</h3>' +
@@ -2946,7 +2992,7 @@ function renderPdfView(div){
 }
 
 function openTodayPdf(){
-  callServer('getPdfUrl', null, function(res){
+  callServer('getPdfUrl', LAST_COMPLETED_SHEET || null, function(res){
     window.open(res.pdfUrl, '_blank');
   });
 }
@@ -2999,7 +3045,9 @@ function getTodayYmd(){
   return y + '-' + m + '-' + day;
 }
 
-// 初回起動
+// 初回起動：進行中の運航下書き1件だけを端末から復元する。
+restoreOperationDraft();
+updateNetworkStatus();
 render();
 </script>
 </body>
