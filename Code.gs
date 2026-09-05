@@ -184,10 +184,6 @@ function finishAircraft(input) {
     });
     const modelsToProcess = usedModels.length ? usedModels : [session.model];
     if (modelsToProcess.length > 2) throw new Error('1回の運航で記録できる機体は2機までです。');
-    if (modelsToProcess.some(function(model) {
-      const count = (session.flights || []).filter(function(flight) { return flight.model === model; }).length;
-      return count > 7;
-    })) throw new Error('1機あたりの飛行記録は7回までです。');
     modelsToProcess.forEach(function(model) {
       const ac = session.aircrafts && session.aircrafts[model];
       const missingPre = PRE_CHECK_NAMES.filter(function(name) {
@@ -211,75 +207,89 @@ function finishAircraft(input) {
       required_(flight.landingAt, '着陸時刻');
     });
 
-    if (modelsToProcess.length > (blockUsed_(sheet, 1) ? 0 : 1) + (blockUsed_(sheet, 2) ? 0 : 1)) {
-      sheet = getOrCreateDateSheet_(ss, operationDate, true);
-    }
-
     const aircraftDataMap = postflight.aircrafts || {};
-    const blockByModel = {};
+    const blockAssignments = [];
     modelsToProcess.forEach(function(model) {
-      const blockNo = chooseAvailableBlock_(sheet);
-      if (!blockNo) throw new Error('運航記録を書き込める空き枠がありません。');
-      blockByModel[model] = blockNo;
-      const modelSession = Object.assign({}, session, {
-        model: model,
-        dateSheet: sheet.getName(),
-        blockNo: blockNo
+      const modelFlights = (session.flights || []).filter(function(flight) { return flight.model === model; });
+      const chunks = [];
+      for (let index = 0; index < modelFlights.length; index += 7) {
+        chunks.push(modelFlights.slice(index, index + 7));
+      }
+      if (!chunks.length) chunks.push([]);
+
+      chunks.forEach(function(flights) {
+        let blockNo = chooseAvailableBlock_(sheet);
+        if (!blockNo) {
+          const sequenceMatch = sheet.getName().match(/_(\d+)$/);
+          const nextSequence = (sequenceMatch ? Number(sequenceMatch[1]) : 1) + 1;
+          sheet = getOrCreateDateSheet_(ss, operationDate, false, nextSequence);
+          blockNo = chooseAvailableBlock_(sheet);
+        }
+        if (!blockNo) throw new Error('運航記録を書き込める空き枠がありません。');
+
+        const modelSession = Object.assign({}, session, {
+          model: model,
+          dateSheet: sheet.getName(),
+          blockNo: blockNo
+        });
+        writeHeaderFields_(sheet, modelSession, blockNo);
+        const ac = session.aircrafts && session.aircrafts[model];
+        writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', blockNo);
+        blockAssignments.push({ model: model, flights: flights, sheet: sheet, blockNo: blockNo });
       });
-      writeHeaderFields_(sheet, modelSession, blockNo);
-      const ac = session.aircrafts && session.aircrafts[model];
-      writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', blockNo);
     });
 
     const cumulativeByModel = {};
     modelsToProcess.forEach(function(model) { cumulativeByModel[model] = aircraftTotalMinutes_(model); });
-    const nextRowByModel = {};
-    modelsToProcess.forEach(function(model) {
-      const block = flightBlocks_(sheet).filter(function(item) { return item.blockNo === blockByModel[model]; })[0];
-      nextRowByModel[model] = block.startRow;
-    });
+    const flightTargetByFlight = new Map();
 
     // 通信は最後に1回だけ行うが、日付シートには各飛行を使用した分だけ1行ずつ残す。
     // 同じ内容をBAT管理シートにも個別保存し、飛行記録とバッテリー履歴を両立する。
-    (session.flights || []).forEach(function(flight) {
-      const model = flight.model;
-      const blockNo = blockByModel[model];
-      if (!blockNo) return;
-      const minutes = Number(flight.actualMinutes) || 0;
-      if (minutes <= 0) throw new Error('実飛行時間を確認してください。');
-      cumulativeByModel[model] += minutes;
-      const row = nextRowByModel[model]++;
-      writeFlightFields_(sheet, { blockNo: blockNo, row: row }, {
-        '使用バッテリー': 'BAT_' + Number(flight.battery),
-        '離陸場所': flight.takeoffLocation,
-        '着陸場所': flight.landingLocation,
-        '離陸時刻': format_(flight.takeoffAt, 'HH:mm'),
-        '着陸時刻': format_(flight.landingAt, 'HH:mm'),
-        '飛行時間': formatHoursMinutes_(minutes),
-        '総飛行時間': formatHoursMinutes_(cumulativeByModel[model]),
-        '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
-        'バッテリー異常・所感': flight.batteryNote || ''
+    blockAssignments.forEach(function(assignment) {
+      const block = flightBlocks_(assignment.sheet).filter(function(item) {
+        return item.blockNo === assignment.blockNo;
+      })[0];
+      assignment.flights.forEach(function(flight, index) {
+        const model = assignment.model;
+        const minutes = Number(flight.actualMinutes) || 0;
+        if (minutes <= 0) throw new Error('実飛行時間を確認してください。');
+        cumulativeByModel[model] += minutes;
+        writeFlightFields_(assignment.sheet, { blockNo: assignment.blockNo, row: block.startRow + index }, {
+          '使用バッテリー': 'BAT_' + Number(flight.battery),
+          '離陸場所': flight.takeoffLocation,
+          '着陸場所': flight.landingLocation,
+          '離陸時刻': format_(flight.takeoffAt, 'HH:mm'),
+          '着陸時刻': format_(flight.landingAt, 'HH:mm'),
+          '飛行時間': formatHoursMinutes_(minutes),
+          '総飛行時間': formatHoursMinutes_(cumulativeByModel[model]),
+          '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
+          'バッテリー異常・所感': flight.batteryNote || ''
+        });
+        flightTargetByFlight.set(flight, assignment.sheet.getName());
       });
-      appendBatteryHistory_({
-        dateSheet: sheet.getName(), model: model, purpose: session.purpose,
-        route: session.route, currentBattery: Number(flight.battery)
-      }, minutes, { cycle: flight.cycle || '', batteryNote: flight.batteryNote || '' });
     });
 
-    modelsToProcess.forEach(function(model) {
-      const blockNo = blockByModel[model];
-      const acInput = aircraftDataMap[model] || postflight;
+    // BAT履歴は、機体別ブロックへの割当後も実際の飛行順を維持して各飛行1件だけ記録する。
+    (session.flights || []).forEach(function(flight) {
+      appendBatteryHistory_({
+        dateSheet: flightTargetByFlight.get(flight), model: flight.model, purpose: session.purpose,
+        route: session.route, currentBattery: Number(flight.battery)
+      }, Number(flight.actualMinutes) || 0, { cycle: flight.cycle || '', batteryNote: flight.batteryNote || '' });
+    });
+
+    blockAssignments.forEach(function(assignment) {
+      const acInput = aircraftDataMap[assignment.model] || postflight;
       const checks = acInput.checks || postflight.checks || {};
       const abnormal = POST_CHECK_NAMES.some(function(name) { return checks[name] !== '正常'; });
 
-      writeCheckResults_(sheet, checks, '飛行後点検', blockNo);
-      writeOptionalFields_(sheet, {
+      writeCheckResults_(assignment.sheet, checks, '飛行後点検', assignment.blockNo);
+      writeOptionalFields_(assignment.sheet, {
         inspectionLocation: postflight.inspectionLocation || session.inspectionLocation,
         defectLocation: acInput.defectLocation || '',
         defectDetail: acInput.defectDetail || '',
         actionDetail: acInput.actionDetail || '',
         confirmer: postflight.confirmer || session.pilot
-      }, blockNo, abnormal);
+      }, assignment.blockNo, abnormal);
     });
     const appState = getAppState();
     if (commitKey) commitCache_().put(commitKey, JSON.stringify(appState), 21600);
@@ -287,10 +297,10 @@ function finishAircraft(input) {
   });
 }
 
-function getOrCreateDateSheet_(spreadsheet, date, forceNew) {
+function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence) {
   const baseName = format_(date, 'yyyy.M.d');
-  let name = baseName;
-  let index = 1;
+  let index = Math.max(1, Number(startSequence) || 1);
+  let name = index === 1 ? baseName : baseName + '_' + index;
   while (true) {
     let sheet = spreadsheet.getSheetByName(name);
     if (!sheet) {
@@ -1079,6 +1089,7 @@ function localFlightAction(name, payload, onSuccess){
     var weather = [];
     if(payload.weather) weather.push(payload.weather);
     if(payload.windSpeed) weather.push('風速' + payload.windSpeed + (payload.windDir ? ' ' + payload.windDir : ''));
+    else if(payload.windDir) weather.push('風向' + payload.windDir);
     var purpose = payload.purpose === 'その他' ? 'その他：' + payload.purposeOther : payload.purpose;
     if(weather.length) purpose += ' [気象: ' + weather.join(' / ') + ']';
     var method = (payload.method || []).join(' / ');
@@ -1602,24 +1613,24 @@ function renderStartView(div){
         '<div style="font-weight:700;font-size:13px;color:#1e3a8a;margin-bottom:6px;">🌤 気象情報（安全運航確認・ワンタップ入力）</div>' +
         '<label style="font-size:12px;margin:4px 0 2px;">天候</label>' +
         '<div class="chip-group" id="weatherChips">' +
-          '<button type="button" class="chip-btn active" onclick="selectWeather(this, \'晴\')">☀ 晴</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWeather(this, \'晴\')">☀ 晴</button>' +
           '<button type="button" class="chip-btn" onclick="selectWeather(this, \'曇\')">☁ 曇</button>' +
           '<button type="button" class="chip-btn" onclick="selectWeather(this, \'雨\')">🌧 雨</button>' +
           '<button type="button" class="chip-btn warning" onclick="selectWeather(this, \'強風注意\')">⚠ 強風注意</button>' +
         '</div>' +
-        '<input type="hidden" id="weatherVal" value="晴">' +
+        '<input type="hidden" id="weatherVal" value="">' +
         '<label style="font-size:12px;margin:4px 0 2px;">風速（平均）</label>' +
         '<div class="chip-group" id="windSpeedChips">' +
           '<button type="button" class="chip-btn" onclick="selectWindSpeed(this, \'0〜1m/s 静穏\')">🍃 0〜1m/s 静穏</button>' +
-          '<button type="button" class="chip-btn active" onclick="selectWindSpeed(this, \'2〜3m/s 穏やか\')">🍃 2〜3m/s 穏やか</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindSpeed(this, \'2〜3m/s 穏やか\')">🍃 2〜3m/s 穏やか</button>' +
           '<button type="button" class="chip-btn warning" onclick="selectWindSpeed(this, \'4〜5m/s 注意\')">⚠️ 4〜5m/s 注意</button>' +
           '<button type="button" class="chip-btn danger" onclick="selectWindSpeed(this, \'6m/s以上 飛行不可\')">⛔ 6m/s以上 飛行不可</button>' +
         '</div>' +
-        '<input type="hidden" id="windSpeedVal" value="2〜3m/s 穏やか">' +
+        '<input type="hidden" id="windSpeedVal" value="">' +
         '<label style="font-size:12px;margin:4px 0 2px;">風向</label>' +
         '<div class="chip-group" id="windDirChips">' +
           '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'北\')">北</button>' +
-          '<button type="button" class="chip-btn active" onclick="selectWindDir(this, \'北東\')">北東</button>' +
+          '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'北東\')">北東</button>' +
           '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'東\')">東</button>' +
           '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'南東\')">南東</button>' +
           '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'南\')">南</button>' +
@@ -1627,7 +1638,7 @@ function renderStartView(div){
           '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'西\')">西</button>' +
           '<button type="button" class="chip-btn" onclick="selectWindDir(this, \'北西\')">北西</button>' +
         '</div>' +
-        '<input type="hidden" id="windDirVal" value="北東">' +
+        '<input type="hidden" id="windDirVal" value="">' +
       '</div>' +
 
       '<label>飛行カテゴリー<span class="required">*</span></label>' +
@@ -1825,9 +1836,9 @@ function submitStartOperation(){
     assistant: val('assistant'),
     cert: val('cert'),
     forceNewLocation: isChecked('forceNewLocation'),
-    weather: val('weatherVal') || '晴',
-    windSpeed: val('windSpeedVal') || '2〜3m/s 穏やか',
-    windDir: val('windDirVal') || '北東'
+    weather: val('weatherVal'),
+    windSpeed: val('windSpeedVal'),
+    windDir: val('windDirVal')
   };
 
   saveLastOperation(payload);
