@@ -146,7 +146,37 @@ BAT_1～BAT_7は機体累計の算出元には使用せず、従来どおり各�
 * **プラットフォーム**: Google Apps Script（V8ランタイム）
 * **データベース**: Google スプレッドシート
 * **フロントエンド**: HTML5 / CSS3 / Vanilla JavaScript（モバイル最適化・レスポンシブ）
-* **配布形態**: `Code.gs` 単一ファイル構成（コピー＆ペーストで即デプロイ可能）
+* **ソース管理**: `src/`配下の分割ファイルを正本として管理
+* **配布形態**: 自動生成された`dist/Code.gs`単一ファイル（コピー＆ペーストで即デプロイ可能）
+
+### ソースコードの管理と自動生成
+
+- 正本は`src/`配下の4ファイルです。
+- GASへ貼り付ける統合版は`dist/Code.gs`です。
+- `dist/Code.gs`は自動生成物です。手動編集しないでください。
+- 結合順は`scripts/source-order.json`で固定しています。
+- `src/`の変更を`main`へ反映すると、GitHub Actionsが`dist/Code.gs`を再生成し、同じリポジトリへ自動コミットします。
+- Pull Requestでは`dist/Code.gs`が`src/`と一致しない場合、検証を失敗させます。
+- 自動生成、回帰テスト、自動コミット又はリポジトリ上の一致確認に失敗した場合、GitHub Actionsは成功扱いになりません。
+- ルートの`Code.gs`はv2026.09.06.1移行確認用の旧統合版です。移行確認が終わるまで削除しませんが、今後の正本やGAS貼付元としては使用しません。
+
+GitHub Actionsのログには、使用した`src/`ファイル一覧と結合順、生成物のSHA-256、一致検証、回帰テスト結果が表示されます。開発者が手元で確認する場合だけ、次のコマンドを使用できます。通常のGAS更新で利用者が実行する必要はありません。
+
+```bash
+node scripts/build.mjs
+node scripts/build.mjs --check
+node tests/regression.test.js dist/Code.gs
+```
+
+### 非エンジニア向けGAS更新手順
+
+1. GitHub Actionsの`Build and verify dist Code.gs`が成功していることを確認します。
+2. GitHub上の`dist/Code.gs`を開き、全文をコピーします。
+3. Google Apps Scriptの既存`Code.gs`を開き、全文を貼り替えます。
+4. 保存します。
+5. 「デプロイ」から既存のWebアプリのデプロイを更新します。
+
+GASへ`src/`の複数ファイルを貼り分ける作業は不要です。貼り付けるのは常に`dist/Code.gs`の1ファイルだけです。
 
 ---
 

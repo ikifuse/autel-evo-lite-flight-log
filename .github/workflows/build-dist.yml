@@ -1,0 +1,74 @@
+name: Build and verify dist Code.gs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'dist/Code.gs'
+      - 'scripts/build.mjs'
+      - 'scripts/source-order.json'
+      - 'tests/regression.test.js'
+      - '.github/workflows/build-dist.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'dist/Code.gs'
+      - 'scripts/build.mjs'
+      - 'scripts/source-order.json'
+      - 'tests/regression.test.js'
+      - '.github/workflows/build-dist.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify pull request already contains current dist
+        if: github.event_name == 'pull_request'
+        run: node scripts/build.mjs --check
+
+      - name: Generate dist from src
+        if: github.event_name != 'pull_request'
+        run: node scripts/build.mjs
+
+      - name: Verify generated dist
+        if: github.event_name != 'pull_request'
+        run: node scripts/build.mjs --check
+
+      - name: Run regression tests against dist
+        run: node tests/regression.test.js dist/Code.gs
+
+      - name: Commit generated dist to main
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        run: |
+          if git diff --quiet -- dist/Code.gs; then
+            echo 'dist/Code.gs is already current.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dist/Code.gs
+          git commit -m 'chore: regenerate dist/Code.gs'
+          git push
+
+      - name: Verify repository copy after automatic update
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch origin main
+          git show origin/main:dist/Code.gs > "$RUNNER_TEMP/remote-Code.gs"
+          node scripts/build.mjs --check-file="$RUNNER_TEMP/remote-Code.gs"

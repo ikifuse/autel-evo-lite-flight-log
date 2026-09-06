@@ -1,0 +1,6 @@
+[
+  "src/00_config.gs",
+  "src/10_server_workflow.gs",
+  "src/20_spreadsheet_io.gs",
+  "src/30_web_app.gs"
+]
