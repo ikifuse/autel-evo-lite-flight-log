@@ -292,8 +292,50 @@ function run() {
     assert(uuidStart>=0 && uuidEnd>uuidStart,'T15 UUID helper markers');
     currentApp=currentApp.slice(0,uuidStart)+currentApp.slice(uuidEnd);
     currentApp=currentApp.replace('draftId:createOperationDraftId()', "draftId:'op_' + Date.now()");
-    assert(currentApp===legacyApp,'T15 visible UI or client flow changed outside internal UUID generation');
+    const withoutFavoriteChanges = app => app
+      .replace(/    \.(?:preset-bar|favorite-list) \{[\s\S]*?(?=    \.input-error \{)/, '    /* favorite management styles */\n')
+      .replace(/function loadFavorites\(\)\{[\s\S]*?(?=\/\/ ----------------------------------------------------\n\/\/ GPS自動取得)/, '/* favorite storage management */\n\n')
+      .replace(/  var favHtml = [\s\S]*?(?=\n\n  div\.innerHTML =)/, "  var favHtml = '';\n  /* favorite list rendering */")
+      .replace(/\n      (?:\(favHtml \?|'<div id="favoriteSection")[\s\S]*?(?=\n\n      '<div class="status-box">)/, '\n      /* favorite list section */')
+      .replace(/function (?:favoriteDisplayName_|applyFavorite)\(.*?[\s\S]*?(?=function submitStartOperation\(\))/, '/* favorite actions */\n\n');
+    assert(withoutFavoriteChanges(currentApp)===withoutFavoriteChanges(legacyApp),'T15 UI or client flow changed outside authorized favorite management and internal UUID generation');
     reports.push('TEST 15 OK');
+  }
+
+  {
+    const current=fs.readFileSync(sourcePath,'utf8');
+    const app=current.slice(current.indexOf('const APP_HTML ='));
+    const storageBlock=app.slice(app.indexOf('function loadFavorites(){'), app.indexOf('// GPS自動取得＆逆ジオコーディング'));
+    const actionBlock=app.slice(app.indexOf('function favoriteDisplayName_('), app.indexOf('function submitStartOperation(){'));
+    const storage=new Map();
+    const fields={ route:{value:''}, inspectionLocation:{value:''} };
+    const favoriteContext={
+      JSON, String, Array,
+      localStorage:{ getItem:key=>storage.has(key)?storage.get(key):null, setItem:(key,value)=>storage.set(key,value) },
+      el:id=>fields[id] || null, val:()=>'', esc:value=>String(value), alert(){}, confirm:()=>true, prompt:()=>null,
+      renderStartView(){}
+    };
+    vm.createContext(favoriteContext);
+    vm.runInContext(`var STORAGE_KEY_FAVORITES='EVO_LITE_FAVORITES';\n${storageBlock}\n${actionBlock}`, favoriteContext);
+    const legacyFavorites=[{name:'GPS取得名',location:'地点A',route:'経路A'},{name:'残す場所',location:'地点B',route:'経路B'}];
+    storage.set('EVO_LITE_FAVORITES',JSON.stringify(legacyFavorites));
+    favoriteContext.applyFavorite(0);
+    assert(fields.route.value==='経路A' && fields.inspectionLocation.value==='地点A','favorite apply compatibility');
+    const beforeDuplicate=storage.get('EVO_LITE_FAVORITES');
+    const duplicate=favoriteContext.saveFavoriteSpot('自宅','地点A','経路A');
+    assert(duplicate.status==='duplicate' && storage.get('EVO_LITE_FAVORITES')===beforeDuplicate,'favorite duplicate was added or converted');
+    assert(favoriteContext.renameFavoriteSpot_(0,'自宅'),'favorite rename failed');
+    let saved=JSON.parse(storage.get('EVO_LITE_FAVORITES'));
+    assert(saved[0].name==='自宅' && saved[0].location==='地点A' && saved[0].route==='経路A','favorite rename changed location or route');
+    assert(favoriteContext.deleteFavoriteSpot_(1),'favorite delete failed');
+    saved=JSON.parse(storage.get('EVO_LITE_FAVORITES'));
+    assert(saved.length===1 && saved[0].name==='自宅','favorite delete removed wrong item');
+    assert(favoriteContext.saveFavoriteSpot('新規','地点C','経路C').status==='saved','new favorite save failed');
+    saved=JSON.parse(storage.get('EVO_LITE_FAVORITES'));
+    assert(saved.length===2 && saved[0].name==='新規','new favorite not inserted');
+    assert(app.includes('>使う</button>') && app.includes('>名前変更</button>') && app.includes('>削除</button>'),'favorite action labels missing');
+    assert(/function deleteFavorite\(idx\)\{[\s\S]*?confirm\(/.test(app),'favorite delete confirmation missing');
+    reports.push('TEST 24 OK');
   }
 
   const retrySingle = makeInput([{model:'EVO Lite',minutes:2,battery:1},{model:'EVO Lite',minutes:3,battery:2}]);
