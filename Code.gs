@@ -23,8 +23,9 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.05.4';
+const APP_VERSION = '2026.09.06.1';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
+const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
 const BATTERY_FIRST_ROW = 13;
@@ -33,6 +34,11 @@ const BATTERY_LAST_ROW = 212;
 const MODELS = {
   'EVO Lite': 'JU3268805C02',
   'EVO Lite+': 'JU3269B165D2'
+};
+
+const AIRCRAFT_MAINTENANCE_SHEETS = {
+  'EVO Lite': '点検整備記録_EVO Lite_原本',
+  'EVO Lite+': '点検整備記録_EVO Lite+_原本'
 };
 
 const BLOCKS = {
@@ -57,6 +63,7 @@ const PRE_CHECK_NAMES = [
 ];
 
 const POST_CHECK_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
+const APP_ICON_URL = 'https://raw.githubusercontent.com/ikifuse/autel-evo-lite-flight-log/main/icon.png';
 
 let LOCK_DEPTH = 0;
 
@@ -69,7 +76,10 @@ function doGet() {
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
   return HtmlService.createHtmlOutput(
-    APP_HTML.replace('__INITIAL_STATE__', initialState).replace('__APP_VERSION__', APP_VERSION)
+    APP_HTML
+      .replace('__INITIAL_STATE__', initialState)
+      .replace('__APP_VERSION__', APP_VERSION)
+      .replace(/__APP_ICON__/g, APP_ICON_URL)
   )
     .setTitle('ドローン運航記録')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
@@ -84,6 +94,7 @@ function dateFromSheetName_(sheetName) {
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
 }
 function commitCache_() { return CacheService.getScriptCache(); }
+function commitProperties_() { return PropertiesService.getScriptProperties(); }
 
 function trackedSetValue_(range, value) { return range.setValue(value); }
 function trackedSetValues_(range, values) { return range.setValues(values); }
@@ -168,6 +179,10 @@ function finishAircraft(input) {
     const commitKey = session.draftId ? COMMIT_RESULT_PREFIX + session.draftId : '';
     const previousResult = commitKey ? commitCache_().get(commitKey) : '';
     if (previousResult) return JSON.parse(previousResult);
+    const planKey = session.draftId ? COMMIT_PLAN_PREFIX + session.draftId : '';
+    const previousPlan = planKey ? commitProperties_().getProperty(planKey) : '';
+    if (previousPlan && JSON.parse(previousPlan).status === 'complete') return getAppState();
+    required_(session.draftId, '運航下書きID');
     required_(session.model, '機体');
     required_(session.route, '飛行経路・場所');
     required_(session.pilot, '操縦者');
@@ -178,7 +193,6 @@ function finishAircraft(input) {
     const operationDate = session.operationDate
       ? dateFromSheetName_(session.operationDate)
       : now_();
-    let sheet = getOrCreateDateSheet_(ss, operationDate, !!session.forceNewLocation);
     const usedModels = Object.keys(session.aircrafts || {}).filter(function(model) {
       return session.aircrafts[model] && session.aircrafts[model].used;
     });
@@ -205,7 +219,37 @@ function finishAircraft(input) {
       required_(flight.landingLocation, '着陸場所');
       required_(flight.takeoffAt, '離陸時刻');
       required_(flight.landingAt, '着陸時刻');
+      const minutes = Number(flight.actualMinutes);
+      if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('実飛行時間を確認してください。');
     });
+
+    const commitSignature = commitSignature_(session);
+    let commitPlan;
+    if (previousPlan) {
+      commitPlan = JSON.parse(previousPlan);
+      if (commitPlan.signature !== commitSignature) {
+        throw new Error('保存再試行時の運航内容が最初の送信内容と一致しません。新しい運航として保存してください。');
+      }
+    } else {
+      const startingByModel = {};
+      const finalByModel = {};
+      modelsToProcess.forEach(function(model) {
+        startingByModel[model] = aircraftTotalMinutes_(model);
+        finalByModel[model] = startingByModel[model];
+      });
+      (session.flights || []).forEach(function(flight) {
+        finalByModel[flight.model] += Number(flight.actualMinutes);
+      });
+      commitPlan = {
+        status: 'pending',
+        signature: commitSignature,
+        startingByModel: startingByModel,
+        finalByModel: finalByModel
+      };
+      commitProperties_().setProperty(planKey, JSON.stringify(commitPlan));
+    }
+
+    let sheet = getOrCreateDateSheet_(ss, operationDate, !!session.forceNewLocation);
 
     const aircraftDataMap = postflight.aircrafts || {};
     const blockAssignments = [];
@@ -240,7 +284,7 @@ function finishAircraft(input) {
     });
 
     const cumulativeByModel = {};
-    modelsToProcess.forEach(function(model) { cumulativeByModel[model] = aircraftTotalMinutes_(model); });
+    modelsToProcess.forEach(function(model) { cumulativeByModel[model] = commitPlan.startingByModel[model]; });
     const flightTargetByFlight = new Map();
 
     // 通信は最後に1回だけ行うが、日付シートには各飛行を使用した分だけ1行ずつ残す。
@@ -251,8 +295,7 @@ function finishAircraft(input) {
       })[0];
       assignment.flights.forEach(function(flight, index) {
         const model = assignment.model;
-        const minutes = Number(flight.actualMinutes) || 0;
-        if (minutes <= 0) throw new Error('実飛行時間を確認してください。');
+        const minutes = Number(flight.actualMinutes);
         cumulativeByModel[model] += minutes;
         writeFlightFields_(assignment.sheet, { blockNo: assignment.blockNo, row: block.startRow + index }, {
           '使用バッテリー': 'BAT_' + Number(flight.battery),
@@ -291,6 +334,10 @@ function finishAircraft(input) {
         confirmer: postflight.confirmer || session.pilot
       }, assignment.blockNo, abnormal);
     });
+
+    applyAircraftTotals_(commitPlan);
+    commitPlan.status = 'complete';
+    commitProperties_().setProperty(planKey, JSON.stringify(commitPlan));
     const appState = getAppState();
     if (commitKey) commitCache_().put(commitKey, JSON.stringify(appState), 21600);
     return appState;
@@ -377,14 +424,15 @@ function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
 
 function writeHeaderFields_(sheet, session, blockNo) {
   const block = block_(blockNo);
-  [6, 7].forEach(row => {
+  for (let row = 1; row <= Math.min(10, sheet.getLastRow()); row++) {
     const cell = sheet.getRange(row, block.startCol);
     const current = String(cell.getDisplayValue() || '').replace(/^[□☑✓]\s*/, '').trim();
     if (current.indexOf('Autel Robotics Co., Ltd.') >= 0) {
-      const selected = current.indexOf('/ ' + session.model + ' /') >= 0;
+      const normalized = current.replace(/\s+/g, ' ');
+      const selected = normalized.indexOf('/ ' + session.model + ' /') >= 0;
       trackedSetValue_(cell, (selected ? '☑ ' : '□ ') + current);
     }
-  });
+  }
 
   const dateCell = findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true);
   if (dateCell) {
@@ -412,7 +460,7 @@ function writeCheckResults_(sheet, checks, section, blockNo) {
   const names = section === '飛行前点検' ? PRE_CHECK_NAMES : POST_CHECK_NAMES;
   const checkCol = block_(blockNo).startCol + (section === '飛行前点検' ? 6 : 12);
   names.forEach(name => {
-    const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）'] : [name];
+    const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
     const label = findInBlock_(sheet, blockNo, labels, false);
     if (label) trackedSetValue_(sheet.getRange(label.row, checkCol), checks[name] === '正常' ? '☑' : '□');
   });
@@ -438,7 +486,7 @@ function writeFlightFields_(sheet, slot, fields) {
   const aliases = {
     '使用バッテリー':['使用バッテリー'], '離陸場所':['離陸場所'], '着陸場所':['着陸場所'],
     '離陸時刻':['離陸時刻'], '着陸時刻':['着陸時刻'], '飛行時間':['飛行時間'],
-    '総飛行時間':['総飛行時間'],
+    '総飛行時間':['総飛行時間','総飛行時間（累計時間）'],
     '安全に影響した事項':['安全に影響した事項','飛行の安全に影響した事項'],
     'バッテリー異常・所感':['バッテリー異常・所感']
   };
@@ -477,16 +525,80 @@ function writeOptionalFields_(sheet, input, blockNo, abnormal) {
 }
 
 function aircraftTotalMinutes_(model) {
-  let total = 0;
-  for (let number = 1; number <= 7; number++) {
-    const sheet = spreadsheet_().getSheetByName(BATTERY_SHEET_PREFIX + number);
-    if (!sheet) continue;
-    const count = BATTERY_LAST_ROW - BATTERY_FIRST_ROW + 1;
-    sheet.getRange(BATTERY_FIRST_ROW, 2, count, 3).getValues().forEach(row => {
-      if (String(row[0] || '').trim() === model) total += Number(row[2]) || 0;
+  return parseHoursMinutes_(aircraftTotalCell_(model).getDisplayValue(), model + 'の点検時の総飛行時間');
+}
+
+function aircraftTotalCell_(model) {
+  const sheetName = AIRCRAFT_MAINTENANCE_SHEETS[model];
+  if (!sheetName) throw new Error('機体別点検整備原本の対応を確認してください：' + model);
+  const sheet = spreadsheet_().getSheetByName(sheetName);
+  if (!sheet) throw new Error(sheetName + ' シートが見つかりません。');
+  const values = sheet.getDataRange().getDisplayValues();
+  const matches = [];
+  values.forEach(function(row, rowIndex) {
+    row.forEach(function(value, colIndex) {
+      if (String(value || '').trim() === '点検時の総飛行時間') {
+        matches.push({ row: rowIndex + 1, col: colIndex + 1 });
+      }
     });
+  });
+  if (matches.length !== 1) {
+    throw new Error(sheetName + ' の「点検時の総飛行時間」欄を一意に確認できません。');
   }
+  const labelCell = sheet.getRange(matches[0].row, matches[0].col);
+  const merged = labelCell.getMergedRanges();
+  const labelRange = merged.length ? merged[0] : labelCell;
+  const valueCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (valueCol > sheet.getMaxColumns()) {
+    throw new Error(sheetName + ' の「点検時の総飛行時間」の入力欄を確認できません。');
+  }
+  return sheet.getRange(matches[0].row, valueCol);
+}
+
+function parseHoursMinutes_(value, label) {
+  const text = String(value == null ? '' : value).trim();
+  const match = text.match(/^(\d{2,}):([0-5]\d)$/);
+  if (!match) throw new Error((label || '累計時間') + 'はHH:MM形式で入力してください（例：00:00、105:27）。');
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const total = hours * 60 + minutes;
+  if (!Number.isSafeInteger(total)) throw new Error((label || '累計時間') + 'が大きすぎます。');
   return total;
+}
+
+function commitSignature_(session) {
+  const payload = JSON.stringify({
+    draftId: session.draftId,
+    operationDate: session.operationDate,
+    purpose: session.purpose,
+    route: session.route,
+    flights: (session.flights || []).map(function(flight) {
+      return {
+        model: flight.model,
+        battery: Number(flight.battery),
+        takeoffAt: flight.takeoffAt,
+        landingAt: flight.landingAt,
+        actualMinutes: Number(flight.actualMinutes)
+      };
+    })
+  });
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, payload, Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(digest);
+}
+
+function applyAircraftTotals_(commitPlan) {
+  Object.keys(commitPlan.finalByModel || {}).forEach(function(model) {
+    const current = aircraftTotalMinutes_(model);
+    const starting = Number(commitPlan.startingByModel[model]);
+    const finalMinutes = Number(commitPlan.finalByModel[model]);
+    if (current === finalMinutes) return;
+    if (current !== starting) {
+      throw new Error(model + 'の機体累計時間が保存開始後に変更されています。原本を確認してください。');
+    }
+    const cell = aircraftTotalCell_(model);
+    trackedSetNumberFormat_(cell, '@');
+    trackedSetValue_(cell, formatHoursMinutes_(finalMinutes));
+  });
 }
 
 function formatHoursMinutes_(minutes) {
@@ -524,6 +636,13 @@ const APP_HTML = String.raw`<!doctype html>
   <base target="_top">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#1976d2">
+  <link rel="icon" type="image/png" href="__APP_ICON__">
+  <link rel="apple-touch-icon" href="__APP_ICON__">
+  <link rel="manifest" href="data:application/manifest+json;utf-8,%7B%22name%22%3A%22%E3%83%89%E3%83%AD%E3%83%BC%E3%83%B3%E9%81%8B%E8%88%AA%E8%A8%98%E9%8C%B2%22%2C%22short_name%22%3A%22%E9%81%8B%E8%88%AA%E8%A8%98%E9%8C%B2%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23f4f6f9%22%2C%22theme_color%22%3A%22%231976d2%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22__APP_ICON__%22%2C%22sizes%22%3A%22192x192%22%2C%22type%22%3A%22image%2Fpng%22%7D%5D%7D">
   <title>ドローン運航記録</title>
   <style>
     :root {
