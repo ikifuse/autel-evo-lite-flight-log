@@ -149,16 +149,33 @@ BAT_1～BAT_7は機体累計の算出元には使用せず、従来どおり各�
 * **ソース管理**: `src/`配下の分割ファイルを正本として管理
 * **配布形態**: 自動生成された`dist/Code.gs`単一ファイル（コピー＆ペーストで即デプロイ可能）
 
-### ソースコードの管理と自動生成
+### 非エンジニア向け：普段確認する場所
 
-- 正本は`src/`配下の4ファイルです。
-- GASへ貼り付ける統合版は`dist/Code.gs`です。
-- `dist/Code.gs`は自動生成物です。手動編集しないでください。
-- 結合順は`scripts/source-order.json`で固定しています。
-- `src/`の変更を`main`へ反映すると、GitHub Actionsが`dist/Code.gs`を再生成し、同じリポジトリへ自動コミットします。
-- Pull Requestでは`dist/Code.gs`が`src/`と一致しない場合、検証を失敗させます。
-- 自動生成、回帰テスト、自動コミット又はリポジトリ上の一致確認に失敗した場合、GitHub Actionsは成功扱いになりません。
-- ルートの`Code.gs`はv2026.09.06.1移行確認用の旧統合版です。移行確認が終わるまで削除しませんが、今後の正本やGAS貼付元としては使用しません。
+通常のGAS更新で確認するのは、次の2点だけです。
+
+1. GitHub Actionsの`Build and verify dist Code.gs`が成功していること
+2. GitHub上の`dist/Code.gs`
+
+GASへ貼り付けるのは、必ず`dist/Code.gs`だけです。`src/`配下の各`.gs`ファイルをGASへ個別に貼り付ける必要はありません。
+
+### GAS更新手順
+
+1. GitHub Actionsが成功していることを確認します。
+2. `dist/Code.gs`を開き、全文をコピーします。
+3. Google Apps Scriptの既存`Code.gs`へ全文を貼り替えます。
+4. 保存します。
+5. 「デプロイ」から既存Webアプリのデプロイを更新します。
+6. PixelでWebアプリを再読み込みします。
+
+操作の流れは、**`dist/Code.gs`全文コピー → GASの`Code.gs`へ全文貼り替え → 保存 → 既存Webアプリのデプロイ更新 → Pixelで再読み込み**です。
+
+### 開発用ソースと自動生成
+
+- 開発用の正本は`src/`配下です。
+- `dist/Code.gs`はGAS貼り付け用の自動生成版であり、正本ではありません。手動編集は禁止です。
+- `src/`が更新されると、GitHub Actionsが`dist/Code.gs`を自動生成し、構文・内容・回帰テストを検証して同じリポジトリへ反映します。
+- `src/`と`dist/Code.gs`が一致しない状態や、生成・検証・自動反映に失敗した状態は成功扱いになりません。
+- ルートの旧`Code.gs`は、v2026.09.06.1移行確認・復旧用として当面保持します。今後の正本や通常のGAS貼付元には使用しません。
 
 GitHub Actionsのログには、使用した`src/`ファイル一覧と結合順、生成物のSHA-256、一致検証、回帰テスト結果が表示されます。開発者が手元で確認する場合だけ、次のコマンドを使用できます。通常のGAS更新で利用者が実行する必要はありません。
 
@@ -167,16 +184,6 @@ node scripts/build.mjs
 node scripts/build.mjs --check
 node tests/regression.test.js dist/Code.gs
 ```
-
-### 非エンジニア向けGAS更新手順
-
-1. GitHub Actionsの`Build and verify dist Code.gs`が成功していることを確認します。
-2. GitHub上の`dist/Code.gs`を開き、全文をコピーします。
-3. Google Apps Scriptの既存`Code.gs`を開き、全文を貼り替えます。
-4. 保存します。
-5. 「デプロイ」から既存のWebアプリのデプロイを更新します。
-
-GASへ`src/`の複数ファイルを貼り分ける作業は不要です。貼り付けるのは常に`dist/Code.gs`の1ファイルだけです。
 
 ---
 
