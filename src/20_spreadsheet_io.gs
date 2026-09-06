@@ -1,3 +1,257 @@
+function validateCommitBusinessInput_(input) {
+  const session = input.session;
+  const postflight = input.postflight;
+  required_(session.model, '機体');
+  if (!MODELS[session.model]) throw new Error('機体を確認してください。');
+  required_(session.route, '飛行経路・場所');
+  required_(session.pilot, '操縦者');
+  required_(postflight.inspectionLocation, '飛行後の点検実施場所');
+  required_(postflight.confirmer, '飛行後の点検確認者');
+  dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
+
+  const usedModels = Object.keys(session.aircrafts || {}).filter(function(model) {
+    return session.aircrafts[model] && session.aircrafts[model].used;
+  });
+  const models = usedModels.length ? usedModels : [session.model];
+  if (!models.length || models.length > 2 || models.some(function(model) { return !MODELS[model]; })) {
+    throw new Error('記録する機体を確認してください。');
+  }
+  models.forEach(function(model) {
+    const ac = session.aircrafts && session.aircrafts[model];
+    const missingPre = PRE_CHECK_NAMES.filter(function(name) {
+      return !ac || !ac.preflightChecks || !ac.preflightChecks[name];
+    });
+    if (missingPre.length) throw new Error(model + 'の飛行前点検が未完了です。');
+    const post = postflight.aircrafts && postflight.aircrafts[model];
+    const missingPost = POST_CHECK_NAMES.filter(function(name) {
+      return !post || !post.checks || !post.checks[name];
+    });
+    if (missingPost.length) throw new Error(model + 'の飛行後点検が未完了です。');
+  });
+  (session.flights || []).forEach(function(flight) {
+    if (models.indexOf(flight.model) < 0) throw new Error('飛行記録の機体割当を確認してください。');
+    if (!Number.isInteger(Number(flight.battery)) || Number(flight.battery) < 1 || Number(flight.battery) > 7) {
+      throw new Error('飛行記録のバッテリーを確認してください。');
+    }
+    required_(flight.takeoffLocation, '離陸場所');
+    required_(flight.landingLocation, '着陸場所');
+    required_(flight.takeoffAt, '離陸時刻');
+    required_(flight.landingAt, '着陸時刻');
+    if (isNaN(new Date(flight.takeoffAt).getTime()) || isNaN(new Date(flight.landingAt).getTime())) {
+      throw new Error('離着陸時刻を確認してください。');
+    }
+    const minutes = Number(flight.actualMinutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('実飛行時間を確認してください。');
+  });
+  return models;
+}
+
+function activeCommitReservations_(excludeDraftId) {
+  const result = { blocks: {}, batteryRows: {}, activeDrafts: [] };
+  const all = commitProperties_().getProperties();
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
+    let meta;
+    try { meta = JSON.parse(all[key]); } catch (error) { return; }
+    if (!meta.draftId || meta.draftId === excludeDraftId || meta.state === 'complete') return;
+    result.activeDrafts.push(meta.draftId);
+    const record = loadCommitPlan_(meta.draftId, meta);
+    (record.plan.assignments || []).forEach(function(item) {
+      result.blocks[item.sheetName + '|' + item.blockNo] = meta.draftId;
+    });
+    (record.plan.batteryTargets || []).forEach(function(item) {
+      result.batteryRows[item.sheetName + '|' + item.row] = meta.draftId;
+    });
+  });
+  return result;
+}
+
+function chooseFixedBlock_(sheet, reserved) {
+  if (!blockUsed_(sheet, 1) && !reserved.blocks[sheet.getName() + '|1']) return 1;
+  if (!blockUsed_(sheet, 2) && !reserved.blocks[sheet.getName() + '|2']) return 2;
+  return 0;
+}
+
+function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, reserved) {
+  let sheet = currentSheet;
+  if (!sheet) {
+    const beforeNames = {};
+    ss.getSheets().forEach(function(item) { beforeNames[item.getName()] = true; });
+    sheet = getOrCreateDateSheet_(ss, operationDate, !!forceNew);
+    if (!beforeNames[sheet.getName()]) commitFault_('AFTER_SHEET_COPY');
+  }
+  while (true) {
+    const blockNo = chooseFixedBlock_(sheet, reserved);
+    if (blockNo) return { sheet: sheet, blockNo: blockNo };
+    const match = sheet.getName().match(/_(\d+)$/);
+    const nextSequence = (match ? Number(match[1]) : 1) + 1;
+    const name = format_(operationDate, 'yyyy.M.d') + '_' + nextSequence;
+    const existed = !!ss.getSheetByName(name);
+    sheet = getOrCreateDateSheet_(ss, operationDate, false, nextSequence);
+    if (!existed) commitFault_('AFTER_SHEET_COPY');
+  }
+}
+
+function fixedBatteryRow_(sheet, reservedRows) {
+  const values = sheetValues_(sheet);
+  for (let row = BATTERY_FIRST_ROW; row <= BATTERY_LAST_ROW; row++) {
+    if (!String((values[row - 1] || [])[0] || '').trim() && !reservedRows[sheet.getName() + '|' + row]) return row;
+  }
+  throw new Error(sheet.getName() + ' の履歴入力欄が上限に達しています。');
+}
+
+function writeBatteryHistoryAt_(sheet, row, session, minutes, input) {
+  trackedSetValues_(sheet.getRange(row, 1, 1, 8), [[
+    dateFromSheetName_(session.dateSheet), session.model, session.purpose, minutes,
+    input.cycle || '', input.batteryNote || '', session.route, ''
+  ]]);
+}
+
+function captureCommitStage_(capture, stage, work) {
+  capture.stage = stage;
+  const start = capture.operations.length;
+  work();
+  return capture.operations.slice(start);
+}
+
+function buildFixedCommitPlan_(input) {
+  const session = input.session;
+  const postflight = input.postflight;
+  const models = validateCommitBusinessInput_(input);
+  const operationDate = dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
+  const ss = spreadsheet_();
+  const reservations = activeCommitReservations_(session.draftId);
+  if (reservations.activeDrafts.length) {
+    throw new Error('別の運航記録が保存途中です。先に元の端末から同じ運航記録を再保存してください。');
+  }
+  const assignments = [];
+  let currentSheet = null;
+  let firstAssignment = true;
+
+  models.forEach(function(model) {
+    const modelFlights = (session.flights || []).filter(function(flight) { return flight.model === model; });
+    const chunks = [];
+    for (let index = 0; index < modelFlights.length; index += 7) chunks.push(modelFlights.slice(index, index + 7));
+    if (!chunks.length) chunks.push([]);
+    chunks.forEach(function(flights) {
+      const allocated = nextFixedSheetAndBlock_(ss, operationDate, currentSheet, firstAssignment && !!session.forceNewLocation, reservations);
+      currentSheet = allocated.sheet;
+      firstAssignment = false;
+      reservations.blocks[currentSheet.getName() + '|' + allocated.blockNo] = session.draftId;
+      assignments.push({
+        model: model,
+        sheetName: currentSheet.getName(),
+        blockNo: allocated.blockNo,
+        flightIndexes: flights.map(function(flight) { return session.flights.indexOf(flight); })
+      });
+    });
+  });
+
+  const batteryTargets = [];
+  (session.flights || []).forEach(function(flight, flightIndex) {
+    const sheet = ss.getSheetByName(BATTERY_SHEET_PREFIX + Number(flight.battery));
+    if (!sheet) throw new Error('BAT_' + flight.battery + ' シートが見つかりません。');
+    const row = fixedBatteryRow_(sheet, reservations.batteryRows);
+    reservations.batteryRows[sheet.getName() + '|' + row] = session.draftId;
+    batteryTargets.push({
+      battery: Number(flight.battery), sheetName: sheet.getName(), row: row,
+      flightIndex: flightIndex, commitId: session.draftId + ':' + flightIndex
+    });
+  });
+
+  const startingByModel = {};
+  const finalByModel = {};
+  const totalTargets = [];
+  models.forEach(function(model) {
+    const cell = aircraftTotalCell_(model);
+    startingByModel[model] = parseHoursMinutes_(cell.getDisplayValue(), model + 'の点検時の総飛行時間');
+    finalByModel[model] = startingByModel[model];
+    totalTargets.push({ model: model, sheetName: cell.getSheet().getName(), row: cell.getRow(), col: cell.getColumn() });
+  });
+  (session.flights || []).forEach(function(flight) { finalByModel[flight.model] += Number(flight.actualMinutes); });
+
+  const capture = { stage: '', operations: [], byKey: {} };
+  COMMIT_WRITE_CAPTURE = capture;
+  try {
+    captureCommitStage_(capture, 'date', function() {
+      const cumulative = {};
+      models.forEach(function(model) { cumulative[model] = startingByModel[model]; });
+      assignments.forEach(function(assignment, assignmentIndex) {
+        const sheet = ss.getSheetByName(assignment.sheetName);
+        const modelSession = Object.assign({}, session, { model: assignment.model, dateSheet: assignment.sheetName, blockNo: assignment.blockNo });
+        writeHeaderFields_(sheet, modelSession, assignment.blockNo);
+        const ac = session.aircrafts && session.aircrafts[assignment.model];
+        writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', assignment.blockNo);
+        const block = flightBlocks_(sheet).filter(function(item) { return item.blockNo === assignment.blockNo; })[0];
+        assignment.flightIndexes.forEach(function(flightIndex, rowIndex) {
+          const flight = session.flights[flightIndex];
+          const minutes = Number(flight.actualMinutes);
+          cumulative[assignment.model] += minutes;
+          writeFlightFields_(sheet, { blockNo: assignment.blockNo, row: block.startRow + rowIndex }, {
+            '使用バッテリー': 'BAT_' + Number(flight.battery),
+            '離陸場所': flight.takeoffLocation, '着陸場所': flight.landingLocation,
+            '離陸時刻': format_(flight.takeoffAt, 'HH:mm'), '着陸時刻': format_(flight.landingAt, 'HH:mm'),
+            '飛行時間': formatHoursMinutes_(minutes), '総飛行時間': formatHoursMinutes_(cumulative[assignment.model]),
+            '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
+            'バッテリー異常・所感': flight.batteryNote || ''
+          });
+        });
+      });
+    });
+
+    batteryTargets.forEach(function(target, targetIndex) {
+      const start = capture.operations.length;
+      const flight = session.flights[target.flightIndex];
+      const assignment = assignments.filter(function(item) { return item.flightIndexes.indexOf(target.flightIndex) >= 0; })[0];
+      writeBatteryHistoryAt_(ss.getSheetByName(target.sheetName), target.row, {
+        dateSheet: assignment.sheetName, model: flight.model, purpose: session.purpose, route: session.route
+      }, Number(flight.actualMinutes), { cycle: flight.cycle || '', batteryNote: flight.batteryNote || '' });
+      capture.operations.slice(start).forEach(function(operation) { operation.stage = 'battery'; operation.targetIndex = targetIndex; });
+    });
+
+    captureCommitStage_(capture, 'postflight', function() {
+      assignments.forEach(function(assignment) {
+        const sheet = ss.getSheetByName(assignment.sheetName);
+        const acInput = (postflight.aircrafts || {})[assignment.model] || postflight;
+        const checks = acInput.checks || postflight.checks || {};
+        const abnormal = POST_CHECK_NAMES.some(function(name) { return checks[name] !== '正常'; });
+        writeCheckResults_(sheet, checks, '飛行後点検', assignment.blockNo);
+        writeOptionalFields_(sheet, {
+          inspectionLocation: postflight.inspectionLocation || session.inspectionLocation,
+          defectLocation: acInput.defectLocation || '', defectDetail: acInput.defectDetail || '',
+          actionDetail: acInput.actionDetail || '', confirmer: postflight.confirmer || session.pilot
+        }, assignment.blockNo, abnormal);
+      });
+    });
+
+    totalTargets.forEach(function(target) {
+      capture.stage = 'totals';
+      const cell = ss.getSheetByName(target.sheetName).getRange(target.row, target.col);
+      const start = capture.operations.length;
+      trackedSetNumberFormat_(cell, '@');
+      trackedSetValue_(cell, formatHoursMinutes_(finalByModel[target.model]));
+      capture.operations.slice(start).forEach(function(operation) { operation.model = target.model; });
+    });
+  } finally {
+    COMMIT_WRITE_CAPTURE = null;
+  }
+
+  const operations = { date: [], battery: [], postflight: [], totals: [] };
+  capture.operations.forEach(function(operation) { operations[operation.stage].push(operation); });
+  return {
+    version: COMMIT_PLAN_VERSION,
+    draftId: session.draftId,
+    normalizedInput: input,
+    operationDate: format_(operationDate, 'yyyy.M.d'),
+    assignments: assignments,
+    batteryTargets: batteryTargets,
+    totalTargets: totalTargets,
+    startingByModel: startingByModel,
+    finalByModel: finalByModel,
+    operations: operations
+  };
+}
+
 function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence) {
   const baseName = format_(date, 'yyyy.M.d');
   let index = Math.max(1, Number(startSequence) || 1);

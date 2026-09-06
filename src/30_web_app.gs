@@ -509,6 +509,21 @@ var LOCAL_FLIGHT_ACTIONS = [
 
 function cloneData(data){ return JSON.parse(JSON.stringify(data)); }
 
+function createOperationDraftId(){
+  if(window.crypto && typeof window.crypto.randomUUID === 'function'){
+    return 'op_' + window.crypto.randomUUID();
+  }
+  if(window.crypto && typeof window.crypto.getRandomValues === 'function'){
+    var bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    var hex = Array.prototype.map.call(bytes, function(value){ return value.toString(16).padStart(2, '0'); }).join('');
+    return 'op_' + hex.slice(0,8) + '-' + hex.slice(8,12) + '-' + hex.slice(12,16) + '-' + hex.slice(16,20) + '-' + hex.slice(20);
+  }
+  throw new Error('安全な運航下書きIDを生成できません。ブラウザを更新してください。');
+}
+
 function persistOperationDraft(){
   try{
     if(STATE && STATE.active && STATE.session){
@@ -588,7 +603,7 @@ function localFlightAction(name, payload, onSuccess){
     aircrafts[model] = { model:model, used:true, preflightDone:false, flightCount:0, totalMinutes:0, preflightChecks:null };
     aircrafts[other] = { model:other, used:false, preflightDone:false, flightCount:0, totalMinutes:0, preflightChecks:null };
     session = {
-      draftId:'op_' + Date.now(), operationDate:STATE.today, dateSheet:STATE.today,
+      draftId:createOperationDraftId(), operationDate:STATE.today, dateSheet:STATE.today,
       forceNewLocation:!!payload.forceNewLocation, currentModel:model, model:model,
       purpose:purpose, route:payload.route, method:method, category:payload.category,
       permitNo:payload.permitNo || '', inspectionLocation:payload.inspectionLocation,

@@ -23,9 +23,15 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.06.1';
+const APP_VERSION = '2026.09.06.2';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
+const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
+const COMMIT_PLAN_VERSION = 2;
+const COMMIT_CHUNK_MAX_BYTES = 7000;
+const COMMIT_COMPLETE_RETENTION_DAYS = 30;
+const COMMIT_STALE_DAYS = 7;
+const BATTERY_COMMIT_METADATA_KEY = 'EVO_FLIGHT_COMMIT';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
 const BATTERY_FIRST_ROW = 13;
@@ -66,3 +72,5 @@ const POST_CHECK_NAMES = ['機体全般','プロペラ・フレーム','発熱',
 const APP_ICON_URL = 'https://raw.githubusercontent.com/ikifuse/autel-evo-lite-flight-log/main/icon.png';
 
 let LOCK_DEPTH = 0;
+let COMMIT_WRITE_CAPTURE = null;
+let COMMIT_FAULT_INJECTOR = null;

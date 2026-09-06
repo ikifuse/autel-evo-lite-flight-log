@@ -15,6 +15,10 @@ class MockRange {
   getDisplayValue() { return String(this.sheet.data[this.row - 1][this.col - 1] ?? ''); }
   getDisplayValues() { return this.getValues().map(r => r.map(v => v instanceof Date ? v.toISOString() : String(v ?? ''))); }
   getValue() { return this.sheet.data[this.row - 1][this.col - 1]; }
+  getSheet() { return this.sheet; }
+  getRow() { return this.row; }
+  getColumn() { return this.col; }
+  getA1Notation() { return `R${this.row}C${this.col}`; }
   getValues() {
     return Array.from({ length: this.numRows }, (_, r) =>
       Array.from({ length: this.numCols }, (_, c) => this.sheet.data[this.row - 1 + r][this.col - 1 + c]));
@@ -24,7 +28,16 @@ class MockRange {
     values.forEach((line, r) => line.forEach((value, c) => { this.sheet.data[this.row - 1 + r][this.col - 1 + c] = value; }));
     return this;
   }
-  setNumberFormat() { return this; }
+  getNumberFormat() { return this.sheet.formats[`${this.row}|${this.col}`] || ''; }
+  setNumberFormat(format) { this.sheet.formats[`${this.row}|${this.col}`] = format; return this; }
+  addDeveloperMetadata(key, value) {
+    this.sheet.metadata.push({ row:this.row, col:this.col, rows:this.numRows, cols:this.numCols, key, value });
+    return this;
+  }
+  getDeveloperMetadata() {
+    return this.sheet.metadata.filter(item => item.row === this.row && item.col === this.col && item.rows === this.numRows && item.cols === this.numCols)
+      .map(item => ({ getKey:()=>item.key, getValue:()=>item.value }));
+  }
   getMergedRanges() {
     return this.sheet.merges.filter(m => this.row >= m.row && this.row < m.row + m.rows && this.col >= m.col && this.col < m.col + m.cols)
       .map(m => new MockRange(this.sheet, m.row, m.col, m.rows, m.cols));
@@ -34,7 +47,7 @@ class MockRange {
 }
 
 class MockSheet {
-  constructor(name, rows = 220, cols = 30) { this.name = name; this.data = emptyGrid(rows, cols); this.merges = []; this.ss = null; }
+  constructor(name, rows = 220, cols = 30) { this.name = name; this.data = emptyGrid(rows, cols); this.merges = []; this.formats = {}; this.metadata = []; this.ss = null; }
   getName() { return this.name; }
   setName(name) { delete this.ss.sheets[this.name]; this.name = name; this.ss.sheets[name] = this; return this; }
   getRange(row, col, numRows, numCols) { return new MockRange(this, row, col, numRows, numCols); }
@@ -43,7 +56,7 @@ class MockSheet {
   getMaxColumns() { return this.data[0].length; }
   copyTo(ss) {
     const copy = new MockSheet('Copy ' + Date.now() + Math.random(), this.data.length, this.data[0].length);
-    copy.data = this.data.map(row => row.slice()); copy.merges = this.merges.map(m => ({...m})); ss.add(copy); return copy;
+    copy.data = this.data.map(row => row.slice()); copy.merges = this.merges.map(m => ({...m})); copy.formats = {...this.formats}; copy.metadata = this.metadata.map(m => ({...m})); ss.add(copy); return copy;
   }
 }
 
@@ -51,6 +64,7 @@ class MockSpreadsheet {
   constructor() { this.sheets = {}; }
   add(sheet) { sheet.ss = this; this.sheets[sheet.name] = sheet; return sheet; }
   getSheetByName(name) { return this.sheets[name] || null; }
+  getSheets() { return Object.values(this.sheets); }
 }
 
 function set(sheet, row, col, value) { sheet.data[row - 1][col - 1] = value; }
@@ -95,11 +109,25 @@ function makeEnvironment(lite = '00:00', plus = '00:00') {
   ss.add(makeMaster('点検整備記録_EVO Lite+_原本', plus));
   for (let i = 1; i <= 7; i++) ss.add(makeBattery(i));
   const cache = new Map(); const props = new Map();
+  const controls = { cacheThrows:false, propertySetCount:0, propertyFailAt:0, failNextProperty:false };
   const context = {
-    console, Date, Math, Number, String, Array, Object, JSON, Map, RegExp, Error,
-    SpreadsheetApp: { openById: () => ss },
-    CacheService: { getScriptCache: () => ({ get:k => cache.get(k) || null, put:(k,v) => cache.set(k,v) }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty:k => props.get(k) || null, setProperty:(k,v) => props.set(k,v) }) },
+    console, Date, Math, Number, String, Array, Object, JSON, Map, RegExp, Error, __controls:controls,
+    SpreadsheetApp: { openById: () => ss, flush(){} },
+    CacheService: { getScriptCache: () => ({
+      get:k => { if(controls.cacheThrows) throw new Error('cache failure'); return cache.get(k) || null; },
+      put:(k,v) => { if(controls.cacheThrows) throw new Error('cache failure'); cache.set(k,v); }
+    }) },
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty:k => props.get(k) || null,
+      setProperty:(k,v) => {
+        controls.propertySetCount++;
+        if(controls.failNextProperty){ controls.failNextProperty=false; throw new Error('property failure'); }
+        if(controls.propertyFailAt && controls.propertySetCount === controls.propertyFailAt) throw new Error('property failure');
+        props.set(k,v);
+      },
+      deleteProperty:k => { props.delete(k); },
+      getProperties:() => Object.fromEntries(props)
+    }) },
     LockService: { getScriptLock: () => ({ waitLock(){}, releaseLock(){} }) },
     Utilities: {
       Charset: { UTF_8: 'UTF_8' }, DigestAlgorithm: { SHA_256: 'SHA_256' },
@@ -117,7 +145,7 @@ function makeEnvironment(lite = '00:00', plus = '00:00') {
   vm.createContext(context);
   const source = fs.readFileSync(sourcePath, 'utf8').split('const APP_HTML =')[0];
   vm.runInContext(source, context);
-  return { context, ss, cache, props };
+  return { context, ss, cache, props, controls };
 }
 
 const PRE = ['機体全般','プロペラ・フレーム','通信系統','推進系統','電源系統','自動制御系統','バッテリー','操縦装置','灯火','カメラ','リモートID'];
@@ -144,6 +172,59 @@ function assert(condition, message) { if (!condition) throw new Error(message); 
 function value(sheet, row, col) { return sheet.data[row - 1][col - 1]; }
 function resultRows(sheet, startCol) { return sheet.data.slice(32,39).map(r => r.slice(startCol-1,startCol+8)); }
 function markUsed(sheet, blockNo) { const start = blockNo === 1 ? 3 : 18; set(sheet, 19, start + 6, '☑'); }
+
+function snapshotBusiness(environment) {
+  const normalize = value => value instanceof Date ? value.toISOString() : value;
+  return JSON.stringify(Object.keys(environment.ss.sheets).sort().map(name => {
+    const sheet = environment.ss.sheets[name];
+    return {
+      name,
+      data:sheet.data.map(row => row.map(normalize)),
+      formats:Object.entries(sheet.formats).sort(),
+      metadata:sheet.metadata.map(item => ({...item})).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+    };
+  }));
+}
+
+function assertCommitComplete(environment, draftId) {
+  const raw = environment.props.get(`EVO_LITE_COMMIT_V2_${draftId}_META`);
+  assert(raw && JSON.parse(raw).state === 'complete', 'commit is not complete');
+  assert(![...environment.props.keys()].some(key => key.startsWith(`EVO_LITE_COMMIT_V2_${draftId}_DATA_`)), 'commit data chunks remain');
+  assert(![...environment.props.values()].some(value => {
+    try { const parsed=JSON.parse(value); return parsed.draftId===draftId && parsed.state!=='complete'; } catch(_){ return false; }
+  }), 'unfinished reservation remains');
+}
+
+function installOneShotFault(environment, point) {
+  environment.context.__faultPoint = point;
+  environment.context.__faultThrown = false;
+  vm.runInContext(`COMMIT_FAULT_INJECTOR = function(point) {
+    if (point === __faultPoint && !__faultThrown) {
+      __faultThrown = true;
+      throw new Error('injected:' + point);
+    }
+  };`, environment.context);
+}
+
+function clearFault(environment) {
+  vm.runInContext('COMMIT_FAULT_INJECTOR = null;', environment.context);
+}
+
+function assertFaultRetryMatches(point, input, label) {
+  const baseline = makeEnvironment();
+  baseline.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+  const expected = snapshotBusiness(baseline);
+
+  const retried = makeEnvironment();
+  installOneShotFault(retried, point);
+  let failed = false;
+  try { retried.context.finishAircraft(JSON.parse(JSON.stringify(input))); } catch(error) { failed = true; }
+  assert(failed, `${label} did not fail`);
+  clearFault(retried);
+  retried.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+  assert(snapshotBusiness(retried) === expected, `${label} retry differs from one successful save`);
+  assertCommitComplete(retried, input.session.draftId);
+}
 
 function run() {
   const reports = [];
@@ -202,9 +283,123 @@ function run() {
   {
     const e=makeEnvironment(); e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:2}])); const s=e.ss.getSheetByName('2026.9.6'); assert(value(s,26,9)==='☑','T14 pre controller'); assert(value(s,19,15)==='☑','T14 post'); reports.push('TEST 14 OK');
   }
-  reports.push('TEST 15 checked separately by source diff (no UI-flow code changes)');
+  {
+    const legacy=fs.readFileSync('Code.gs','utf8'); const current=fs.readFileSync(sourcePath,'utf8');
+    const legacyApp=legacy.slice(legacy.indexOf('const APP_HTML ='));
+    let currentApp=current.slice(current.indexOf('const APP_HTML ='));
+    const uuidStart=currentApp.indexOf('function createOperationDraftId(){');
+    const uuidEnd=currentApp.indexOf('function persistOperationDraft(){');
+    assert(uuidStart>=0 && uuidEnd>uuidStart,'T15 UUID helper markers');
+    currentApp=currentApp.slice(0,uuidStart)+currentApp.slice(uuidEnd);
+    currentApp=currentApp.replace('draftId:createOperationDraftId()', "draftId:'op_' + Date.now()");
+    assert(currentApp===legacyApp,'T15 visible UI or client flow changed outside internal UUID generation');
+    reports.push('TEST 15 OK');
+  }
+
+  const retrySingle = makeInput([{model:'EVO Lite',minutes:2,battery:1},{model:'EVO Lite',minutes:3,battery:2}]);
+  assertFaultRetryMatches('AFTER_DATE_RECORDS', retrySingle, 'T16'); reports.push('TEST 16 OK');
+  assertFaultRetryMatches('AFTER_BAT_1', retrySingle, 'T17'); reports.push('TEST 17 OK');
+  assertFaultRetryMatches('AFTER_BAT_2', retrySingle, 'T18'); reports.push('TEST 18 OK');
+  assertFaultRetryMatches('AFTER_POSTFLIGHT', retrySingle, 'T19'); reports.push('TEST 19 OK');
+  const retryTwoModels = makeInput([{model:'EVO Lite',minutes:4,battery:1},{model:'EVO Lite+',minutes:5,battery:2}]);
+  assertFaultRetryMatches('BETWEEN_AIRCRAFT_TOTALS', retryTwoModels, 'T20'); reports.push('TEST 20 OK');
+  assertFaultRetryMatches('BEFORE_FINAL_FLUSH', retrySingle, 'T21'); reports.push('TEST 21 OK');
+  assertFaultRetryMatches('BEFORE_COMPLETE', retrySingle, 'T22'); reports.push('TEST 22 OK');
+  assertFaultRetryMatches('AFTER_COMPLETE_BEFORE_RESPONSE', retrySingle, 'T23'); reports.push('TEST 23 OK');
+  assertFaultRetryMatches('AFTER_COMPLETE_META', retrySingle, 'complete compaction'); reports.push('EXTRA complete-before-compaction retry OK');
+
+  assertFaultRetryMatches('AFTER_SHEET_COPY', makeInput([{model:'EVO Lite',minutes:3}]), 'sheet copy'); reports.push('EXTRA sheet-copy retry OK');
+  assertFaultRetryMatches('AFTER_DATE_OP_0', makeInput([{model:'EVO Lite',minutes:3}]), 'No.1 partial'); reports.push('EXTRA No.1 partial retry OK');
+  {
+    const input=makeInput([{model:'EVO Lite',minutes:3}]);
+    const baseline=makeEnvironment(); baseline.context.finishAircraft(JSON.parse(JSON.stringify(input))); const expected=snapshotBusiness(baseline);
+    const retried=makeEnvironment(); const existing=makeTemplate(); existing.name='2026.9.6'; retried.ss.add(existing); markUsed(existing,1);
+    const expectedEnv=makeEnvironment(); const expectedExisting=makeTemplate(); expectedExisting.name='2026.9.6'; expectedEnv.ss.add(expectedExisting); markUsed(expectedExisting,1); expectedEnv.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    installOneShotFault(retried,'AFTER_DATE_OP_0'); let failed=false; try{retried.context.finishAircraft(JSON.parse(JSON.stringify(input)));}catch(_){failed=true;} assert(failed,'No.2 did not fail');
+    clearFault(retried); retried.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    assert(snapshotBusiness(retried)===snapshotBusiness(expectedEnv),'No.2 retry differs'); reports.push('EXTRA No.2 partial retry OK');
+  }
+  {
+    const e=makeEnvironment(); e.controls.cacheThrows=true; const input=makeInput([{model:'EVO Lite',minutes:3}]); e.context.finishAircraft(input); assertCommitComplete(e,input.session.draftId); reports.push('EXTRA CacheService failure OK');
+  }
+  {
+    const input=makeInput([{model:'EVO Lite',minutes:3}]); const baseline=makeEnvironment(); baseline.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    const e=makeEnvironment(); e.context.__propertyArmed=false;
+    vm.runInContext(`COMMIT_FAULT_INJECTOR=function(point){ if(point==='AFTER_DATE_RECORDS'&&!__propertyArmed){__propertyArmed=true;__controls.failNextProperty=true;} };`,e.context);
+    let failed=false; try{e.context.finishAircraft(JSON.parse(JSON.stringify(input)));}catch(_){failed=true;} assert(failed,'property progress failure did not fail');
+    clearFault(e); e.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    assert(snapshotBusiness(e)===snapshotBusiness(baseline),'property progress retry differs'); reports.push('EXTRA Properties progress failure retry OK');
+  }
+  {
+    const e=makeEnvironment(); const input=makeInput([{model:'EVO Lite',minutes:3}]); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
+    const changed=JSON.parse(JSON.stringify(input)); changed.session.route='改変'; let rejected=false; try{e.context.finishAircraft(changed);}catch(_){rejected=true;} assert(rejected,'pending alteration accepted'); reports.push('EXTRA pending signature rejection OK');
+  }
+  {
+    const e=makeEnvironment(); const input=makeInput([{model:'EVO Lite',minutes:3}]); e.context.finishAircraft(input);
+    const changed=JSON.parse(JSON.stringify(input)); changed.session.route='改変'; let rejected=false; try{e.context.finishAircraft(changed);}catch(_){rejected=true;} assert(rejected,'complete alteration accepted'); reports.push('EXTRA complete signature rejection OK');
+  }
+  {
+    const e=makeEnvironment(); const input=makeInput([{model:'EVO Lite',minutes:3}]); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
+    const meta=JSON.parse(e.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`)); e.props.delete(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_0`);
+    let rejected=false; try{e.context.finishAircraft(input);}catch(_){rejected=true;} assert(rejected && meta.chunkCount>0,'missing chunk accepted'); reports.push('EXTRA missing chunk rejection OK');
+  }
+  {
+    const input=makeInput([{model:'EVO Lite',minutes:3}]); const baseline=makeEnvironment(); baseline.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    const e=makeEnvironment(); e.controls.propertyFailAt=2; let failed=false; try{e.context.finishAircraft(JSON.parse(JSON.stringify(input)));}catch(_){failed=true;} assert(failed,'partial plan property write did not fail');
+    e.controls.propertyFailAt=0; e.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    assert(snapshotBusiness(e)===snapshotBusiness(baseline),'orphan plan chunk retry differs'); reports.push('EXTRA incomplete plan chunk recovery OK');
+  }
+  {
+    const e=makeEnvironment(); const input=makeInput(Array.from({length:15},(_,i)=>({model:'EVO Lite',minutes:1,battery:(i%7)+1})));
+    installOneShotFault(e,'AFTER_PLAN_PERSISTED'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
+    const chunks=[...e.props.entries()].filter(([key])=>key.startsWith(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_`));
+    assert(chunks.length>1 && chunks.every(([,value])=>Buffer.byteLength(value,'utf8')<=7000),'commit chunks exceed size limit');
+    const stats=e.context.getCommitStorageStats_(); assert(stats.propertyCount===chunks.length+1 && stats.approximateBytes>0,'storage stats invalid');
+    e.context.finishAircraft(input); assertCommitComplete(e,input.session.draftId); reports.push('EXTRA chunk size and storage stats OK');
+  }
+  {
+    const e=makeEnvironment(); const input=makeInput([{model:'EVO Lite',minutes:3}]); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
+    const meta=JSON.parse(e.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    const plan=JSON.parse(Array.from({length:meta.chunkCount},(_,i)=>e.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_${i}`)).join(''));
+    const op=plan.operations.date.find(item=>item.kind==='value'); e.ss.getSheetByName(op.sheetName).getRange(op.row,op.col).setValue('第三者変更');
+    let rejected=false; try{e.context.finishAircraft(input);}catch(_){rejected=true;} assert(rejected,'manual conflict accepted'); reports.push('EXTRA manual conflict rejection OK');
+  }
+  {
+    const e=makeEnvironment(); const first=makeInput([{model:'EVO Lite',minutes:2}]); const second=makeInput([{model:'EVO Lite',minutes:3}]);
+    installOneShotFault(e,'AFTER_PLAN_PERSISTED'); try{e.context.finishAircraft(first);}catch(_){} clearFault(e);
+    let blocked=false; try{e.context.finishAircraft(second);}catch(_){blocked=true;} assert(blocked,'second draft was not blocked by unfinished draft');
+    e.context.finishAircraft(first); e.context.finishAircraft(second);
+    assertCommitComplete(e,first.session.draftId); assertCommitComplete(e,second.session.draftId); reports.push('EXTRA different draft reservation isolation OK');
+  }
+  {
+    const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'AFTER_PLAN_PERSISTED'); try{e.context.finishAircraft(oldInput);}catch(_){} clearFault(e);
+    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    const next=makeInput([{model:'EVO Lite',minutes:3}]); e.context.finishAircraft(next);
+    assert(!e.props.has(key),'stale untouched plan not removed'); reports.push('EXTRA stale untouched cleanup OK');
+  }
+  {
+    const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'BEFORE_COMPLETE'); try{e.context.finishAircraft(oldInput);}catch(_){} clearFault(e);
+    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:3}])); assertCommitComplete(e,oldInput.session.draftId); reports.push('EXTRA stale fully-written recovery OK');
+  }
+  {
+    const input=makeInput([{model:'EVO Lite',minutes:2}]); const baseline=makeEnvironment(); baseline.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    const e=makeEnvironment(); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
+    const key=`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    e.context.finishAircraft(input); assert(snapshotBusiness(e)===snapshotBusiness(baseline),'stale partial roll-forward differs'); reports.push('EXTRA stale partial recovery OK');
+  }
+  {
+    const e=makeEnvironment(); const input=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
+    const key=`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); const plan=JSON.parse(Array.from({length:meta.chunkCount},(_,i)=>e.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_${i}`)).join(''));
+    const op=plan.operations.date.find(item=>item.kind==='value'); e.ss.getSheetByName(op.sheetName).getRange(op.row,op.col).setValue('競合'); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    let rejected=false; try{e.context.finishAircraft(input);}catch(_){rejected=true;} assert(rejected,'stale conflict accepted'); reports.push('EXTRA stale conflict rejection OK');
+  }
+  {
+    const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); e.context.finishAircraft(oldInput);
+    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.completedAt=new Date(Date.now()-31*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:3}])); assert(!e.props.has(key),'expired complete proof remains'); reports.push('EXTRA complete proof retention cleanup OK');
+  }
   console.log(reports.join('\n'));
 }
 
 run();
-
