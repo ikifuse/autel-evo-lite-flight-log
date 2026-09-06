@@ -15,6 +15,7 @@ class MockRange {
   getDisplayValue() { return String(this.sheet.data[this.row - 1][this.col - 1] ?? ''); }
   getDisplayValues() { return this.getValues().map(r => r.map(v => v instanceof Date ? v.toISOString() : String(v ?? ''))); }
   getValue() { return this.sheet.data[this.row - 1][this.col - 1]; }
+  getFormula() { return this.sheet.formulas[`${this.row}|${this.col}`] || ''; }
   getSheet() { return this.sheet; }
   getRow() { return this.row; }
   getColumn() { return this.col; }
@@ -23,13 +24,34 @@ class MockRange {
     return Array.from({ length: this.numRows }, (_, r) =>
       Array.from({ length: this.numCols }, (_, c) => this.sheet.data[this.row - 1 + r][this.col - 1 + c]));
   }
-  setValue(value) { this.sheet.data[this.row - 1][this.col - 1] = value; return this; }
+  setValue(value) {
+    this.sheet.data[this.row - 1][this.col - 1] = value;
+    const key = `${this.row}|${this.col}`;
+    if (typeof value === 'string' && /^[\u0000-\u0020]*[=+\-@]/.test(value)) this.sheet.formulas[key] = value;
+    else delete this.sheet.formulas[key];
+    return this;
+  }
   setValues(values) {
-    values.forEach((line, r) => line.forEach((value, c) => { this.sheet.data[this.row - 1 + r][this.col - 1 + c] = value; }));
+    values.forEach((line, r) => line.forEach((value, c) => {
+      new MockRange(this.sheet, this.row + r, this.col + c).setValue(value);
+    }));
+    return this;
+  }
+  setRichTextValue(value) {
+    this.sheet.data[this.row - 1][this.col - 1] = value.getText();
+    delete this.sheet.formulas[`${this.row}|${this.col}`];
     return this;
   }
   getNumberFormat() { return this.sheet.formats[`${this.row}|${this.col}`] || ''; }
   setNumberFormat(format) { this.sheet.formats[`${this.row}|${this.col}`] = format; return this; }
+  getFontSize() { return this.sheet.fontSizes[`${this.row}|${this.col}`] || 11; }
+  setFontSize(size) { this.sheet.fontSizes[`${this.row}|${this.col}`] = size; return this; }
+  getHorizontalAlignment() { return this.sheet.horizontalAlignments[`${this.row}|${this.col}`] || null; }
+  setHorizontalAlignment(alignment) { this.sheet.horizontalAlignments[`${this.row}|${this.col}`] = alignment; return this; }
+  getVerticalAlignment() { return this.sheet.verticalAlignments[`${this.row}|${this.col}`] || null; }
+  setVerticalAlignment(alignment) { this.sheet.verticalAlignments[`${this.row}|${this.col}`] = alignment; return this; }
+  getWrap() { return this.sheet.wraps[`${this.row}|${this.col}`] || false; }
+  setWrap(wrap) { this.sheet.wraps[`${this.row}|${this.col}`] = !!wrap; return this; }
   addDeveloperMetadata(key, value) {
     this.sheet.metadata.push({ row:this.row, col:this.col, rows:this.numRows, cols:this.numCols, key, value });
     return this;
@@ -47,7 +69,7 @@ class MockRange {
 }
 
 class MockSheet {
-  constructor(name, rows = 220, cols = 30) { this.name = name; this.data = emptyGrid(rows, cols); this.merges = []; this.formats = {}; this.metadata = []; this.ss = null; }
+  constructor(name, rows = 220, cols = 30) { this.name = name; this.data = emptyGrid(rows, cols); this.merges = []; this.formats = {}; this.fontSizes = {}; this.horizontalAlignments = {}; this.verticalAlignments = {}; this.wraps = {}; this.formulas = {}; this.metadata = []; this.ss = null; }
   getName() { return this.name; }
   setName(name) { delete this.ss.sheets[this.name]; this.name = name; this.ss.sheets[name] = this; return this; }
   getRange(row, col, numRows, numCols) { return new MockRange(this, row, col, numRows, numCols); }
@@ -56,7 +78,7 @@ class MockSheet {
   getMaxColumns() { return this.data[0].length; }
   copyTo(ss) {
     const copy = new MockSheet('Copy ' + Date.now() + Math.random(), this.data.length, this.data[0].length);
-    copy.data = this.data.map(row => row.slice()); copy.merges = this.merges.map(m => ({...m})); copy.formats = {...this.formats}; copy.metadata = this.metadata.map(m => ({...m})); ss.add(copy); return copy;
+    copy.data = this.data.map(row => row.slice()); copy.merges = this.merges.map(m => ({...m})); copy.formats = {...this.formats}; copy.fontSizes = {...this.fontSizes}; copy.horizontalAlignments = {...this.horizontalAlignments}; copy.verticalAlignments = {...this.verticalAlignments}; copy.wraps = {...this.wraps}; copy.formulas = {...this.formulas}; copy.metadata = this.metadata.map(m => ({...m})); ss.add(copy); return copy;
   }
 }
 
@@ -65,6 +87,7 @@ class MockSpreadsheet {
   add(sheet) { sheet.ss = this; this.sheets[sheet.name] = sheet; return sheet; }
   getSheetByName(name) { return this.sheets[name] || null; }
   getSheets() { return Object.values(this.sheets); }
+  deleteSheet(sheet) { delete this.sheets[sheet.getName()]; }
 }
 
 function set(sheet, row, col, value) { sheet.data[row - 1][col - 1] = value; }
@@ -112,7 +135,14 @@ function makeEnvironment(lite = '00:00', plus = '00:00') {
   const controls = { cacheThrows:false, propertySetCount:0, propertyFailAt:0, failNextProperty:false };
   const context = {
     console, Date, Math, Number, String, Array, Object, JSON, Map, RegExp, Error, __controls:controls,
-    SpreadsheetApp: { openById: () => ss, flush(){} },
+    SpreadsheetApp: {
+      openById: () => ss,
+      flush(){},
+      newRichTextValue: () => {
+        let text='';
+        return { setText(value){ text=String(value); return this; }, build(){ return { getText:()=>text }; } };
+      }
+    },
     CacheService: { getScriptCache: () => ({
       get:k => { if(controls.cacheThrows) throw new Error('cache failure'); return cache.get(k) || null; },
       put:(k,v) => { if(controls.cacheThrows) throw new Error('cache failure'); cache.set(k,v); }
@@ -159,7 +189,7 @@ function makeInput(flights) {
   for (const model of ['EVO Lite','EVO Lite+']) aircrafts[model] = { model, used:used.includes(model), preflightChecks:checks(PRE) };
   return {
     session: {
-      draftId:'test_' + (++seq), operationDate:'2026.9.6', model:flights[0].model, route:'試験場', pilot:'試験者', purpose:'試験',
+      draftId:'op_00000000-0000-4000-8000-' + String(++seq).padStart(12,'0'), operationDate:'2026.9.6', model:flights[0].model, route:'試験場', pilot:'試験者', purpose:'操縦練習',
       category:'カテゴリーⅠ', method:'通常飛行（特定飛行なし）', cert:'', assistant:'', forceNewLocation:false,
       aircrafts, flights:flights.map((f,i) => ({ model:f.model, battery:f.battery || 1, actualMinutes:f.minutes,
         takeoffLocation:'A', landingLocation:'A', takeoffAt:`2026-09-06T00:${String(i).padStart(2,'0')}:00Z`, landingAt:`2026-09-06T00:${String(i+1).padStart(2,'0')}:00Z` }))
@@ -173,6 +203,22 @@ function value(sheet, row, col) { return sheet.data[row - 1][col - 1]; }
 function resultRows(sheet, startCol) { return sheet.data.slice(32,39).map(r => r.slice(startCol-1,startCol+8)); }
 function markUsed(sheet, blockNo) { const start = blockNo === 1 ? 3 : 18; set(sheet, 19, start + 6, '☑'); }
 
+function snapshotProperties(environment) {
+  return JSON.stringify([...environment.props.entries()].sort((a,b) => a[0].localeCompare(b[0])));
+}
+
+function assertRejectedWithoutMutation(input, label, setup) {
+  const environment=makeEnvironment();
+  if (setup) setup(environment);
+  const beforeBusiness=snapshotBusiness(environment);
+  const beforeProperties=snapshotProperties(environment);
+  let rejected=false;
+  try { environment.context.finishAircraft(input); } catch (_) { rejected=true; }
+  assert(rejected, `${label} was accepted`);
+  assert(snapshotBusiness(environment)===beforeBusiness, `${label} changed spreadsheet data`);
+  assert(snapshotProperties(environment)===beforeProperties, `${label} changed Properties`);
+}
+
 function snapshotBusiness(environment) {
   const normalize = value => value instanceof Date ? value.toISOString() : value;
   return JSON.stringify(Object.keys(environment.ss.sheets).sort().map(name => {
@@ -181,6 +227,11 @@ function snapshotBusiness(environment) {
       name,
       data:sheet.data.map(row => row.map(normalize)),
       formats:Object.entries(sheet.formats).sort(),
+      fontSizes:Object.entries(sheet.fontSizes).sort(),
+      horizontalAlignments:Object.entries(sheet.horizontalAlignments).sort(),
+      verticalAlignments:Object.entries(sheet.verticalAlignments).sort(),
+      wraps:Object.entries(sheet.wraps).sort(),
+      formulas:Object.entries(sheet.formulas).sort(),
       metadata:sheet.metadata.map(item => ({...item})).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
     };
   }));
@@ -293,48 +344,31 @@ function run() {
     currentApp=currentApp.slice(0,uuidStart)+currentApp.slice(uuidEnd);
     currentApp=currentApp.replace('draftId:createOperationDraftId()', "draftId:'op_' + Date.now()");
     const withoutFavoriteChanges = app => app
+      .replace(",'アプリテスト'];", '];')
       .replace(/    \.(?:preset-bar|favorite-list) \{[\s\S]*?(?=    \.input-error \{)/, '    /* favorite management styles */\n')
       .replace(/function loadFavorites\(\)\{[\s\S]*?(?=\/\/ ----------------------------------------------------\n\/\/ GPS自動取得)/, '/* favorite storage management */\n\n')
       .replace(/  var favHtml = [\s\S]*?(?=\n\n  div\.innerHTML =)/, "  var favHtml = '';\n  /* favorite list rendering */")
       .replace(/\n      (?:\(favHtml \?|'<div id="favoriteSection")[\s\S]*?(?=\n\n      '<div class="status-box">)/, '\n      /* favorite list section */')
       .replace(/function (?:favoriteDisplayName_|applyFavorite)\(.*?[\s\S]*?(?=function submitStartOperation\(\))/, '/* favorite actions */\n\n');
-    assert(withoutFavoriteChanges(currentApp)===withoutFavoriteChanges(legacyApp),'T15 UI or client flow changed outside authorized favorite management and internal UUID generation');
+    assert(withoutFavoriteChanges(currentApp)===withoutFavoriteChanges(legacyApp),'T15 UI or client flow changed outside authorized favorite management, app-test purpose and internal UUID generation');
     reports.push('TEST 15 OK');
   }
 
   {
     const current=fs.readFileSync(sourcePath,'utf8');
     const app=current.slice(current.indexOf('const APP_HTML ='));
-    const storageBlock=app.slice(app.indexOf('function loadFavorites(){'), app.indexOf('// GPS自動取得＆逆ジオコーディング'));
-    const actionBlock=app.slice(app.indexOf('function favoriteDisplayName_('), app.indexOf('function submitStartOperation(){'));
-    const storage=new Map();
-    const fields={ route:{value:''}, inspectionLocation:{value:''} };
-    const favoriteContext={
-      JSON, String, Array,
-      localStorage:{ getItem:key=>storage.has(key)?storage.get(key):null, setItem:(key,value)=>storage.set(key,value) },
-      el:id=>fields[id] || null, val:()=>'', esc:value=>String(value), alert(){}, confirm:()=>true, prompt:()=>null,
-      renderStartView(){}
-    };
-    vm.createContext(favoriteContext);
-    vm.runInContext(`var STORAGE_KEY_FAVORITES='EVO_LITE_FAVORITES';\n${storageBlock}\n${actionBlock}`, favoriteContext);
-    const legacyFavorites=[{name:'GPS取得名',location:'地点A',route:'経路A'},{name:'残す場所',location:'地点B',route:'経路B'}];
-    storage.set('EVO_LITE_FAVORITES',JSON.stringify(legacyFavorites));
-    favoriteContext.applyFavorite(0);
-    assert(fields.route.value==='経路A' && fields.inspectionLocation.value==='地点A','favorite apply compatibility');
-    const beforeDuplicate=storage.get('EVO_LITE_FAVORITES');
-    const duplicate=favoriteContext.saveFavoriteSpot('自宅','地点A','経路A');
-    assert(duplicate.status==='duplicate' && storage.get('EVO_LITE_FAVORITES')===beforeDuplicate,'favorite duplicate was added or converted');
-    assert(favoriteContext.renameFavoriteSpot_(0,'自宅'),'favorite rename failed');
-    let saved=JSON.parse(storage.get('EVO_LITE_FAVORITES'));
-    assert(saved[0].name==='自宅' && saved[0].location==='地点A' && saved[0].route==='経路A','favorite rename changed location or route');
-    assert(favoriteContext.deleteFavoriteSpot_(1),'favorite delete failed');
-    saved=JSON.parse(storage.get('EVO_LITE_FAVORITES'));
-    assert(saved.length===1 && saved[0].name==='自宅','favorite delete removed wrong item');
-    assert(favoriteContext.saveFavoriteSpot('新規','地点C','経路C').status==='saved','new favorite save failed');
-    saved=JSON.parse(storage.get('EVO_LITE_FAVORITES'));
-    assert(saved.length===2 && saved[0].name==='新規','new favorite not inserted');
-    assert(app.includes('>使う</button>') && app.includes('>名前変更</button>') && app.includes('>削除</button>'),'favorite action labels missing');
-    assert(/function deleteFavorite\(idx\)\{[\s\S]*?confirm\(/.test(app),'favorite delete confirmation missing');
+    [
+      'STORAGE_KEY_FAVORITES', 'loadFavorites', 'findFavoriteSpotIndex_', 'storeFavorites_',
+      'saveFavoriteSpot', 'renameFavoriteSpot_', 'deleteFavoriteSpot_', 'favoriteDisplayName_',
+      'favoriteListHtml_', 'refreshFavoriteList_', 'applyFavorite(', 'renameFavorite(',
+      'deleteFavorite(', 'saveCurrentAsFavorite(', '登録済みのお気に入り現場',
+      'この場所をお気に入りに登録', 'favorite-list', 'favorite-item', 'favorite-action-btn'
+    ].forEach(function(fragment){
+      assert(!app.includes(fragment), 'favorite feature remains: ' + fragment);
+    });
+    assert(app.includes('前回と同じ条件で引用') && app.includes('function applyLastOperation(){'), 'last operation reuse was removed');
+    assert(app.includes('GPSから現在地を取得') && app.includes('function fetchCurrentGps('), 'GPS feature was removed');
+    assert(app.includes('ACTIVE_OPERATION_DRAFT_KEY') && app.includes('STORAGE_KEY_LAST'), 'draft or last-operation storage was removed');
     reports.push('TEST 24 OK');
   }
 
@@ -440,6 +474,261 @@ function run() {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); e.context.finishAircraft(oldInput);
     const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.completedAt=new Date(Date.now()-31*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
     e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:3}])); assert(!e.props.has(key),'expired complete proof remains'); reports.push('EXTRA complete proof retention cleanup OK');
+  }
+
+  {
+    const e=makeEnvironment();
+    const input=makeInput([{model:'EVO Lite',minutes:3,battery:1}]);
+    input.session.route='=SUM(A1:A10)';
+    input.session.pilot='+CMD';
+    input.session.assistant='-1+1';
+    input.session.cert='@TEST';
+    input.session.purpose='その他：=SUM(A1:A10)';
+    input.session.flights[0].takeoffLocation='  =SUM(A1:A10)';
+    input.session.flights[0].landingLocation='\t@TEST';
+    input.session.flights[0].safetyIssue=true;
+    input.session.flights[0].safetyDetail='-1+1';
+    input.session.flights[0].batteryNote='+CMD';
+    const post=input.postflight.aircrafts['EVO Lite'];
+    post.checks['その他']='異常';
+    post.defectLocation=' @TEST';
+    post.defectDetail='=SUM(A1:A10)';
+    post.actionDetail='\t+CMD';
+    input.postflight.confirmer='@TEST';
+    e.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    const day=e.ss.getSheetByName('2026.9.6');
+    const cells=[
+      [day,12,4,'=SUM(A1:A10)'], [day,11,13,'+CMD（補助者: -1+1）'], [day,12,13,'@TEST'],
+      [day,33,4,'  =SUM(A1:A10)'], [day,33,5,'\t@TEST'], [day,33,10,'-1+1'], [day,33,11,'+CMD'],
+      [day,44,6,'=SUM(A1:A10)'], [day,44,12,'\t+CMD'], [day,44,15,'@TEST'],
+      [e.ss.getSheetByName('BAT_1'),13,6,'+CMD'], [e.ss.getSheetByName('BAT_1'),13,7,'=SUM(A1:A10)']
+    ];
+    cells.forEach(([sheet,row,col,expected]) => {
+      const range=sheet.getRange(row,col);
+      assert(range.getValue()===expected, `formula-safe display changed at ${sheet.getName()} ${row}:${col}`);
+      assert(range.getFormula()==='', `formula remained at ${sheet.getName()} ${row}:${col}`);
+    });
+    const before=snapshotBusiness(e);
+    e.cache.clear();
+    e.context.finishAircraft(JSON.parse(JSON.stringify(input)));
+    assert(snapshotBusiness(e)===before,'formula-safe retry changed or double-converted values');
+    const normal=e.ss.getSheetByName('日常点検').getRange(1,1);
+    e.context.trackedSetUserText_(normal,'通常日本語');
+    assert(normal.getValue()==='通常日本語' && normal.getFormula()==='','normal Japanese text changed');
+    reports.push('SECURITY Formula Injection and idempotent retry OK');
+  }
+
+  {
+    const cases=[];
+    let input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.model='Unknown'; cases.push(['invalid model',input]);
+    for (const battery of [0,8,1.5,'1']) { input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.flights[0].battery=battery; cases.push([`invalid battery ${battery}`,input]); }
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.draftId='invalid'; cases.push(['invalid draftId',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.draftId='test_security'; cases.push(['test draftId',input]);
+    for (const date of ['2026.2.30','2026.13.1','1900.1.1','2200.1.1']) { input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.operationDate=date; cases.push([`invalid date ${date}`,input]); }
+    for (const minutes of [0,-1,1.5,241]) { input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.flights[0].actualMinutes=minutes; cases.push([`invalid minutes ${minutes}`,input]); }
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.flights[0].landingAt='2026-09-05T23:59:00Z'; cases.push(['landing before takeoff',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.flights[0].takeoffAt='2099-01-01T00:00:00Z'; input.session.flights[0].landingAt='2099-01-01T00:01:00Z'; cases.push(['timestamp far from operation date',input]);
+    input=makeInput(Array.from({length:31},()=>({model:'EVO Lite',minutes:1}))); cases.push(['flight count overflow',input]);
+    input=makeInput(Array.from({length:30},()=>({model:'EVO Lite',minutes:50}))); cases.push(['total minutes overflow',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.route='あ'.repeat(501); cases.push(['text length overflow',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.aircrafts['EVO Lite'].preflightChecks['機体全般']='確認済み'; cases.push(['invalid inspection value',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.postflight.checks={その他:'確認済み'}; cases.push(['invalid top-level inspection value',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.forceNewLocation='false'; cases.push(['invalid boolean',input]);
+    input=makeInput([{model:'EVO Lite',minutes:1}]); input.session.flights[0].cycle={value:'1'}; cases.push(['invalid optional field type',input]);
+    cases.forEach(([label,badInput]) => assertRejectedWithoutMutation(badInput,label));
+    reports.push('SECURITY model, BAT, UUID, date, time, count, text and check validation OK');
+  }
+
+  {
+    let input=makeInput([{model:'EVO Lite',minutes:1}]);
+    input.unused='x'.repeat(513*1024);
+    assertRejectedWithoutMutation(input,'raw JSON size overflow');
+
+    input=makeInput([{model:'EVO Lite',minutes:1}]);
+    let deep=input;
+    for(let i=0;i<10;i++){ deep.deep={}; deep=deep.deep; }
+    assertRejectedWithoutMutation(input,'object depth overflow');
+
+    input=makeInput([{model:'EVO Lite',minutes:1}]);
+    input.extra={};
+    for(let i=0;i<5001;i++) input.extra['p'+i]=i;
+    assertRejectedWithoutMutation(input,'property count overflow');
+    reports.push('SECURITY JSON size, depth and property count limits OK');
+  }
+
+  {
+    const input=makeInput(Array.from({length:30},()=>({model:'EVO Lite',minutes:48,battery:1})));
+    const e=makeEnvironment();
+    e.context.finishAircraft(input);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===1440,'upper-bound total did not save');
+    assertCommitComplete(e,input.session.draftId);
+    reports.push('SECURITY upper-bound normal save OK');
+  }
+
+  {
+    const input=makeInput([{model:'EVO Lite',minutes:1}]);
+    assertRejectedWithoutMutation(input,'Properties capacity overflow',environment => {
+      environment.props.set('UNRELATED_LARGE_PROPERTY','x'.repeat(400*1024));
+    });
+    reports.push('SECURITY Properties capacity safe-stop OK');
+  }
+
+  {
+    const input=makeInput(Array.from({length:30},()=>({model:'EVO Lite',minutes:1,battery:1})));
+    input.session.flights.forEach(flight => { flight.safetyDetail='s'.repeat(1000); flight.batteryNote='b'.repeat(1000); });
+    assertRejectedWithoutMutation(input,'commit plan estimate overflow');
+    reports.push('SECURITY commit plan capacity safe-stop OK');
+  }
+
+  {
+    const e=makeEnvironment();
+    const first=makeInput([{model:'EVO Lite',minutes:2}]);
+    e.context.finishAircraft(first); e.cache.clear(); e.context.finishAircraft(first);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===2 && value(e.ss.getSheetByName('BAT_1'),14,1)==='', 'same UUID saved twice');
+    const second=makeInput([{model:'EVO Lite',minutes:3}]);
+    installOneShotFault(e,'AFTER_PLAN_PERSISTED'); let failed=false;
+    try { e.context.finishAircraft(second); } catch (_) { failed=true; }
+    clearFault(e); assert(failed,'different UUID fault setup did not fail');
+    const third=makeInput([{model:'EVO Lite',minutes:4}]);
+    let blocked=false; try { e.context.finishAircraft(third); } catch (_) { blocked=true; }
+    assert(blocked,'different UUID was not blocked by active reservation');
+    e.context.finishAircraft(second); e.context.finishAircraft(third);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===9,'UUID retry/competition total mismatch');
+    reports.push('SECURITY same UUID idempotency and different UUID reservation OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const input=makeInput([{model:'EVO Lite',minutes:10,battery:1},{model:'EVO Lite',minutes:15,battery:1}]);
+    input.session.purpose='アプリテスト';
+    e.context.finishAircraft(input);
+    const sheet=e.ss.getSheetByName('TEST_2026.9.6');
+    assert(sheet && value(sheet,33,9)==='12:40' && value(sheet,34,9)==='12:55','app test sheet cumulative totals');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'app test changed official aircraft total');
+    assert(value(e.ss.getSheetByName('BAT_1'),13,3)==='アプリテスト' && value(e.ss.getSheetByName('BAT_1'),14,3)==='アプリテスト','app test BAT history missing');
+    assert(!e.ss.getSheetByName('2026.9.6'),'app test created a normal date sheet');
+    reports.push('APP TEST sheet cumulative without official total update OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const input=makeInput([{model:'EVO Lite',minutes:5}]);
+    input.session.purpose='アプリテスト [気象: 晴 / 風速2〜3m/s 穏やか 北東]';
+    e.context.finishAircraft(input);
+    assert(e.ss.getSheetByName('TEST_2026.9.6') && !e.ss.getSheetByName('2026.9.6'),'weather-tagged app test was not isolated');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'weather-tagged app test changed official total');
+    reports.push('APP TEST weather-tag classification OK');
+  }
+  {
+    const e=makeEnvironment('12:30','04:10');
+    const input=makeInput([{model:'EVO Lite',minutes:10,battery:1},{model:'EVO Lite+',minutes:15,battery:2}]);
+    input.session.purpose='アプリテスト';
+    e.context.finishAircraft(input);
+    const sheet=e.ss.getSheetByName('TEST_2026.9.6');
+    assert(value(sheet,33,9)==='12:40' && value(sheet,33,24)==='04:25','app test aircraft-switch sheet totals mismatch');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750 && e.context.aircraftTotalMinutes_('EVO Lite+')===250,'app test aircraft switch changed official totals');
+    reports.push('APP TEST aircraft-switch independent cumulative totals OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const input=makeInput([{model:'EVO Lite',minutes:10},{model:'EVO Lite',minutes:15}]);
+    input.session.purpose='操縦練習';
+    e.context.finishAircraft(input);
+    const sheet=e.ss.getSheetByName('2026.9.6');
+    assert(value(sheet,33,9)==='12:40' && value(sheet,34,9)==='12:55','normal sheet cumulative totals');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===775,'normal operation did not update official total');
+    reports.push('APP TEST comparison: normal operation official total update OK');
+  }
+
+  for (const purpose of ['整備後確認飛行','修理後確認飛行']) {
+    const e=makeEnvironment('12:30');
+    const input=makeInput([{model:'EVO Lite',minutes:10}]); input.session.purpose=purpose;
+    e.context.finishAircraft(input);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===760,`${purpose} did not update official total`);
+  }
+  reports.push('APP TEST comparison: maintenance and repair confirmation totals OK');
+
+  {
+    const e=makeEnvironment('12:30');
+    const input=makeInput([{model:'EVO Lite',minutes:10,battery:2}]); input.session.purpose='アプリテスト';
+    e.context.finishAircraft(input); e.cache.clear(); e.context.finishAircraft(input);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'app test retry changed official total');
+    assert(value(e.ss.getSheetByName('BAT_2'),13,3)==='アプリテスト' && value(e.ss.getSheetByName('BAT_2'),14,1)==='','app test UUID retry duplicated BAT history');
+    reports.push('APP TEST same UUID idempotency OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const normal=makeInput([{model:'EVO Lite',minutes:5}]); normal.session.purpose='操縦練習';
+    e.context.finishAircraft(normal);
+    const normalSheet=e.ss.getSheetByName('2026.9.6');
+    const before=JSON.stringify(normalSheet.data);
+    const appTest=makeInput([{model:'EVO Lite',minutes:10}]); appTest.session.purpose='アプリテスト';
+    e.context.finishAircraft(appTest);
+    assert(JSON.stringify(normalSheet.data)===before,'app test modified the normal date sheet');
+    assert(e.ss.getSheetByName('TEST_2026.9.6'),'mixed operation did not create TEST sheet');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===755,'mixed app test changed official total');
+    reports.push('APP TEST and normal date-sheet isolation OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const first=makeInput([{model:'EVO Lite',minutes:5}]); first.session.purpose='アプリテスト';
+    e.context.finishAircraft(first);
+    e.ss.deleteSheet(e.ss.getSheetByName('TEST_2026.9.6'));
+    const second=makeInput([{model:'EVO Lite',minutes:6}]); second.session.purpose='アプリテスト';
+    e.context.finishAircraft(second);
+    const recreated=e.ss.getSheetByName('TEST_2026.9.6');
+    assert(recreated && value(recreated,33,8)==='00:06','deleted TEST sheet was not recreated for a new UUID');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'TEST sheet recreation changed official total');
+    reports.push('APP TEST deleted sheet recreation OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const first=makeInput([{model:'EVO Lite',minutes:5}]); first.session.purpose='アプリテスト';
+    e.context.finishAircraft(first);
+    e.ss.getSheetByName('TEST_2026.9.6').data=emptyGrid(220,30);
+    const second=makeInput([{model:'EVO Lite',minutes:6}]); second.session.purpose='アプリテスト';
+    e.context.finishAircraft(second);
+    const fallback=e.ss.getSheetByName('TEST_2026.9.6_2');
+    assert(fallback && value(fallback,33,8)==='00:06','cleared TEST sheet structure did not fall forward safely');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'cleared TEST sheet recovery changed official total');
+    reports.push('APP TEST cleared sheet structure safe fallback OK');
+  }
+
+  {
+    const e=makeEnvironment('12:30');
+    const first=makeInput([{model:'EVO Lite',minutes:5,battery:3}]); first.session.purpose='アプリテスト';
+    e.context.finishAircraft(first);
+    const batterySheet=e.ss.getSheetByName('BAT_3');
+    const oldMetadata=batterySheet.getRange(13,1,1,8).getDeveloperMetadata().map(item=>item.getValue());
+    batterySheet.getRange(13,1,1,8).setValues([Array(8).fill('')]);
+    const second=makeInput([{model:'EVO Lite',minutes:6,battery:3}]); second.session.purpose='アプリテスト';
+    e.context.finishAircraft(second);
+    const metadata=batterySheet.getRange(13,1,1,8).getDeveloperMetadata().map(item=>item.getValue());
+    assert(value(batterySheet,13,3)==='アプリテスト' && value(batterySheet,13,4)===6,'cleared BAT row was not reused');
+    assert(oldMetadata.length===1 && metadata.includes(oldMetadata[0]) && metadata.includes(second.session.draftId+':0'),'Developer Metadata blocked safe BAT row reuse');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'BAT row reuse changed official total');
+    reports.push('APP TEST cleared BAT row reuse with Developer Metadata OK');
+  }
+  {
+    const e=makeEnvironment('12:30');
+    const input=makeInput(Array.from({length:15},(_,i)=>({model:'EVO Lite',minutes:1,battery:(i%7)+1})));
+    input.session.purpose='アプリテスト';
+    e.context.finishAircraft(input);
+    assert(e.ss.getSheetByName('TEST_2026.9.6') && e.ss.getSheetByName('TEST_2026.9.6_2'),'app test sequence sheet was not created');
+    assert(value(e.ss.getSheetByName('TEST_2026.9.6'),39,9)==='12:37','app test No.1 seven-flight cumulative mismatch');
+    assert(value(e.ss.getSheetByName('TEST_2026.9.6'),39,24)==='12:44','app test No.2 seven-flight cumulative mismatch');
+    assert(value(e.ss.getSheetByName('TEST_2026.9.6_2'),33,9)==='12:45','app test sequence No.1 cumulative mismatch');
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'multi-sheet app test changed official total');
+    reports.push('APP TEST No.1, No.2 and sequence-sheet allocation OK');
+  }
+  {
+    const input=makeInput([{model:'EVO Lite',minutes:5,battery:1}]); input.session.purpose='アプリテスト';
+    assertFaultRetryMatches('AFTER_BAT_1',input,'app test BAT roll-forward');
+    reports.push('APP TEST roll-forward retry OK');
   }
   console.log(reports.join('\n'));
 }

@@ -36,6 +36,31 @@ const COMMIT_PLAN_VERSION = 2;
 const COMMIT_CHUNK_MAX_BYTES = 7000;
 const COMMIT_COMPLETE_RETENTION_DAYS = 30;
 const COMMIT_STALE_DAYS = 7;
+const SECURITY_MAX_FLIGHTS = 30;
+const SECURITY_MAX_FLIGHT_MINUTES = 240;
+const SECURITY_MAX_TOTAL_MINUTES = 1440;
+const SECURITY_MAX_RAW_INPUT_BYTES = 512 * 1024;
+const SECURITY_MAX_NORMALIZED_INPUT_BYTES = 128 * 1024;
+const SECURITY_MAX_RAW_PROPERTIES = 5000;
+const SECURITY_MAX_NORMALIZED_PROPERTIES = 500;
+const SECURITY_MAX_OBJECT_DEPTH = 8;
+const SECURITY_MAX_ARRAY_ITEMS = 100;
+const SECURITY_MAX_PROPERTY_NAME_CHARS = 100;
+const SECURITY_MAX_COMMIT_PLAN_BYTES = 300 * 1024;
+const SECURITY_MAX_COMMIT_CHUNKS = 44;
+const SECURITY_MAX_PROPERTY_STORE_BYTES = 400 * 1024;
+const SECURITY_OPERATION_YEAR_MIN = 2022;
+const SECURITY_OPERATION_YEAR_MAX = 2100;
+const APP_TEST_PURPOSE = 'アプリテスト';
+const SECURITY_TEXT_LIMITS = {
+  person: 120,
+  identifier: 100,
+  purpose: 500,
+  method: 500,
+  location: 500,
+  note: 1000,
+  detail: 2000
+};
 const BATTERY_COMMIT_METADATA_KEY = 'EVO_FLIGHT_COMMIT';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
@@ -60,7 +85,7 @@ const BLOCKS = {
 const FLIGHT_PURPOSES = [
   '空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス',
   'インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等',
-  '趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行'
+  '趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行','アプリテスト'
 ];
 
 const SPECIAL_FLIGHT_METHODS = [
@@ -101,10 +126,23 @@ function doGet() {
 function spreadsheet_() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
 function now_() { return new Date(); }
 function format_(value, pattern) { return Utilities.formatDate(new Date(value), TZ, pattern); }
-function dateFromSheetName_(sheetName) {
-  const match = String(sheetName || '').match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/);
+function dateFromSheetName_(sheetName, allowTestPrefix) {
+  const pattern = allowTestPrefix
+    ? /^(?:TEST_)?(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/
+    : /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/;
+  const match = String(sheetName || '').match(pattern);
   if (!match) throw new Error('日付シート名を日付へ変換できません：' + sheetName);
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < SECURITY_OPERATION_YEAR_MIN || year > SECURITY_OPERATION_YEAR_MAX || month < 1 || month > 12) {
+    throw new Error('運航日を確認してください。');
+  }
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    throw new Error('運航日を確認してください。');
+  }
+  return date;
 }
 function commitCache_() { return CacheService.getScriptCache(); }
 function commitProperties_() { return PropertiesService.getScriptProperties(); }
@@ -150,14 +188,30 @@ function recordCommitCell_(range, value, kind) {
       sheetName: sheet.getName(),
       row: range.getRow(),
       col: range.getColumn(),
-      before: kind === 'format' ? range.getNumberFormat() : encodedCellValue_(range.getValue()),
-      value: kind === 'format' ? String(value) : encodedCellValue_(value)
+      before: commitRangeProperty_(range, kind),
+      value: commitOperationValue_(value, kind)
     };
     COMMIT_WRITE_CAPTURE.byKey[key] = operation;
     COMMIT_WRITE_CAPTURE.operations.push(operation);
   } else {
-    operation.value = kind === 'format' ? String(value) : encodedCellValue_(value);
+    operation.value = commitOperationValue_(value, kind);
   }
+}
+
+function commitRangeProperty_(range, kind) {
+  if (kind === 'format') return range.getNumberFormat();
+  if (kind === 'fontSize') return range.getFontSize();
+  if (kind === 'horizontalAlignment') return range.getHorizontalAlignment();
+  if (kind === 'verticalAlignment') return range.getVerticalAlignment();
+  if (kind === 'wrap') return range.getWrap();
+  return encodedCellValue_(range.getValue());
+}
+
+function commitOperationValue_(value, kind) {
+  if (['format','horizontalAlignment','verticalAlignment'].indexOf(kind) >= 0) return String(value);
+  if (kind === 'fontSize') return Number(value);
+  if (kind === 'wrap') return !!value;
+  return encodedCellValue_(value);
 }
 
 function trackedSetValue_(range, value) {
@@ -166,6 +220,24 @@ function trackedSetValue_(range, value) {
     return range;
   }
   return range.setValue(value);
+}
+
+function isFormulaLikeUserText_(value) {
+  return /^[\u0000-\u0020]*[=+\-@]/.test(String(value == null ? '' : value));
+}
+
+function richTextValue_(value) {
+  return SpreadsheetApp.newRichTextValue().setText(String(value == null ? '' : value)).build();
+}
+
+function trackedSetUserText_(range, value) {
+  const text = String(value == null ? '' : value);
+  if (!isFormulaLikeUserText_(text)) return trackedSetValue_(range, text);
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, text, 'text');
+    return range;
+  }
+  return range.setRichTextValue(richTextValue_(text));
 }
 
 function trackedSetValues_(range, values) {
@@ -186,6 +258,38 @@ function trackedSetNumberFormat_(range, format) {
     return range;
   }
   return range.setNumberFormat(format);
+}
+
+function trackedSetFontSize_(range, size) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, size, 'fontSize');
+    return range;
+  }
+  return range.setFontSize(size);
+}
+
+function trackedSetHorizontalAlignment_(range, alignment) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, alignment, 'horizontalAlignment');
+    return range;
+  }
+  return range.setHorizontalAlignment(alignment);
+}
+
+function trackedSetVerticalAlignment_(range, alignment) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, alignment, 'verticalAlignment');
+    return range;
+  }
+  return range.setVerticalAlignment(alignment);
+}
+
+function trackedSetWrap_(range, wrap) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, wrap, 'wrap');
+    return range;
+  }
+  return range.setWrap(wrap);
 }
 function required_(value, label) {
   if (value == null || String(value).trim() === '') throw new Error(label + 'は必須です。');
@@ -272,6 +376,72 @@ function commitDataKey_(draftId, index) { return COMMIT_V2_PREFIX + draftId + '_
 
 function utf8Length_(text) { return unescape(encodeURIComponent(String(text))).length; }
 
+function assertInputComplexity_(value, limits, label) {
+  const seen = [];
+  let propertyCount = 0;
+  function visit(item, depth) {
+    if (depth > limits.maxDepth) throw new Error(label + 'の階層が深すぎます。');
+    if (item == null || typeof item === 'string' || typeof item === 'boolean' || typeof item === 'number') return;
+    if (item instanceof Date) return;
+    if (typeof item !== 'object') throw new Error(label + 'に使用できない値があります。');
+    if (seen.indexOf(item) >= 0) throw new Error(label + 'に循環参照があります。');
+    seen.push(item);
+    if (Array.isArray(item)) {
+      if (item.length > limits.maxArrayItems) throw new Error(label + 'の配列件数が上限を超えています。');
+      item.forEach(function(child) { visit(child, depth + 1); });
+    } else {
+      const keys = Object.keys(item);
+      propertyCount += keys.length;
+      if (propertyCount > limits.maxProperties) throw new Error(label + 'の項目数が上限を超えています。');
+      keys.forEach(function(key) {
+        if (key.length > SECURITY_MAX_PROPERTY_NAME_CHARS || key === '__proto__' || key === 'prototype' || key === 'constructor') {
+          throw new Error(label + 'に使用できない項目名があります。');
+        }
+        visit(item[key], depth + 1);
+      });
+    }
+    seen.pop();
+  }
+  visit(value, 0);
+  let serialized;
+  try { serialized = JSON.stringify(value); }
+  catch (error) { throw new Error(label + 'を読み取れません。'); }
+  if (utf8Length_(serialized || '') > limits.maxBytes) throw new Error(label + 'のデータ容量が上限を超えています。');
+}
+
+function assertTextLimit_(value, label, maxLength, required) {
+  if (typeof value !== 'string') throw new Error(label + 'の形式を確認してください。');
+  if (required && !value.trim()) throw new Error(label + 'は必須です。');
+  if (Array.from(value).length > maxLength) throw new Error(label + 'は' + maxLength + '文字以内で入力してください。');
+}
+
+function propertyStorageBytes_() {
+  const all = commitProperties_().getProperties();
+  return Object.keys(all).reduce(function(total, key) {
+    return total + utf8Length_(key) + utf8Length_(all[key]);
+  }, 0);
+}
+
+function estimatedCommitPlanBytes_(input) {
+  const flights = (input.session && input.session.flights) || [];
+  const usedModels = Object.keys((input.session && input.session.aircrafts) || {}).filter(function(model) {
+    return input.session.aircrafts[model] && input.session.aircrafts[model].used;
+  });
+  const assignments = usedModels.reduce(function(total, model) {
+    const count = flights.filter(function(flight) { return flight.model === model; }).length;
+    return total + Math.max(1, Math.ceil(count / 7));
+  }, 0);
+  return utf8Length_(canonicalJson_(input)) * 4 + flights.length * 4000 + assignments * 12000 + 20000;
+}
+
+function ensureCommitPlanCapacity_(input) {
+  const estimated = estimatedCommitPlanBytes_(input);
+  if (estimated > SECURITY_MAX_COMMIT_PLAN_BYTES) throw new Error('保存計画の容量が上限を超えています。');
+  if (propertyStorageBytes_() + estimated > SECURITY_MAX_PROPERTY_STORE_BYTES) {
+    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+  }
+}
+
 function splitCommitChunks_(text) {
   const chunks = [];
   let current = '';
@@ -301,7 +471,16 @@ function writeCommitMeta_(meta) {
 function storeCommitPlan_(plan, signature) {
   const text = canonicalJson_(plan);
   const chunks = splitCommitChunks_(text);
+  if (utf8Length_(text) > SECURITY_MAX_COMMIT_PLAN_BYTES || chunks.length > SECURITY_MAX_COMMIT_CHUNKS) {
+    throw new Error('保存計画の容量が上限を超えています。');
+  }
   const properties = commitProperties_();
+  const additionalBytes = chunks.reduce(function(total, chunk, index) {
+    return total + utf8Length_(commitDataKey_(plan.draftId, index)) + utf8Length_(chunk);
+  }, 0) + utf8Length_(commitMetaKey_(plan.draftId)) + 2000;
+  if (propertyStorageBytes_() + additionalBytes > SECURITY_MAX_PROPERTY_STORE_BYTES) {
+    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+  }
   chunks.forEach(function(chunk, index) { properties.setProperty(commitDataKey_(plan.draftId, index), chunk); });
   const reread = chunks.map(function(_chunk, index) {
     const value = properties.getProperty(commitDataKey_(plan.draftId, index));
@@ -375,10 +554,8 @@ function safeCommitCachePut_(key, value) {
 function validateDraftId_(draftId) {
   required_(draftId, '運航下書きID');
   const text = String(draftId);
-  const oldFormat = /^op_\d{10,17}$/;
   const uuidFormat = /^op_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const testFormat = /^test_[A-Za-z0-9_-]{1,80}$/;
-  if (!oldFormat.test(text) && !uuidFormat.test(text) && !testFormat.test(text)) {
+  if (!uuidFormat.test(text)) {
     throw new Error('運航下書きIDの形式を確認してください。');
   }
 }
@@ -386,14 +563,23 @@ function validateDraftId_(draftId) {
 function normalizedCommitInput_(input) {
   const session = input && input.session;
   const postflight = input && input.postflight;
-  if (!session || !postflight) throw new Error('確定する運航データがありません。');
+  if (!session || typeof session !== 'object' || Array.isArray(session) ||
+      !postflight || typeof postflight !== 'object' || Array.isArray(postflight)) {
+    throw new Error('確定する運航データがありません。');
+  }
+  if (!session.aircrafts || typeof session.aircrafts !== 'object' || Array.isArray(session.aircrafts) ||
+      !postflight.aircrafts || typeof postflight.aircrafts !== 'object' || Array.isArray(postflight.aircrafts) ||
+      !Array.isArray(session.flights)) {
+    throw new Error('運航データの形式を確認してください。');
+  }
   validateDraftId_(session.draftId);
   const aircrafts = {};
   Object.keys(session.aircrafts || {}).sort().forEach(function(model) {
     const aircraft = session.aircrafts[model] || {};
+    if (typeof aircraft !== 'object' || Array.isArray(aircraft)) throw new Error('機体情報の形式を確認してください。');
     aircrafts[model] = {
       model: model,
-      used: !!aircraft.used,
+      used: aircraft.used == null ? false : aircraft.used,
       preflightChecks: aircraft.preflightChecks || {},
       preflightAbnormalDetail: aircraft.preflightAbnormalDetail || ''
     };
@@ -401,9 +587,10 @@ function normalizedCommitInput_(input) {
   const postAircrafts = {};
   Object.keys(postflight.aircrafts || {}).sort().forEach(function(model) {
     const aircraft = postflight.aircrafts[model] || {};
+    if (typeof aircraft !== 'object' || Array.isArray(aircraft)) throw new Error('飛行後点検の形式を確認してください。');
     postAircrafts[model] = {
       checks: aircraft.checks || {},
-      abnormal: !!aircraft.abnormal,
+      abnormal: aircraft.abnormal == null ? false : aircraft.abnormal,
       defectLocation: aircraft.defectLocation || '',
       defectDetail: aircraft.defectDetail || '',
       actionDetail: aircraft.actionDetail || ''
@@ -413,7 +600,7 @@ function normalizedCommitInput_(input) {
     session: {
       draftId: String(session.draftId),
       operationDate: session.operationDate || '',
-      forceNewLocation: !!session.forceNewLocation,
+      forceNewLocation: session.forceNewLocation == null ? false : session.forceNewLocation,
       model: session.model || '',
       purpose: session.purpose || '',
       route: session.route || '',
@@ -427,12 +614,13 @@ function normalizedCommitInput_(input) {
       preflightAbnormalDetail: session.preflightAbnormalDetail || '',
       aircrafts: aircrafts,
       flights: (session.flights || []).map(function(flight, index) {
+        if (!flight || typeof flight !== 'object' || Array.isArray(flight)) throw new Error('飛行記録の形式を確認してください。');
         return {
-          model: flight.model || '', index: Number(flight.index || index + 1),
-          battery: Number(flight.battery), cycle: flight.cycle || '',
+          model: flight.model || '', index: flight.index == null ? index + 1 : flight.index,
+          battery: flight.battery, cycle: flight.cycle || '',
           takeoffLocation: flight.takeoffLocation || '', landingLocation: flight.landingLocation || '',
           takeoffAt: flight.takeoffAt || '', landingAt: flight.landingAt || '',
-          actualMinutes: Number(flight.actualMinutes), safetyIssue: !!flight.safetyIssue,
+          actualMinutes: flight.actualMinutes, safetyIssue: flight.safetyIssue == null ? false : flight.safetyIssue,
           safetyDetail: flight.safetyDetail || '', batteryNote: flight.batteryNote || ''
         };
       })
@@ -473,7 +661,7 @@ function operationCurrentValue_(operation) {
   const sheet = spreadsheet_().getSheetByName(operation.sheetName);
   if (!sheet) return { missingSheet: true };
   const range = sheet.getRange(operation.row, operation.col);
-  return operation.kind === 'format' ? range.getNumberFormat() : encodedCellValue_(range.getValue());
+  return commitRangeProperty_(range, operation.kind);
 }
 
 function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
@@ -482,13 +670,18 @@ function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
     const sheet = ss.getSheetByName(operation.sheetName);
     if (!sheet) throw new Error('固定保存先シートが見つかりません：' + operation.sheetName);
     const range = sheet.getRange(operation.row, operation.col);
-    const current = operation.kind === 'format' ? range.getNumberFormat() : encodedCellValue_(range.getValue());
+    const current = commitRangeProperty_(range, operation.kind);
     if (sameCommitValue_(current, operation.value)) return;
     if (verifyOnly) throw new Error('保存後の読取確認に失敗しました：' + operation.sheetName + '!' + range.getA1Notation());
     if (!sameCommitValue_(current, operation.before)) {
       throw new Error('保存対象セルが保存開始後に変更されています：' + operation.sheetName + '!' + range.getA1Notation());
     }
     if (operation.kind === 'format') range.setNumberFormat(operation.value);
+    else if (operation.kind === 'fontSize') range.setFontSize(operation.value);
+    else if (operation.kind === 'horizontalAlignment') range.setHorizontalAlignment(operation.value);
+    else if (operation.kind === 'verticalAlignment') range.setVerticalAlignment(operation.value);
+    else if (operation.kind === 'wrap') range.setWrap(operation.value);
+    else if (operation.kind === 'text') range.setRichTextValue(richTextValue_(decodedCellValue_(operation.value)));
     else range.setValue(decodedCellValue_(operation.value));
     if (!verifyOnly) commitFault_('AFTER_' + String(operation.stage || 'WRITE').toUpperCase() + '_OP_' + operationIndex);
   });
@@ -598,16 +791,31 @@ function getCommitStorageStats_() {
 }
 
 function finishAircraft(input) {
+  assertInputComplexity_(input, {
+    maxBytes: SECURITY_MAX_RAW_INPUT_BYTES,
+    maxProperties: SECURITY_MAX_RAW_PROPERTIES,
+    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
+    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
+  }, '送信データ');
   const normalizedInput = normalizedCommitInput_(input);
+  assertInputComplexity_(normalizedInput, {
+    maxBytes: SECURITY_MAX_NORMALIZED_INPUT_BYTES,
+    maxProperties: SECURITY_MAX_NORMALIZED_PROPERTIES,
+    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
+    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
+  }, '保存データ');
+  validateCommitBusinessInput_(normalizedInput);
   const session = normalizedInput.session;
   const signature = commitSignatureV2_(normalizedInput);
 
   return locked_(function() {
-    cleanupCommitPlans_();
     let record = null;
     let currentStage = 'PLAN_READY';
     try {
-      const existingMeta = readCommitMeta_(session.draftId);
+      let existingMeta = readCommitMeta_(session.draftId);
+      if (!existingMeta) ensureCommitPlanCapacity_(normalizedInput);
+      cleanupCommitPlans_();
+      existingMeta = readCommitMeta_(session.draftId);
       if (existingMeta) {
         if (existingMeta.signature !== signature) {
           throw new Error('同じ運航下書きIDで送信内容が変更されています。元の内容を保持したまま管理者へ連絡してください。');
@@ -876,14 +1084,35 @@ function finishAircraftLegacy_(input) {
 function validateCommitBusinessInput_(input) {
   const session = input.session;
   const postflight = input.postflight;
-  required_(session.model, '機体');
-  if (!MODELS[session.model]) throw new Error('機体を確認してください。');
-  required_(session.route, '飛行経路・場所');
-  required_(session.pilot, '操縦者');
-  required_(postflight.inspectionLocation, '飛行後の点検実施場所');
-  required_(postflight.confirmer, '飛行後の点検確認者');
-  dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
+  if (typeof session.model !== 'string' || !MODELS[session.model]) throw new Error('機体を確認してください。');
+  assertTextLimit_(session.route, '飛行経路・場所', SECURITY_TEXT_LIMITS.location, true);
+  assertTextLimit_(session.pilot, '操縦者', SECURITY_TEXT_LIMITS.person, true);
+  assertTextLimit_(postflight.inspectionLocation, '飛行後の点検実施場所', SECURITY_TEXT_LIMITS.location, true);
+  assertTextLimit_(postflight.confirmer, '飛行後の点検確認者', SECURITY_TEXT_LIMITS.person, true);
+  assertTextLimit_(session.purpose, '飛行目的', SECURITY_TEXT_LIMITS.purpose, true);
+  assertTextLimit_(session.method, '飛行方法', SECURITY_TEXT_LIMITS.method, true);
+  assertTextLimit_(session.category, '飛行カテゴリー', 20, true);
+  assertTextLimit_(session.permitNo, '許可承認番号', SECURITY_TEXT_LIMITS.identifier, false);
+  assertTextLimit_(session.inspectionLocation, '飛行前の点検実施場所', SECURITY_TEXT_LIMITS.location, false);
+  assertTextLimit_(session.assistant, '補助者', SECURITY_TEXT_LIMITS.person, false);
+  assertTextLimit_(session.cert, '技能証明書番号', SECURITY_TEXT_LIMITS.identifier, false);
+  assertTextLimit_(session.preflightAbnormalDetail, '飛行前点検の異常内容', SECURITY_TEXT_LIMITS.detail, false);
+  if (typeof session.forceNewLocation !== 'boolean') throw new Error('同日別現場の指定を確認してください。');
+  const operationDate = dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
 
+  validateStoredOperationSelection_(session);
+
+  if (!Array.isArray(session.flights)) throw new Error('飛行記録の形式を確認してください。');
+  if (session.flights.length > SECURITY_MAX_FLIGHTS) throw new Error('1運航の飛行記録は' + SECURITY_MAX_FLIGHTS + '件までです。');
+
+  const aircraftKeys = Object.keys(session.aircrafts || {});
+  if (aircraftKeys.some(function(model) { return !MODELS[model]; })) throw new Error('機体情報を確認してください。');
+  aircraftKeys.forEach(function(model) {
+    const ac = session.aircrafts[model];
+    if (!ac || typeof ac.used !== 'boolean') throw new Error(model + 'の使用状態を確認してください。');
+    validateCheckMap_(ac.preflightChecks || {}, PRE_CHECK_NAMES, model + 'の飛行前点検');
+    assertTextLimit_(ac.preflightAbnormalDetail || '', model + 'の飛行前点検異常内容', SECURITY_TEXT_LIMITS.detail, false);
+  });
   const usedModels = Object.keys(session.aircrafts || {}).filter(function(model) {
     return session.aircrafts[model] && session.aircrafts[model].used;
   });
@@ -891,6 +1120,18 @@ function validateCommitBusinessInput_(input) {
   if (!models.length || models.length > 2 || models.some(function(model) { return !MODELS[model]; })) {
     throw new Error('記録する機体を確認してください。');
   }
+  if (models.indexOf(session.model) < 0) throw new Error('現在の機体情報を確認してください。');
+  const postAircraftKeys = Object.keys(postflight.aircrafts || {});
+  if (postAircraftKeys.some(function(model) { return !MODELS[model]; })) throw new Error('飛行後点検の機体情報を確認してください。');
+  postAircraftKeys.forEach(function(model) {
+    const post = postflight.aircrafts[model];
+    if (!post || typeof post.abnormal !== 'boolean') throw new Error(model + 'の飛行後点検状態を確認してください。');
+    validateCheckMap_(post.checks || {}, POST_CHECK_NAMES, model + 'の飛行後点検');
+    assertTextLimit_(post.defectLocation || '', model + 'の不具合箇所', SECURITY_TEXT_LIMITS.location, false);
+    assertTextLimit_(post.defectDetail || '', model + 'の不具合内容', SECURITY_TEXT_LIMITS.detail, false);
+    assertTextLimit_(post.actionDetail || '', model + 'の処置内容', SECURITY_TEXT_LIMITS.detail, false);
+  });
+  if (Object.keys(postflight.checks || {}).length) validateCheckMap_(postflight.checks, POST_CHECK_NAMES, '飛行後点検');
   models.forEach(function(model) {
     const ac = session.aircrafts && session.aircrafts[model];
     const missingPre = PRE_CHECK_NAMES.filter(function(name) {
@@ -903,22 +1144,88 @@ function validateCommitBusinessInput_(input) {
     });
     if (missingPost.length) throw new Error(model + 'の飛行後点検が未完了です。');
   });
-  (session.flights || []).forEach(function(flight) {
+  let totalMinutes = 0;
+  session.flights.forEach(function(flight) {
     if (models.indexOf(flight.model) < 0) throw new Error('飛行記録の機体割当を確認してください。');
-    if (!Number.isInteger(Number(flight.battery)) || Number(flight.battery) < 1 || Number(flight.battery) > 7) {
+    if (typeof flight.battery !== 'number' || !Number.isInteger(flight.battery) || flight.battery < 1 || flight.battery > 7) {
       throw new Error('飛行記録のバッテリーを確認してください。');
     }
-    required_(flight.takeoffLocation, '離陸場所');
-    required_(flight.landingLocation, '着陸場所');
-    required_(flight.takeoffAt, '離陸時刻');
-    required_(flight.landingAt, '着陸時刻');
-    if (isNaN(new Date(flight.takeoffAt).getTime()) || isNaN(new Date(flight.landingAt).getTime())) {
+    if (typeof flight.index !== 'number' || !Number.isInteger(flight.index) || flight.index < 1 || flight.index > SECURITY_MAX_FLIGHTS) {
+      throw new Error('飛行記録番号を確認してください。');
+    }
+    assertTextLimit_(flight.takeoffLocation, '離陸場所', SECURITY_TEXT_LIMITS.location, true);
+    assertTextLimit_(flight.landingLocation, '着陸場所', SECURITY_TEXT_LIMITS.location, true);
+    assertTextLimit_(flight.takeoffAt, '離陸時刻', 50, true);
+    assertTextLimit_(flight.landingAt, '着陸時刻', 50, true);
+    if (typeof flight.cycle !== 'string') throw new Error('サイクル数の形式を確認してください。');
+    assertTextLimit_(flight.cycle, 'サイクル数', 12, false);
+    assertTextLimit_(flight.safetyDetail, '安全に影響した事項', SECURITY_TEXT_LIMITS.detail, false);
+    assertTextLimit_(flight.batteryNote, 'バッテリー所感', SECURITY_TEXT_LIMITS.note, false);
+    if (typeof flight.safetyIssue !== 'boolean') throw new Error('安全影響の指定を確認してください。');
+    const takeoff = new Date(flight.takeoffAt);
+    const landing = new Date(flight.landingAt);
+    if (isNaN(takeoff.getTime()) || isNaN(landing.getTime()) || landing.getTime() < takeoff.getTime() || landing.getTime() - takeoff.getTime() > 86400000) {
       throw new Error('離着陸時刻を確認してください。');
     }
-    const minutes = Number(flight.actualMinutes);
-    if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('実飛行時間を確認してください。');
+    if (takeoff.getTime() < operationDate.getTime() - 86400000 || takeoff.getTime() > operationDate.getTime() + 172800000) {
+      throw new Error('離着陸時刻と運航日を確認してください。');
+    }
+    if (typeof flight.actualMinutes !== 'number' || !Number.isInteger(flight.actualMinutes) || flight.actualMinutes <= 0 || flight.actualMinutes > SECURITY_MAX_FLIGHT_MINUTES) {
+      throw new Error('実飛行時間を確認してください。');
+    }
+    totalMinutes += flight.actualMinutes;
   });
+  if (totalMinutes > SECURITY_MAX_TOTAL_MINUTES) throw new Error('1運航の合計飛行時間が上限を超えています。');
   return models;
+}
+
+function validateCheckMap_(checks, allowedNames, label) {
+  if (!checks || typeof checks !== 'object' || Array.isArray(checks)) throw new Error(label + 'の形式を確認してください。');
+  Object.keys(checks).forEach(function(name) {
+    if (allowedNames.indexOf(name) < 0 || ['正常','異常'].indexOf(checks[name]) < 0) {
+      throw new Error(label + 'の値を確認してください。');
+    }
+  });
+}
+
+function validateStoredOperationSelection_(session) {
+  let purpose = session.purpose;
+  const weatherMatch = purpose.match(/ \[気象: ([^\]]+)\]$/);
+  if (weatherMatch) {
+    const weatherValues = ['晴','曇','雨','強風注意'];
+    const windSpeeds = ['0〜1m/s 静穏','2〜3m/s 穏やか','4〜5m/s 注意','6m/s以上 飛行不可'];
+    const directions = ['北','北東','東','南東','南','南西','西','北西'];
+    const allowedWeatherParts = weatherValues.slice();
+    windSpeeds.forEach(function(speed) {
+      allowedWeatherParts.push('風速' + speed);
+      directions.forEach(function(direction) { allowedWeatherParts.push('風速' + speed + ' ' + direction); });
+    });
+    directions.forEach(function(direction) { allowedWeatherParts.push('風向' + direction); });
+    weatherMatch[1].split(' / ').forEach(function(part) {
+      if (allowedWeatherParts.indexOf(part) < 0) throw new Error('気象情報を確認してください。');
+    });
+    purpose = purpose.slice(0, weatherMatch.index);
+  }
+  if (purpose.indexOf('その他：') === 0) {
+    if (!purpose.slice('その他：'.length).trim()) throw new Error('その他の飛行目的を確認してください。');
+  } else if (FLIGHT_PURPOSES.indexOf(purpose) < 0 || purpose === 'その他') {
+    throw new Error('飛行目的を確認してください。');
+  }
+
+  let method = session.method;
+  const permitMatch = method.match(/ \[許可承認: ([^\]]+)\]$/);
+  if (permitMatch) {
+    if (!session.permitNo || permitMatch[1] !== session.permitNo) throw new Error('許可承認番号を確認してください。');
+    method = method.slice(0, permitMatch.index);
+  } else if (session.permitNo) {
+    throw new Error('許可承認番号を確認してください。');
+  }
+  validateOperationSelection_({ purpose: '空撮', method: method.split(' / '), category: session.category });
+}
+
+function isAppTestPurpose_(purpose) {
+  const text = String(purpose || '');
+  return text === APP_TEST_PURPOSE || text.indexOf(APP_TEST_PURPOSE + ' [気象: ') === 0;
 }
 
 function activeCommitReservations_(excludeDraftId) {
@@ -947,12 +1254,12 @@ function chooseFixedBlock_(sheet, reserved) {
   return 0;
 }
 
-function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, reserved) {
+function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, reserved, appTest) {
   let sheet = currentSheet;
   if (!sheet) {
     const beforeNames = {};
     ss.getSheets().forEach(function(item) { beforeNames[item.getName()] = true; });
-    sheet = getOrCreateDateSheet_(ss, operationDate, !!forceNew);
+    sheet = getOrCreateDateSheet_(ss, operationDate, !!forceNew, 1, appTest);
     if (!beforeNames[sheet.getName()]) commitFault_('AFTER_SHEET_COPY');
   }
   while (true) {
@@ -960,9 +1267,9 @@ function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, rese
     if (blockNo) return { sheet: sheet, blockNo: blockNo };
     const match = sheet.getName().match(/_(\d+)$/);
     const nextSequence = (match ? Number(match[1]) : 1) + 1;
-    const name = format_(operationDate, 'yyyy.M.d') + '_' + nextSequence;
+    const name = (appTest ? 'TEST_' : '') + format_(operationDate, 'yyyy.M.d') + '_' + nextSequence;
     const existed = !!ss.getSheetByName(name);
-    sheet = getOrCreateDateSheet_(ss, operationDate, false, nextSequence);
+    sheet = getOrCreateDateSheet_(ss, operationDate, false, nextSequence, appTest);
     if (!existed) commitFault_('AFTER_SHEET_COPY');
   }
 }
@@ -976,10 +1283,14 @@ function fixedBatteryRow_(sheet, reservedRows) {
 }
 
 function writeBatteryHistoryAt_(sheet, row, session, minutes, input) {
-  trackedSetValues_(sheet.getRange(row, 1, 1, 8), [[
-    dateFromSheetName_(session.dateSheet), session.model, session.purpose, minutes,
-    input.cycle || '', input.batteryNote || '', session.route, ''
-  ]]);
+  trackedSetValue_(sheet.getRange(row, 1), dateFromSheetName_(session.dateSheet, true));
+  trackedSetValue_(sheet.getRange(row, 2), session.model);
+  trackedSetUserText_(sheet.getRange(row, 3), session.purpose);
+  trackedSetValue_(sheet.getRange(row, 4), minutes);
+  trackedSetUserText_(sheet.getRange(row, 5), input.cycle || '');
+  trackedSetUserText_(sheet.getRange(row, 6), input.batteryNote || '');
+  trackedSetUserText_(sheet.getRange(row, 7), session.route);
+  trackedSetValue_(sheet.getRange(row, 8), '');
 }
 
 function captureCommitStage_(capture, stage, work) {
@@ -994,6 +1305,7 @@ function buildFixedCommitPlan_(input) {
   const postflight = input.postflight;
   const models = validateCommitBusinessInput_(input);
   const operationDate = dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
+  const appTest = isAppTestPurpose_(session.purpose);
   const ss = spreadsheet_();
   const reservations = activeCommitReservations_(session.draftId);
   if (reservations.activeDrafts.length) {
@@ -1009,7 +1321,7 @@ function buildFixedCommitPlan_(input) {
     for (let index = 0; index < modelFlights.length; index += 7) chunks.push(modelFlights.slice(index, index + 7));
     if (!chunks.length) chunks.push([]);
     chunks.forEach(function(flights) {
-      const allocated = nextFixedSheetAndBlock_(ss, operationDate, currentSheet, firstAssignment && !!session.forceNewLocation, reservations);
+      const allocated = nextFixedSheetAndBlock_(ss, operationDate, currentSheet, firstAssignment && !!session.forceNewLocation, reservations, appTest);
       currentSheet = allocated.sheet;
       firstAssignment = false;
       reservations.blocks[currentSheet.getName() + '|' + allocated.blockNo] = session.draftId;
@@ -1041,7 +1353,7 @@ function buildFixedCommitPlan_(input) {
     const cell = aircraftTotalCell_(model);
     startingByModel[model] = parseHoursMinutes_(cell.getDisplayValue(), model + 'の点検時の総飛行時間');
     finalByModel[model] = startingByModel[model];
-    totalTargets.push({ model: model, sheetName: cell.getSheet().getName(), row: cell.getRow(), col: cell.getColumn() });
+    if (!appTest) totalTargets.push({ model: model, sheetName: cell.getSheet().getName(), row: cell.getRow(), col: cell.getColumn() });
   });
   (session.flights || []).forEach(function(flight) { finalByModel[flight.model] += Number(flight.actualMinutes); });
 
@@ -1127,8 +1439,8 @@ function buildFixedCommitPlan_(input) {
   };
 }
 
-function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence) {
-  const baseName = format_(date, 'yyyy.M.d');
+function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence, appTest) {
+  const baseName = (appTest ? 'TEST_' : '') + format_(date, 'yyyy.M.d');
   let index = Math.max(1, Number(startSequence) || 1);
   let name = index === 1 ? baseName : baseName + '_' + index;
   while (true) {
@@ -1138,6 +1450,11 @@ function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence) {
       if (!template) throw new Error('日常点検シートが見つかりません。');
       sheet = template.copyTo(spreadsheet).setName(name);
       return sheet;
+    }
+    if (appTest && !dateSheetStructureUsable_(sheet)) {
+      index++;
+      name = baseName + '_' + index;
+      continue;
     }
     // forceNewが指定されていない場合、かつ空きブロック（No.1またはNo.2）があればこのシートを使用
     if (!forceNew && (!blockUsed_(sheet, 1) || !blockUsed_(sheet, 2))) {
@@ -1150,6 +1467,28 @@ function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence) {
 }
 
 function sheetValues_(sheet) { return sheet.getDataRange().getDisplayValues(); }
+
+function dateSheetStructureUsable_(sheet) {
+  const values = sheetValues_(sheet);
+  return [1, 2].every(function(blockNo) {
+    const block = block_(blockNo);
+    let aircraftRows = 0;
+    for (let row = 0; row < Math.min(10, values.length); row++) {
+      for (let col = block.startCol - 1; col < block.endCol; col++) {
+        if (String((values[row] || [])[col] || '').indexOf('Autel Robotics Co., Ltd.') >= 0) aircraftRows++;
+      }
+    }
+    return aircraftRows >= 2 &&
+      !!findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true) &&
+      !!findInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], false) &&
+      !!findInBlock_(sheet, blockNo, ['使用バッテリー'], false) &&
+      PRE_CHECK_NAMES.every(function(name) {
+        const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
+        return !!findInBlock_(sheet, blockNo, labels, false);
+      }) &&
+      POST_CHECK_NAMES.every(function(name) { return !!findInBlock_(sheet, blockNo, [name], false); });
+  });
+}
 
 function findInBlock_(sheet, blockNo, labels, contains) {
   const block = block_(blockNo);
@@ -1205,6 +1544,46 @@ function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
   return true;
 }
 
+function setUserTextAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  trackedSetUserText_(sheet.getRange(cell.row, targetCol), value);
+  return true;
+}
+
+function locationCellDisplay_(value) {
+  const text = String(value == null ? '' : value).trim();
+  const match = text.match(/^(.*?)\s*[（(]\s*((?:北緯|南緯)?\s*\d{1,3}(?:\.\d+)?)\s*[,，]\s*((?:東経|西経)?\s*\d{1,3}(?:\.\d+)?)\s*[）)]$/);
+  if (!match) return { text: text, twoLine: false };
+  const coordinates = '(' + match[2].trim() + ', ' + match[3].trim() + ')';
+  const name = match[1].trim();
+  return { text: name ? name + '\n' + coordinates : coordinates, twoLine: !!name };
+}
+
+function writeLocationCell_(cell, value) {
+  const display = locationCellDisplay_(value);
+  trackedSetUserText_(cell, display.text);
+  trackedSetHorizontalAlignment_(cell, 'center');
+  trackedSetVerticalAlignment_(cell, 'middle');
+  trackedSetWrap_(cell, display.twoLine);
+  if (display.twoLine) trackedSetFontSize_(cell, Math.max(1, Number(cell.getFontSize()) - 1));
+}
+
+function setLocationAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  writeLocationCell_(sheet.getRange(cell.row, targetCol), value);
+  return true;
+}
+
 function writeHeaderFields_(sheet, session, blockNo) {
   const block = block_(blockNo);
   for (let row = 1; row <= Math.min(10, sheet.getLastRow()); row++) {
@@ -1219,24 +1598,24 @@ function writeHeaderFields_(sheet, session, blockNo) {
 
   const dateCell = findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true);
   if (dateCell) {
-    const date = dateFromSheetName_(session.dateSheet);
+    const date = dateFromSheetName_(session.dateSheet, true);
     trackedSetValue_(sheet.getRange(dateCell.row, dateCell.col), '飛行・点検実施年月日：' + format_(date, 'yyyy年M月d日'));
   }
-  setAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
-  setAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
-  setAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method);
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
+  setLocationAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method);
   
   let pilotDisplay = session.pilot;
   if (session.assistant) {
     pilotDisplay += '（補助者: ' + session.assistant + '）';
   }
-  setAfterLabelInBlock_(sheet, blockNo, ['操縦者・点検実施者','操縦者'], pilotDisplay);
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['操縦者・点検実施者','操縦者'], pilotDisplay);
 
   const certLabel = findInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], false);
   if (certLabel && String(sheet.getRange(certLabel.row, certLabel.col).getDisplayValue()).trim() === '技能証明番号') {
     trackedSetValue_(sheet.getRange(certLabel.row, certLabel.col), '技能証明書番号');
   }
-  setAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
 }
 
 function writeCheckResults_(sheet, checks, section, blockNo) {
@@ -1280,6 +1659,10 @@ function writeFlightFields_(sheet, slot, fields) {
       if (['離陸時刻', '着陸時刻', '飛行時間', '総飛行時間'].indexOf(key) >= 0) {
         trackedSetNumberFormat_(cell, '@');
         trackedSetValue_(cell, String(fields[key]));
+      } else if (['離陸場所','着陸場所'].indexOf(key) >= 0) {
+        writeLocationCell_(cell, fields[key]);
+      } else if (['安全に影響した事項','バッテリー異常・所感'].indexOf(key) >= 0) {
+        trackedSetUserText_(cell, fields[key]);
       } else {
         trackedSetValue_(cell, fields[key]);
       }
@@ -1288,9 +1671,9 @@ function writeFlightFields_(sheet, slot, fields) {
 }
 
 function writeOptionalFields_(sheet, input, blockNo, abnormal) {
-  setAfterLabelInBlock_(sheet, blockNo, ['点検実施場所','点検場所'], input.inspectionLocation || '');
-  setAfterLabelInBlock_(sheet, blockNo, ['不具合箇所：','不具合箇所'], input.defectLocation || '');
-  setAfterLabelInBlock_(sheet, blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.defectDetail || '');
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['点検実施場所','点検場所'], input.inspectionLocation || '');
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['不具合箇所：','不具合箇所'], input.defectLocation || '');
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.defectDetail || '');
 
   const normalCell = findInBlock_(sheet, blockNo, ['□ 異常なし','☑ 異常なし'], false);
   const defectCell = findInBlock_(sheet, blockNo, ['□ 不具合あり','☑ 不具合あり'], false);
@@ -1300,10 +1683,10 @@ function writeOptionalFields_(sheet, input, blockNo, abnormal) {
   if (abnormal || String(input.actionDetail || '').trim()) {
     const offset = block_(blockNo).startCol - 3;
     trackedSetValue_(sheet.getRange(44, 4 + offset), new Date());
-    trackedSetValue_(sheet.getRange(44, 6 + offset), input.defectDetail || input.defectLocation || '');
+    trackedSetUserText_(sheet.getRange(44, 6 + offset), input.defectDetail || input.defectLocation || '');
     if (String(input.actionDetail || '').trim()) trackedSetValue_(sheet.getRange(44, 10 + offset), new Date());
-    trackedSetValue_(sheet.getRange(44, 12 + offset), input.actionDetail || '');
-    trackedSetValue_(sheet.getRange(44, 15 + offset), input.confirmer || '');
+    trackedSetUserText_(sheet.getRange(44, 12 + offset), input.actionDetail || '');
+    trackedSetUserText_(sheet.getRange(44, 15 + offset), input.confirmer || '');
   }
 }
 
@@ -1403,10 +1786,7 @@ function appendBatteryHistory_(session, minutes, input) {
   let row = BATTERY_FIRST_ROW;
   while (row <= BATTERY_LAST_ROW && String((values[row - 1] || [])[0] || '').trim()) row++;
   if (row > BATTERY_LAST_ROW) throw new Error(sheet.getName() + ' の履歴入力欄が上限に達しています。');
-  trackedSetValues_(sheet.getRange(row, 1, 1, 8), [[
-    dateFromSheetName_(session.dateSheet), session.model, session.purpose, minutes,
-    input.cycle || '', input.batteryNote || '', session.route, ''
-  ]]);
+  writeBatteryHistoryAt_(sheet, row, session, minutes, input);
   return { sheetName: sheet.getName(), row: row };
 }
 
@@ -1697,44 +2077,6 @@ const APP_HTML = String.raw`<!doctype html>
       margin: 8px 0;
       letter-spacing: 2px;
     }
-    .favorite-list {
-      display: grid;
-      gap: 8px;
-      padding: 6px 0 8px;
-    }
-    .favorite-item {
-      background: #f8fafc;
-      border: 1px solid #cbd5e1;
-      border-radius: 8px;
-      padding: 9px;
-    }
-    .favorite-name {
-      color: #334155;
-      font-size: 13px;
-      font-weight: 700;
-      margin-bottom: 7px;
-      overflow-wrap: anywhere;
-    }
-    .favorite-actions {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 6px;
-    }
-    .favorite-action-btn {
-      border: 1px solid #94a3b8;
-      border-radius: 7px;
-      min-height: 42px;
-      padding: 7px 4px;
-      margin: 0;
-      width: 100%;
-      font-size: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      touch-action: manipulation;
-    }
-    .favorite-use-btn { background: #eff6ff; border-color: #60a5fa; color: #1d4ed8; }
-    .favorite-rename-btn { background: #fff; color: #475569; }
-    .favorite-delete-btn { background: #fff1f2; border-color: #fda4af; color: #be123c; }
     .input-error {
       border: 2px solid #ef4444 !important;
       background-color: #fef2f2 !important;
@@ -1876,7 +2218,7 @@ var POST_CHECK_DETAILS = {
   '発熱': { label: '発熱', detail: '機体本体・バッテリー・モーターに異常な発熱がないこと' },
   'その他': { label: 'その他', detail: '飛行後に認めた異常・不具合がないこと' }
 };
-var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行'];
+var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行','アプリテスト'];
 var METHOD_NAMES = ['通常飛行（特定飛行なし）','屋内練習','空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SPECIAL_METHODS = ['空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SAFETY_TAGS = [
@@ -2355,10 +2697,9 @@ function captureCurrentScreenDraft(){
 }
 
 // ----------------------------------------------------
-// LocalStorage 管理（下書き・直前履歴・お気に入り）
+// LocalStorage 管理（下書き・直前履歴）
 // ----------------------------------------------------
 var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
-var STORAGE_KEY_FAVORITES = 'EVO_LITE_FAVORITES';
 
 function saveLastOperation(data){
   try{ localStorage.setItem(STORAGE_KEY_LAST, JSON.stringify(data)); }catch(e){}
@@ -2366,46 +2707,6 @@ function saveLastOperation(data){
 function loadLastOperation(){
   try{ var d = localStorage.getItem(STORAGE_KEY_LAST); return d ? JSON.parse(d) : null; }catch(e){ return null; }
 }
-function loadFavorites(){
-  try{ var d = localStorage.getItem(STORAGE_KEY_FAVORITES); return d ? JSON.parse(d) : []; }catch(e){ return []; }
-}
-function findFavoriteSpotIndex_(list, location, route){
-  for(var i=0; i<list.length; i++){
-    var f = list[i] || {};
-    if(String(f.location || '') === String(location || '') && String(f.route || '') === String(route || '')) return i;
-  }
-  return -1;
-}
-function storeFavorites_(list){
-  try{
-    localStorage.setItem(STORAGE_KEY_FAVORITES, JSON.stringify(list));
-    return true;
-  }catch(e){ return false; }
-}
-function saveFavoriteSpot(name, location, route){
-  try{
-    var list = loadFavorites();
-    if(!Array.isArray(list)) list = [];
-    var existingIndex = findFavoriteSpotIndex_(list, location, route);
-    if(existingIndex >= 0) return { status:'duplicate', index:existingIndex, favorite:list[existingIndex] };
-    list.unshift({ name: name, location: location, route: route });
-    if(list.length > 8) list.pop();
-    return storeFavorites_(list) ? { status:'saved', index:0 } : { status:'error' };
-  }catch(e){ return { status:'error' }; }
-}
-function renameFavoriteSpot_(idx, name){
-  var list = loadFavorites();
-  if(!Array.isArray(list) || !list[idx]) return false;
-  list[idx].name = name;
-  return storeFavorites_(list);
-}
-function deleteFavoriteSpot_(idx){
-  var list = loadFavorites();
-  if(!Array.isArray(list) || !list[idx]) return false;
-  list.splice(idx, 1);
-  return storeFavorites_(list);
-}
-
 // ----------------------------------------------------
 // GPS自動取得＆逆ジオコーディング（手打ちゼロ）
 // ----------------------------------------------------
@@ -2497,7 +2798,6 @@ function render(){
 // ----------------------------------------------------
 function renderStartView(div){
   var last = loadLastOperation() || {};
-  var favs = loadFavorites();
 
   var sessionNoticeHtml = '';
   if(STATE && STATE.session){
@@ -2535,8 +2835,6 @@ function renderStartView(div){
     return '<label class="check-item"><input type="checkbox" id="method'+i+'"'+chk+' onchange="onMethodChanged('+i+')"><span>'+esc(name)+'</span></label>';
   }).join('');
 
-  var favHtml = favoriteListHtml_(favs);
-
   div.innerHTML =
     sessionNoticeHtml +
     '<div class="card" id="startCard">' +
@@ -2544,12 +2842,6 @@ function renderStartView(div){
         '<h2>本日の運航を開始</h2>' +
         '<button type="button" class="btn-outline" onclick="applyLastOperation()">🔄 前回と同じ条件で引用</button>' +
       '</div>' +
-
-      '<div id="favoriteSection" style="margin-bottom:8px;' + (favHtml ? '' : 'display:none;') + '">' +
-        '<div class="text-sm">登録済みのお気に入り現場：</div>' +
-        '<div id="favoriteList">' + favHtml + '</div>' +
-      '</div>' +
-
       '<div class="status-box">' +
         '本日：<strong>' + esc(STATE.today) + '</strong> ' +
         (STATE.hasTodaySheet ? '（日付シート作成済み）' : '（開始時に自動作成）') +
@@ -2649,11 +2941,6 @@ function renderStartView(div){
 
       '<label>技能証明書番号</label>' +
       '<input type="text" id="cert" placeholder="未所持または技能証明番号" value="' + esc(last.cert || '') + '">' +
-
-      '<div class="flex-row" style="margin-top:8px;">' +
-        '<button type="button" class="btn-outline btn-sm" onclick="saveCurrentAsFavorite()">⭐ この場所をお気に入りに登録</button>' +
-      '</div>' +
-
       '<button class="btn btn-primary" style="font-size:16px;padding:13px;" onclick="submitStartOperation()">次へ：飛行前点検を開始</button>' +
     '</div>';
 
@@ -2722,98 +3009,6 @@ function applyLastOperation(){
   var last = loadLastOperation();
   if(!last){ alert('前回の記録履歴がありません。'); return; }
   renderStartView(el('app'));
-}
-
-function favoriteDisplayName_(f){
-  return String((f && (f.name || f.route || f.location)) || '名称未設定');
-}
-
-function favoriteListHtml_(favs){
-  if(!Array.isArray(favs) || favs.length === 0) return '';
-  return '<div class="favorite-list">' + favs.map(function(f, idx){
-    return '<div class="favorite-item">' +
-      '<div class="favorite-name">📍 ' + esc(favoriteDisplayName_(f)) + '</div>' +
-      '<div class="favorite-actions">' +
-        '<button type="button" class="favorite-action-btn favorite-use-btn" onclick="applyFavorite(' + idx + ')">使う</button>' +
-        '<button type="button" class="favorite-action-btn favorite-rename-btn" onclick="renameFavorite(' + idx + ')">名前変更</button>' +
-        '<button type="button" class="favorite-action-btn favorite-delete-btn" onclick="deleteFavorite(' + idx + ')">削除</button>' +
-      '</div>' +
-    '</div>';
-  }).join('') + '</div>';
-}
-
-function refreshFavoriteList_(){
-  var favHtml = favoriteListHtml_(loadFavorites());
-  var section = el('favoriteSection');
-  var list = el('favoriteList');
-  if(list) list.innerHTML = favHtml;
-  if(section) section.style.display = favHtml ? '' : 'none';
-}
-
-function applyFavorite(idx){
-  var favs = loadFavorites();
-  var f = favs[idx];
-  if(!f) return;
-  if(el('route')) el('route').value = f.route;
-  if(el('inspectionLocation')) el('inspectionLocation').value = f.location;
-}
-
-function renameFavorite(idx){
-  var favs = loadFavorites();
-  var f = Array.isArray(favs) ? favs[idx] : null;
-  if(!f) return;
-  var name = prompt('お気に入り現場の新しい名前を入力してください：', favoriteDisplayName_(f));
-  if(name === null) return;
-  name = String(name).trim();
-  if(!name){ alert('名前を入力してください。'); return; }
-  if(renameFavoriteSpot_(idx, name)){
-    refreshFavoriteList_();
-    alert('お気に入り現場の名前を変更しました。');
-  }else{
-    alert('名前を変更できませんでした。もう一度お試しください。');
-  }
-}
-
-function deleteFavorite(idx){
-  var favs = loadFavorites();
-  var f = Array.isArray(favs) ? favs[idx] : null;
-  if(!f) return;
-  if(!confirm('お気に入り現場「' + favoriteDisplayName_(f) + '」を削除しますか？')) return;
-  if(deleteFavoriteSpot_(idx)){
-    refreshFavoriteList_();
-    alert('お気に入り現場を削除しました。');
-  }else{
-    alert('削除できませんでした。もう一度お試しください。');
-  }
-}
-
-function saveCurrentAsFavorite(){
-  var loc = val('inspectionLocation');
-  var r = val('route');
-  if(!loc && !r){ alert('場所または経路を入力してください。'); return; }
-  var name = prompt('この現場の表示名を入力してください（例：〇〇海岸、自宅横）：', r.slice(0, 12) || 'お気に入り現場');
-  if(name === null) return;
-  name = String(name).trim();
-  if(!name){ alert('名前を入力してください。'); return; }
-  var result = saveFavoriteSpot(name, loc, r);
-  if(result.status === 'saved'){
-    alert('お気に入り現場に登録しました。');
-    refreshFavoriteList_();
-  }else if(result.status === 'duplicate'){
-    var currentName = favoriteDisplayName_(result.favorite);
-    if(currentName === name){
-      alert('この場所は「' + currentName + '」として既に保存されています。');
-    }else if(confirm('この場所は「' + currentName + '」として既に保存されています。\n名前を「' + name + '」に変更しますか？')){
-      if(renameFavoriteSpot_(result.index, name)){
-        refreshFavoriteList_();
-        alert('既存のお気に入り現場の名前を変更しました。');
-      }else{
-        alert('名前を変更できませんでした。もう一度お試しください。');
-      }
-    }
-  }else{
-    alert('お気に入り現場を保存できませんでした。もう一度お試しください。');
-  }
 }
 
 function submitStartOperation(){

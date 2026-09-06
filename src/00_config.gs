@@ -31,6 +31,31 @@ const COMMIT_PLAN_VERSION = 2;
 const COMMIT_CHUNK_MAX_BYTES = 7000;
 const COMMIT_COMPLETE_RETENTION_DAYS = 30;
 const COMMIT_STALE_DAYS = 7;
+const SECURITY_MAX_FLIGHTS = 30;
+const SECURITY_MAX_FLIGHT_MINUTES = 240;
+const SECURITY_MAX_TOTAL_MINUTES = 1440;
+const SECURITY_MAX_RAW_INPUT_BYTES = 512 * 1024;
+const SECURITY_MAX_NORMALIZED_INPUT_BYTES = 128 * 1024;
+const SECURITY_MAX_RAW_PROPERTIES = 5000;
+const SECURITY_MAX_NORMALIZED_PROPERTIES = 500;
+const SECURITY_MAX_OBJECT_DEPTH = 8;
+const SECURITY_MAX_ARRAY_ITEMS = 100;
+const SECURITY_MAX_PROPERTY_NAME_CHARS = 100;
+const SECURITY_MAX_COMMIT_PLAN_BYTES = 300 * 1024;
+const SECURITY_MAX_COMMIT_CHUNKS = 44;
+const SECURITY_MAX_PROPERTY_STORE_BYTES = 400 * 1024;
+const SECURITY_OPERATION_YEAR_MIN = 2022;
+const SECURITY_OPERATION_YEAR_MAX = 2100;
+const APP_TEST_PURPOSE = 'アプリテスト';
+const SECURITY_TEXT_LIMITS = {
+  person: 120,
+  identifier: 100,
+  purpose: 500,
+  method: 500,
+  location: 500,
+  note: 1000,
+  detail: 2000
+};
 const BATTERY_COMMIT_METADATA_KEY = 'EVO_FLIGHT_COMMIT';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
@@ -55,7 +80,7 @@ const BLOCKS = {
 const FLIGHT_PURPOSES = [
   '空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス',
   'インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等',
-  '趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行'
+  '趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行','アプリテスト'
 ];
 
 const SPECIAL_FLIGHT_METHODS = [

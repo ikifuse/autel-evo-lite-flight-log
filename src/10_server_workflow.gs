@@ -19,10 +19,23 @@ function doGet() {
 function spreadsheet_() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
 function now_() { return new Date(); }
 function format_(value, pattern) { return Utilities.formatDate(new Date(value), TZ, pattern); }
-function dateFromSheetName_(sheetName) {
-  const match = String(sheetName || '').match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/);
+function dateFromSheetName_(sheetName, allowTestPrefix) {
+  const pattern = allowTestPrefix
+    ? /^(?:TEST_)?(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/
+    : /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:_\d+)?$/;
+  const match = String(sheetName || '').match(pattern);
   if (!match) throw new Error('日付シート名を日付へ変換できません：' + sheetName);
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < SECURITY_OPERATION_YEAR_MIN || year > SECURITY_OPERATION_YEAR_MAX || month < 1 || month > 12) {
+    throw new Error('運航日を確認してください。');
+  }
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    throw new Error('運航日を確認してください。');
+  }
+  return date;
 }
 function commitCache_() { return CacheService.getScriptCache(); }
 function commitProperties_() { return PropertiesService.getScriptProperties(); }
@@ -68,14 +81,30 @@ function recordCommitCell_(range, value, kind) {
       sheetName: sheet.getName(),
       row: range.getRow(),
       col: range.getColumn(),
-      before: kind === 'format' ? range.getNumberFormat() : encodedCellValue_(range.getValue()),
-      value: kind === 'format' ? String(value) : encodedCellValue_(value)
+      before: commitRangeProperty_(range, kind),
+      value: commitOperationValue_(value, kind)
     };
     COMMIT_WRITE_CAPTURE.byKey[key] = operation;
     COMMIT_WRITE_CAPTURE.operations.push(operation);
   } else {
-    operation.value = kind === 'format' ? String(value) : encodedCellValue_(value);
+    operation.value = commitOperationValue_(value, kind);
   }
+}
+
+function commitRangeProperty_(range, kind) {
+  if (kind === 'format') return range.getNumberFormat();
+  if (kind === 'fontSize') return range.getFontSize();
+  if (kind === 'horizontalAlignment') return range.getHorizontalAlignment();
+  if (kind === 'verticalAlignment') return range.getVerticalAlignment();
+  if (kind === 'wrap') return range.getWrap();
+  return encodedCellValue_(range.getValue());
+}
+
+function commitOperationValue_(value, kind) {
+  if (['format','horizontalAlignment','verticalAlignment'].indexOf(kind) >= 0) return String(value);
+  if (kind === 'fontSize') return Number(value);
+  if (kind === 'wrap') return !!value;
+  return encodedCellValue_(value);
 }
 
 function trackedSetValue_(range, value) {
@@ -84,6 +113,24 @@ function trackedSetValue_(range, value) {
     return range;
   }
   return range.setValue(value);
+}
+
+function isFormulaLikeUserText_(value) {
+  return /^[\u0000-\u0020]*[=+\-@]/.test(String(value == null ? '' : value));
+}
+
+function richTextValue_(value) {
+  return SpreadsheetApp.newRichTextValue().setText(String(value == null ? '' : value)).build();
+}
+
+function trackedSetUserText_(range, value) {
+  const text = String(value == null ? '' : value);
+  if (!isFormulaLikeUserText_(text)) return trackedSetValue_(range, text);
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, text, 'text');
+    return range;
+  }
+  return range.setRichTextValue(richTextValue_(text));
 }
 
 function trackedSetValues_(range, values) {
@@ -104,6 +151,38 @@ function trackedSetNumberFormat_(range, format) {
     return range;
   }
   return range.setNumberFormat(format);
+}
+
+function trackedSetFontSize_(range, size) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, size, 'fontSize');
+    return range;
+  }
+  return range.setFontSize(size);
+}
+
+function trackedSetHorizontalAlignment_(range, alignment) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, alignment, 'horizontalAlignment');
+    return range;
+  }
+  return range.setHorizontalAlignment(alignment);
+}
+
+function trackedSetVerticalAlignment_(range, alignment) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, alignment, 'verticalAlignment');
+    return range;
+  }
+  return range.setVerticalAlignment(alignment);
+}
+
+function trackedSetWrap_(range, wrap) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, wrap, 'wrap');
+    return range;
+  }
+  return range.setWrap(wrap);
 }
 function required_(value, label) {
   if (value == null || String(value).trim() === '') throw new Error(label + 'は必須です。');
@@ -190,6 +269,72 @@ function commitDataKey_(draftId, index) { return COMMIT_V2_PREFIX + draftId + '_
 
 function utf8Length_(text) { return unescape(encodeURIComponent(String(text))).length; }
 
+function assertInputComplexity_(value, limits, label) {
+  const seen = [];
+  let propertyCount = 0;
+  function visit(item, depth) {
+    if (depth > limits.maxDepth) throw new Error(label + 'の階層が深すぎます。');
+    if (item == null || typeof item === 'string' || typeof item === 'boolean' || typeof item === 'number') return;
+    if (item instanceof Date) return;
+    if (typeof item !== 'object') throw new Error(label + 'に使用できない値があります。');
+    if (seen.indexOf(item) >= 0) throw new Error(label + 'に循環参照があります。');
+    seen.push(item);
+    if (Array.isArray(item)) {
+      if (item.length > limits.maxArrayItems) throw new Error(label + 'の配列件数が上限を超えています。');
+      item.forEach(function(child) { visit(child, depth + 1); });
+    } else {
+      const keys = Object.keys(item);
+      propertyCount += keys.length;
+      if (propertyCount > limits.maxProperties) throw new Error(label + 'の項目数が上限を超えています。');
+      keys.forEach(function(key) {
+        if (key.length > SECURITY_MAX_PROPERTY_NAME_CHARS || key === '__proto__' || key === 'prototype' || key === 'constructor') {
+          throw new Error(label + 'に使用できない項目名があります。');
+        }
+        visit(item[key], depth + 1);
+      });
+    }
+    seen.pop();
+  }
+  visit(value, 0);
+  let serialized;
+  try { serialized = JSON.stringify(value); }
+  catch (error) { throw new Error(label + 'を読み取れません。'); }
+  if (utf8Length_(serialized || '') > limits.maxBytes) throw new Error(label + 'のデータ容量が上限を超えています。');
+}
+
+function assertTextLimit_(value, label, maxLength, required) {
+  if (typeof value !== 'string') throw new Error(label + 'の形式を確認してください。');
+  if (required && !value.trim()) throw new Error(label + 'は必須です。');
+  if (Array.from(value).length > maxLength) throw new Error(label + 'は' + maxLength + '文字以内で入力してください。');
+}
+
+function propertyStorageBytes_() {
+  const all = commitProperties_().getProperties();
+  return Object.keys(all).reduce(function(total, key) {
+    return total + utf8Length_(key) + utf8Length_(all[key]);
+  }, 0);
+}
+
+function estimatedCommitPlanBytes_(input) {
+  const flights = (input.session && input.session.flights) || [];
+  const usedModels = Object.keys((input.session && input.session.aircrafts) || {}).filter(function(model) {
+    return input.session.aircrafts[model] && input.session.aircrafts[model].used;
+  });
+  const assignments = usedModels.reduce(function(total, model) {
+    const count = flights.filter(function(flight) { return flight.model === model; }).length;
+    return total + Math.max(1, Math.ceil(count / 7));
+  }, 0);
+  return utf8Length_(canonicalJson_(input)) * 4 + flights.length * 4000 + assignments * 12000 + 20000;
+}
+
+function ensureCommitPlanCapacity_(input) {
+  const estimated = estimatedCommitPlanBytes_(input);
+  if (estimated > SECURITY_MAX_COMMIT_PLAN_BYTES) throw new Error('保存計画の容量が上限を超えています。');
+  if (propertyStorageBytes_() + estimated > SECURITY_MAX_PROPERTY_STORE_BYTES) {
+    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+  }
+}
+
 function splitCommitChunks_(text) {
   const chunks = [];
   let current = '';
@@ -219,7 +364,16 @@ function writeCommitMeta_(meta) {
 function storeCommitPlan_(plan, signature) {
   const text = canonicalJson_(plan);
   const chunks = splitCommitChunks_(text);
+  if (utf8Length_(text) > SECURITY_MAX_COMMIT_PLAN_BYTES || chunks.length > SECURITY_MAX_COMMIT_CHUNKS) {
+    throw new Error('保存計画の容量が上限を超えています。');
+  }
   const properties = commitProperties_();
+  const additionalBytes = chunks.reduce(function(total, chunk, index) {
+    return total + utf8Length_(commitDataKey_(plan.draftId, index)) + utf8Length_(chunk);
+  }, 0) + utf8Length_(commitMetaKey_(plan.draftId)) + 2000;
+  if (propertyStorageBytes_() + additionalBytes > SECURITY_MAX_PROPERTY_STORE_BYTES) {
+    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+  }
   chunks.forEach(function(chunk, index) { properties.setProperty(commitDataKey_(plan.draftId, index), chunk); });
   const reread = chunks.map(function(_chunk, index) {
     const value = properties.getProperty(commitDataKey_(plan.draftId, index));
@@ -293,10 +447,8 @@ function safeCommitCachePut_(key, value) {
 function validateDraftId_(draftId) {
   required_(draftId, '運航下書きID');
   const text = String(draftId);
-  const oldFormat = /^op_\d{10,17}$/;
   const uuidFormat = /^op_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const testFormat = /^test_[A-Za-z0-9_-]{1,80}$/;
-  if (!oldFormat.test(text) && !uuidFormat.test(text) && !testFormat.test(text)) {
+  if (!uuidFormat.test(text)) {
     throw new Error('運航下書きIDの形式を確認してください。');
   }
 }
@@ -304,14 +456,23 @@ function validateDraftId_(draftId) {
 function normalizedCommitInput_(input) {
   const session = input && input.session;
   const postflight = input && input.postflight;
-  if (!session || !postflight) throw new Error('確定する運航データがありません。');
+  if (!session || typeof session !== 'object' || Array.isArray(session) ||
+      !postflight || typeof postflight !== 'object' || Array.isArray(postflight)) {
+    throw new Error('確定する運航データがありません。');
+  }
+  if (!session.aircrafts || typeof session.aircrafts !== 'object' || Array.isArray(session.aircrafts) ||
+      !postflight.aircrafts || typeof postflight.aircrafts !== 'object' || Array.isArray(postflight.aircrafts) ||
+      !Array.isArray(session.flights)) {
+    throw new Error('運航データの形式を確認してください。');
+  }
   validateDraftId_(session.draftId);
   const aircrafts = {};
   Object.keys(session.aircrafts || {}).sort().forEach(function(model) {
     const aircraft = session.aircrafts[model] || {};
+    if (typeof aircraft !== 'object' || Array.isArray(aircraft)) throw new Error('機体情報の形式を確認してください。');
     aircrafts[model] = {
       model: model,
-      used: !!aircraft.used,
+      used: aircraft.used == null ? false : aircraft.used,
       preflightChecks: aircraft.preflightChecks || {},
       preflightAbnormalDetail: aircraft.preflightAbnormalDetail || ''
     };
@@ -319,9 +480,10 @@ function normalizedCommitInput_(input) {
   const postAircrafts = {};
   Object.keys(postflight.aircrafts || {}).sort().forEach(function(model) {
     const aircraft = postflight.aircrafts[model] || {};
+    if (typeof aircraft !== 'object' || Array.isArray(aircraft)) throw new Error('飛行後点検の形式を確認してください。');
     postAircrafts[model] = {
       checks: aircraft.checks || {},
-      abnormal: !!aircraft.abnormal,
+      abnormal: aircraft.abnormal == null ? false : aircraft.abnormal,
       defectLocation: aircraft.defectLocation || '',
       defectDetail: aircraft.defectDetail || '',
       actionDetail: aircraft.actionDetail || ''
@@ -331,7 +493,7 @@ function normalizedCommitInput_(input) {
     session: {
       draftId: String(session.draftId),
       operationDate: session.operationDate || '',
-      forceNewLocation: !!session.forceNewLocation,
+      forceNewLocation: session.forceNewLocation == null ? false : session.forceNewLocation,
       model: session.model || '',
       purpose: session.purpose || '',
       route: session.route || '',
@@ -345,12 +507,13 @@ function normalizedCommitInput_(input) {
       preflightAbnormalDetail: session.preflightAbnormalDetail || '',
       aircrafts: aircrafts,
       flights: (session.flights || []).map(function(flight, index) {
+        if (!flight || typeof flight !== 'object' || Array.isArray(flight)) throw new Error('飛行記録の形式を確認してください。');
         return {
-          model: flight.model || '', index: Number(flight.index || index + 1),
-          battery: Number(flight.battery), cycle: flight.cycle || '',
+          model: flight.model || '', index: flight.index == null ? index + 1 : flight.index,
+          battery: flight.battery, cycle: flight.cycle || '',
           takeoffLocation: flight.takeoffLocation || '', landingLocation: flight.landingLocation || '',
           takeoffAt: flight.takeoffAt || '', landingAt: flight.landingAt || '',
-          actualMinutes: Number(flight.actualMinutes), safetyIssue: !!flight.safetyIssue,
+          actualMinutes: flight.actualMinutes, safetyIssue: flight.safetyIssue == null ? false : flight.safetyIssue,
           safetyDetail: flight.safetyDetail || '', batteryNote: flight.batteryNote || ''
         };
       })
@@ -391,7 +554,7 @@ function operationCurrentValue_(operation) {
   const sheet = spreadsheet_().getSheetByName(operation.sheetName);
   if (!sheet) return { missingSheet: true };
   const range = sheet.getRange(operation.row, operation.col);
-  return operation.kind === 'format' ? range.getNumberFormat() : encodedCellValue_(range.getValue());
+  return commitRangeProperty_(range, operation.kind);
 }
 
 function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
@@ -400,13 +563,18 @@ function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
     const sheet = ss.getSheetByName(operation.sheetName);
     if (!sheet) throw new Error('固定保存先シートが見つかりません：' + operation.sheetName);
     const range = sheet.getRange(operation.row, operation.col);
-    const current = operation.kind === 'format' ? range.getNumberFormat() : encodedCellValue_(range.getValue());
+    const current = commitRangeProperty_(range, operation.kind);
     if (sameCommitValue_(current, operation.value)) return;
     if (verifyOnly) throw new Error('保存後の読取確認に失敗しました：' + operation.sheetName + '!' + range.getA1Notation());
     if (!sameCommitValue_(current, operation.before)) {
       throw new Error('保存対象セルが保存開始後に変更されています：' + operation.sheetName + '!' + range.getA1Notation());
     }
     if (operation.kind === 'format') range.setNumberFormat(operation.value);
+    else if (operation.kind === 'fontSize') range.setFontSize(operation.value);
+    else if (operation.kind === 'horizontalAlignment') range.setHorizontalAlignment(operation.value);
+    else if (operation.kind === 'verticalAlignment') range.setVerticalAlignment(operation.value);
+    else if (operation.kind === 'wrap') range.setWrap(operation.value);
+    else if (operation.kind === 'text') range.setRichTextValue(richTextValue_(decodedCellValue_(operation.value)));
     else range.setValue(decodedCellValue_(operation.value));
     if (!verifyOnly) commitFault_('AFTER_' + String(operation.stage || 'WRITE').toUpperCase() + '_OP_' + operationIndex);
   });
@@ -516,16 +684,31 @@ function getCommitStorageStats_() {
 }
 
 function finishAircraft(input) {
+  assertInputComplexity_(input, {
+    maxBytes: SECURITY_MAX_RAW_INPUT_BYTES,
+    maxProperties: SECURITY_MAX_RAW_PROPERTIES,
+    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
+    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
+  }, '送信データ');
   const normalizedInput = normalizedCommitInput_(input);
+  assertInputComplexity_(normalizedInput, {
+    maxBytes: SECURITY_MAX_NORMALIZED_INPUT_BYTES,
+    maxProperties: SECURITY_MAX_NORMALIZED_PROPERTIES,
+    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
+    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
+  }, '保存データ');
+  validateCommitBusinessInput_(normalizedInput);
   const session = normalizedInput.session;
   const signature = commitSignatureV2_(normalizedInput);
 
   return locked_(function() {
-    cleanupCommitPlans_();
     let record = null;
     let currentStage = 'PLAN_READY';
     try {
-      const existingMeta = readCommitMeta_(session.draftId);
+      let existingMeta = readCommitMeta_(session.draftId);
+      if (!existingMeta) ensureCommitPlanCapacity_(normalizedInput);
+      cleanupCommitPlans_();
+      existingMeta = readCommitMeta_(session.draftId);
       if (existingMeta) {
         if (existingMeta.signature !== signature) {
           throw new Error('同じ運航下書きIDで送信内容が変更されています。元の内容を保持したまま管理者へ連絡してください。');

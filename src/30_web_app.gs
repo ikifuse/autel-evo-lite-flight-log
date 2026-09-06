@@ -285,44 +285,6 @@ const APP_HTML = String.raw`<!doctype html>
       margin: 8px 0;
       letter-spacing: 2px;
     }
-    .favorite-list {
-      display: grid;
-      gap: 8px;
-      padding: 6px 0 8px;
-    }
-    .favorite-item {
-      background: #f8fafc;
-      border: 1px solid #cbd5e1;
-      border-radius: 8px;
-      padding: 9px;
-    }
-    .favorite-name {
-      color: #334155;
-      font-size: 13px;
-      font-weight: 700;
-      margin-bottom: 7px;
-      overflow-wrap: anywhere;
-    }
-    .favorite-actions {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 6px;
-    }
-    .favorite-action-btn {
-      border: 1px solid #94a3b8;
-      border-radius: 7px;
-      min-height: 42px;
-      padding: 7px 4px;
-      margin: 0;
-      width: 100%;
-      font-size: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      touch-action: manipulation;
-    }
-    .favorite-use-btn { background: #eff6ff; border-color: #60a5fa; color: #1d4ed8; }
-    .favorite-rename-btn { background: #fff; color: #475569; }
-    .favorite-delete-btn { background: #fff1f2; border-color: #fda4af; color: #be123c; }
     .input-error {
       border: 2px solid #ef4444 !important;
       background-color: #fef2f2 !important;
@@ -464,7 +426,7 @@ var POST_CHECK_DETAILS = {
   '発熱': { label: '発熱', detail: '機体本体・バッテリー・モーターに異常な発熱がないこと' },
   'その他': { label: 'その他', detail: '飛行後に認めた異常・不具合がないこと' }
 };
-var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行'];
+var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行','アプリテスト'];
 var METHOD_NAMES = ['通常飛行（特定飛行なし）','屋内練習','空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SPECIAL_METHODS = ['空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SAFETY_TAGS = [
@@ -943,10 +905,9 @@ function captureCurrentScreenDraft(){
 }
 
 // ----------------------------------------------------
-// LocalStorage 管理（下書き・直前履歴・お気に入り）
+// LocalStorage 管理（下書き・直前履歴）
 // ----------------------------------------------------
 var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
-var STORAGE_KEY_FAVORITES = 'EVO_LITE_FAVORITES';
 
 function saveLastOperation(data){
   try{ localStorage.setItem(STORAGE_KEY_LAST, JSON.stringify(data)); }catch(e){}
@@ -954,46 +915,6 @@ function saveLastOperation(data){
 function loadLastOperation(){
   try{ var d = localStorage.getItem(STORAGE_KEY_LAST); return d ? JSON.parse(d) : null; }catch(e){ return null; }
 }
-function loadFavorites(){
-  try{ var d = localStorage.getItem(STORAGE_KEY_FAVORITES); return d ? JSON.parse(d) : []; }catch(e){ return []; }
-}
-function findFavoriteSpotIndex_(list, location, route){
-  for(var i=0; i<list.length; i++){
-    var f = list[i] || {};
-    if(String(f.location || '') === String(location || '') && String(f.route || '') === String(route || '')) return i;
-  }
-  return -1;
-}
-function storeFavorites_(list){
-  try{
-    localStorage.setItem(STORAGE_KEY_FAVORITES, JSON.stringify(list));
-    return true;
-  }catch(e){ return false; }
-}
-function saveFavoriteSpot(name, location, route){
-  try{
-    var list = loadFavorites();
-    if(!Array.isArray(list)) list = [];
-    var existingIndex = findFavoriteSpotIndex_(list, location, route);
-    if(existingIndex >= 0) return { status:'duplicate', index:existingIndex, favorite:list[existingIndex] };
-    list.unshift({ name: name, location: location, route: route });
-    if(list.length > 8) list.pop();
-    return storeFavorites_(list) ? { status:'saved', index:0 } : { status:'error' };
-  }catch(e){ return { status:'error' }; }
-}
-function renameFavoriteSpot_(idx, name){
-  var list = loadFavorites();
-  if(!Array.isArray(list) || !list[idx]) return false;
-  list[idx].name = name;
-  return storeFavorites_(list);
-}
-function deleteFavoriteSpot_(idx){
-  var list = loadFavorites();
-  if(!Array.isArray(list) || !list[idx]) return false;
-  list.splice(idx, 1);
-  return storeFavorites_(list);
-}
-
 // ----------------------------------------------------
 // GPS自動取得＆逆ジオコーディング（手打ちゼロ）
 // ----------------------------------------------------
@@ -1085,7 +1006,6 @@ function render(){
 // ----------------------------------------------------
 function renderStartView(div){
   var last = loadLastOperation() || {};
-  var favs = loadFavorites();
 
   var sessionNoticeHtml = '';
   if(STATE && STATE.session){
@@ -1123,8 +1043,6 @@ function renderStartView(div){
     return '<label class="check-item"><input type="checkbox" id="method'+i+'"'+chk+' onchange="onMethodChanged('+i+')"><span>'+esc(name)+'</span></label>';
   }).join('');
 
-  var favHtml = favoriteListHtml_(favs);
-
   div.innerHTML =
     sessionNoticeHtml +
     '<div class="card" id="startCard">' +
@@ -1132,12 +1050,6 @@ function renderStartView(div){
         '<h2>本日の運航を開始</h2>' +
         '<button type="button" class="btn-outline" onclick="applyLastOperation()">🔄 前回と同じ条件で引用</button>' +
       '</div>' +
-
-      '<div id="favoriteSection" style="margin-bottom:8px;' + (favHtml ? '' : 'display:none;') + '">' +
-        '<div class="text-sm">登録済みのお気に入り現場：</div>' +
-        '<div id="favoriteList">' + favHtml + '</div>' +
-      '</div>' +
-
       '<div class="status-box">' +
         '本日：<strong>' + esc(STATE.today) + '</strong> ' +
         (STATE.hasTodaySheet ? '（日付シート作成済み）' : '（開始時に自動作成）') +
@@ -1237,11 +1149,6 @@ function renderStartView(div){
 
       '<label>技能証明書番号</label>' +
       '<input type="text" id="cert" placeholder="未所持または技能証明番号" value="' + esc(last.cert || '') + '">' +
-
-      '<div class="flex-row" style="margin-top:8px;">' +
-        '<button type="button" class="btn-outline btn-sm" onclick="saveCurrentAsFavorite()">⭐ この場所をお気に入りに登録</button>' +
-      '</div>' +
-
       '<button class="btn btn-primary" style="font-size:16px;padding:13px;" onclick="submitStartOperation()">次へ：飛行前点検を開始</button>' +
     '</div>';
 
@@ -1310,98 +1217,6 @@ function applyLastOperation(){
   var last = loadLastOperation();
   if(!last){ alert('前回の記録履歴がありません。'); return; }
   renderStartView(el('app'));
-}
-
-function favoriteDisplayName_(f){
-  return String((f && (f.name || f.route || f.location)) || '名称未設定');
-}
-
-function favoriteListHtml_(favs){
-  if(!Array.isArray(favs) || favs.length === 0) return '';
-  return '<div class="favorite-list">' + favs.map(function(f, idx){
-    return '<div class="favorite-item">' +
-      '<div class="favorite-name">📍 ' + esc(favoriteDisplayName_(f)) + '</div>' +
-      '<div class="favorite-actions">' +
-        '<button type="button" class="favorite-action-btn favorite-use-btn" onclick="applyFavorite(' + idx + ')">使う</button>' +
-        '<button type="button" class="favorite-action-btn favorite-rename-btn" onclick="renameFavorite(' + idx + ')">名前変更</button>' +
-        '<button type="button" class="favorite-action-btn favorite-delete-btn" onclick="deleteFavorite(' + idx + ')">削除</button>' +
-      '</div>' +
-    '</div>';
-  }).join('') + '</div>';
-}
-
-function refreshFavoriteList_(){
-  var favHtml = favoriteListHtml_(loadFavorites());
-  var section = el('favoriteSection');
-  var list = el('favoriteList');
-  if(list) list.innerHTML = favHtml;
-  if(section) section.style.display = favHtml ? '' : 'none';
-}
-
-function applyFavorite(idx){
-  var favs = loadFavorites();
-  var f = favs[idx];
-  if(!f) return;
-  if(el('route')) el('route').value = f.route;
-  if(el('inspectionLocation')) el('inspectionLocation').value = f.location;
-}
-
-function renameFavorite(idx){
-  var favs = loadFavorites();
-  var f = Array.isArray(favs) ? favs[idx] : null;
-  if(!f) return;
-  var name = prompt('お気に入り現場の新しい名前を入力してください：', favoriteDisplayName_(f));
-  if(name === null) return;
-  name = String(name).trim();
-  if(!name){ alert('名前を入力してください。'); return; }
-  if(renameFavoriteSpot_(idx, name)){
-    refreshFavoriteList_();
-    alert('お気に入り現場の名前を変更しました。');
-  }else{
-    alert('名前を変更できませんでした。もう一度お試しください。');
-  }
-}
-
-function deleteFavorite(idx){
-  var favs = loadFavorites();
-  var f = Array.isArray(favs) ? favs[idx] : null;
-  if(!f) return;
-  if(!confirm('お気に入り現場「' + favoriteDisplayName_(f) + '」を削除しますか？')) return;
-  if(deleteFavoriteSpot_(idx)){
-    refreshFavoriteList_();
-    alert('お気に入り現場を削除しました。');
-  }else{
-    alert('削除できませんでした。もう一度お試しください。');
-  }
-}
-
-function saveCurrentAsFavorite(){
-  var loc = val('inspectionLocation');
-  var r = val('route');
-  if(!loc && !r){ alert('場所または経路を入力してください。'); return; }
-  var name = prompt('この現場の表示名を入力してください（例：〇〇海岸、自宅横）：', r.slice(0, 12) || 'お気に入り現場');
-  if(name === null) return;
-  name = String(name).trim();
-  if(!name){ alert('名前を入力してください。'); return; }
-  var result = saveFavoriteSpot(name, loc, r);
-  if(result.status === 'saved'){
-    alert('お気に入り現場に登録しました。');
-    refreshFavoriteList_();
-  }else if(result.status === 'duplicate'){
-    var currentName = favoriteDisplayName_(result.favorite);
-    if(currentName === name){
-      alert('この場所は「' + currentName + '」として既に保存されています。');
-    }else if(confirm('この場所は「' + currentName + '」として既に保存されています。\n名前を「' + name + '」に変更しますか？')){
-      if(renameFavoriteSpot_(result.index, name)){
-        refreshFavoriteList_();
-        alert('既存のお気に入り現場の名前を変更しました。');
-      }else{
-        alert('名前を変更できませんでした。もう一度お試しください。');
-      }
-    }
-  }else{
-    alert('お気に入り現場を保存できませんでした。もう一度お試しください。');
-  }
 }
 
 function submitStartOperation(){
