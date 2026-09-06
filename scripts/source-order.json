@@ -1,6 +1,11 @@
 [
   "src/00_config.gs",
-  "src/10_server_workflow.gs",
-  "src/20_spreadsheet_io.gs",
+  "src/10_server_core.gs",
+  "src/11_server_validation.gs",
+  "src/12_commit_engine.gs",
+  "src/13_legacy_compat.gs",
+  "src/20_sheet_core.gs",
+  "src/21_sheet_records.gs",
+  "src/22_battery_totals.gs",
   "src/30_web_app.gs"
 ]

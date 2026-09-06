@@ -345,11 +345,15 @@ function run() {
     currentApp=currentApp.replace('draftId:createOperationDraftId()', "draftId:'op_' + Date.now()");
     const withoutFavoriteChanges = app => app
       .replace(",'アプリテスト'];", '];')
-      .replace(/    \.(?:preset-bar|favorite-list) \{[\s\S]*?(?=    \.input-error \{)/, '    /* favorite management styles */\n')
-      .replace(/function loadFavorites\(\)\{[\s\S]*?(?=\/\/ ----------------------------------------------------\n\/\/ GPS自動取得)/, '/* favorite storage management */\n\n')
-      .replace(/  var favHtml = [\s\S]*?(?=\n\n  div\.innerHTML =)/, "  var favHtml = '';\n  /* favorite list rendering */")
-      .replace(/\n      (?:\(favHtml \?|'<div id="favoriteSection")[\s\S]*?(?=\n\n      '<div class="status-box">)/, '\n      /* favorite list section */')
-      .replace(/function (?:favoriteDisplayName_|applyFavorite)\(.*?[\s\S]*?(?=function submitStartOperation\(\))/, '/* favorite actions */\n\n');
+      .replace('LocalStorage 管理（下書き・直前履歴・お気に入り）', 'LocalStorage 管理（下書き・直前履歴）')
+      .replace("var STORAGE_KEY_FAVORITES = 'EVO_LITE_FAVORITES';\n", '')
+      .replace(/    \.(?:preset-bar|favorite-list) \{[\s\S]*?(?=    \.input-error \{)/, '')
+      .replace(/function loadFavorites\(\)\{[\s\S]*?(?=\/\/ ----------------------------------------------------\n\/\/ GPS自動取得)/, '')
+      .replace(/\n  var favs = loadFavorites\(\);/, '')
+      .replace(/\n  var favHtml = [\s\S]*?(?=\n\n  (?:var sessionNoticeHtml|div\.innerHTML =))\n/, '')
+      .replace(/\n+      (?:\(favHtml \?|'<div id="favoriteSection")[\s\S]*?\n+(?=      '<div class="status-box">)/, '\n')
+      .replace(/\n\n      '<div class="flex-row"[^\n]*\n        '<button[^\n]*onclick="saveCurrentAsFavorite\(\)"[^\n]*\n      '<\/div>' \+\n\n/, '\n')
+      .replace(/function (?:favoriteDisplayName_|applyFavorite)\(.*?[\s\S]*?(?=function submitStartOperation\(\))/, '');
     assert(withoutFavoriteChanges(currentApp)===withoutFavoriteChanges(legacyApp),'T15 UI or client flow changed outside authorized favorite management, app-test purpose and internal UUID generation');
     reports.push('TEST 15 OK');
   }
