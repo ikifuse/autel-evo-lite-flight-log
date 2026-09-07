@@ -17,7 +17,6 @@ const rootDir = resolve(scriptDir, '..');
 const args = new Set(process.argv.slice(2));
 const checkFileArg = process.argv.slice(2).find((arg) => arg.startsWith('--check-file='));
 const checkMode = args.has('--check') || Boolean(checkFileArg);
-const legacyCheck = args.has('--legacy-check');
 const outputRelative = checkFileArg ? checkFileArg.slice('--check-file='.length) : 'dist/Code.gs';
 const outputPath = resolve(rootDir, outputRelative);
 const manifestPath = resolve(scriptDir, 'source-order.json');
@@ -72,16 +71,6 @@ try {
   new Function(sourceText);
 } catch (error) {
   fail(`結合後コードの構文検査に失敗しました: ${error.message}`);
-}
-
-if (legacyCheck) {
-  const legacyPath = resolve(rootDir, 'Code.gs');
-  if (!existsSync(legacyPath)) fail('比較対象の旧Code.gsが見つかりません。');
-  const legacyText = readFileSync(legacyPath, 'utf8');
-  console.log(`旧Code.gs SHA-256: ${sha256(legacyText)}`);
-  console.log(`結合src本体 SHA-256: ${sha256(sourceText)}`);
-  if (legacyText !== sourceText) fail('結合src本体が旧Code.gsと一致しません。');
-  console.log('旧Code.gsとの本体一致検証: OK');
 }
 
 const generatedText = GENERATED_HEADER + sourceText;

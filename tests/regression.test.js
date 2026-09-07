@@ -335,48 +335,15 @@ function run() {
     const e=makeEnvironment(); e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:2}])); const s=e.ss.getSheetByName('2026.9.6'); assert(value(s,26,9)==='☑','T14 pre controller'); assert(value(s,19,15)==='☑','T14 post'); reports.push('TEST 14 OK');
   }
   {
-    const legacy=fs.readFileSync('Code.gs','utf8'); const current=fs.readFileSync(sourcePath,'utf8');
-    const legacyApp=legacy.slice(legacy.indexOf('const APP_HTML ='));
-    let currentApp=current.slice(current.indexOf('const APP_HTML ='));
-    const uuidStart=currentApp.indexOf('function createOperationDraftId(){');
-    const uuidEnd=currentApp.indexOf('function persistOperationDraft(){');
-    assert(uuidStart>=0 && uuidEnd>uuidStart,'T15 UUID helper markers');
-    currentApp=currentApp.slice(0,uuidStart)+currentApp.slice(uuidEnd);
-    currentApp=currentApp.replace('draftId:createOperationDraftId()', "draftId:'op_' + Date.now()");
-    const finishSuccessBefore = `      if(name === 'finishAircraft'){
-        clearOperationDraft();
-        STATE.active = false;
-        STATE.session = null;
-      }
-      if(onSuccess) onSuccess(res);`;
-    const finishSuccessAfter = `      if(name === 'finishAircraft'){
-        STATE = res;
-        render();
-        clearOperationDraft();
-        if(onSuccess) onSuccess(res);
-        return;
-      }
-      if(onSuccess) onSuccess(res);`;
-    const postflightCallbackBefore = `  }, function(res){
-    STATE = res;
-    render();
-    alert('運航記録をスプレッドシートへ保存しました。');`;
-    const postflightCallbackAfter = `  }, function(res){
-    alert('運航記録をスプレッドシートへ保存しました。');`;
-    const withoutFavoriteChanges = app => app
-      .replace(",'アプリテスト'];", '];')
-      .replace(finishSuccessBefore, finishSuccessAfter)
-      .replace(postflightCallbackBefore, postflightCallbackAfter)
-      .replace('LocalStorage 管理（下書き・直前履歴・お気に入り）', 'LocalStorage 管理（下書き・直前履歴）')
-      .replace("var STORAGE_KEY_FAVORITES = 'EVO_LITE_FAVORITES';\n", '')
-      .replace(/    \.(?:preset-bar|favorite-list) \{[\s\S]*?(?=    \.input-error \{)/, '')
-      .replace(/function loadFavorites\(\)\{[\s\S]*?(?=\/\/ ----------------------------------------------------\n\/\/ GPS自動取得)/, '')
-      .replace(/\n  var favs = loadFavorites\(\);/, '')
-      .replace(/\n  var favHtml = [\s\S]*?(?=\n\n  (?:var sessionNoticeHtml|div\.innerHTML =))\n/, '')
-      .replace(/\n+      (?:\(favHtml \?|'<div id="favoriteSection")[\s\S]*?\n+(?=      '<div class="status-box">)/, '\n')
-      .replace(/\n\n      '<div class="flex-row"[^\n]*\n        '<button[^\n]*onclick="saveCurrentAsFavorite\(\)"[^\n]*\n      '<\/div>' \+\n\n/, '\n')
-      .replace(/function (?:favoriteDisplayName_|applyFavorite)\(.*?[\s\S]*?(?=function submitStartOperation\(\))/, '');
-    assert(withoutFavoriteChanges(currentApp)===withoutFavoriteChanges(legacyApp),'T15 UI or client flow changed outside authorized favorite management, app-test purpose and internal UUID generation');
+    const current=fs.readFileSync(sourcePath,'utf8');
+    const appStart=current.indexOf('const APP_HTML =');
+    assert(appStart>=0,'T15 APP_HTML marker missing');
+    const currentApp=current.slice(appStart);
+    const expectedHash='bd71d30cf1593874ebfcee10ff990fe1713694fc8c33cdf1c1c219174f9ae236';
+    const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
+    assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
+    const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');
+    assert(tampered!==currentApp && crypto.createHash('sha256').update(tampered,'utf8').digest('hex')!==expectedHash,'T15 APP_HTML tamper detection failed');
     reports.push('TEST 15 OK');
   }
 
