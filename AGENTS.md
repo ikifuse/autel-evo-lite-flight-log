@@ -28,3 +28,10 @@
 - Web画面 → `src/30_web_app.gs`
 
 Web側の詳細な対象関数は `docs/code-map.md` を確認すること。
+
+## 仕様・ドキュメント入口
+
+- 全体設計・状態遷移・保存方式 → `01_ドローン運航記録_設計書.md`
+- Spreadsheet・帳票・原本仕様 → `docs/spreadsheet-spec.md`
+- テスト・障害検証仕様 → `docs/test-spec.md`
+- 再構築・デプロイ手順 → `docs/rebuild-guide.md`
