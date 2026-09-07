@@ -61,11 +61,53 @@ if (JSON.stringify(actualSourceFiles) !== JSON.stringify(listedSourceFiles)) {
 console.log('使用するsrcファイル一覧と結合順:');
 sourceFiles.forEach((file, index) => console.log(`${index + 1}. ${file}`));
 
-const sourceText = sourceFiles.map((file) => {
-  const fullPath = resolve(rootDir, file);
-  if (!existsSync(fullPath)) fail(`${file} が見つかりません。`);
-  return readFileSync(fullPath, 'utf8');
-}).join('\n');
+function assembleWebSource(root) {
+  const webDir = resolve(root, 'src/web');
+  const webFiles = [
+    '30_web_styles.css',
+    '31_web_shell.html',
+    '32_web_core.js',
+    '33_web_engine.js',
+    '34_web_start.js',
+    '35_web_flight.js',
+    '36_web_postflight.js'
+  ];
+
+  for (const file of webFiles) {
+    const fullPath = resolve(webDir, file);
+    if (!existsSync(fullPath)) fail(`Web部品ファイルが見つかりません: src/web/${file}`);
+  }
+
+  const cssContent = readFileSync(resolve(webDir, '30_web_styles.css'), 'utf8');
+  const shellContent = readFileSync(resolve(webDir, '31_web_shell.html'), 'utf8').trimEnd();
+  const coreContent = readFileSync(resolve(webDir, '32_web_core.js'), 'utf8');
+  const engineContent = readFileSync(resolve(webDir, '33_web_engine.js'), 'utf8');
+  const startContent = readFileSync(resolve(webDir, '34_web_start.js'), 'utf8');
+  const flightContent = readFileSync(resolve(webDir, '35_web_flight.js'), 'utf8');
+  const postflightContent = readFileSync(resolve(webDir, '36_web_postflight.js'), 'utf8');
+
+  // アセンブル順: styles -> shell -> core -> engine -> start -> flight -> postflight
+  const combinedScripts = coreContent + engineContent + startContent + flightContent + postflightContent;
+  const assembledHtml = shellContent
+    .replace('/* __APP_STYLES__ */\n', cssContent)
+    .replace('/* __APP_SCRIPTS__ */\n', combinedScripts);
+
+  const headerContent = '// ============================================================================\n' +
+    '// 3. 画面構造（HTML）＆ モバイルデザインスタイル（CSS）\n' +
+    '// ============================================================================\n' +
+    'const APP_HTML = String.raw`';
+
+  return headerContent + assembledHtml + '`;\n';
+}
+
+const sourceText = sourceFiles
+  .map((file) => {
+    const fullPath = resolve(rootDir, file);
+    if (!existsSync(fullPath)) fail(`${file} が見つかりません。`);
+    return readFileSync(fullPath, 'utf8');
+  })
+  .concat([assembleWebSource(rootDir)])
+  .join('\n');
 
 try {
   new Function(sourceText);

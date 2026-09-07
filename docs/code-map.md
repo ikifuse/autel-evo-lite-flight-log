@@ -99,82 +99,74 @@
 - 対象Spreadsheet・欄: `TEST_yyyy.M.d` / `_2...`、`BAT_1`～`BAT_7`。日付シート上の累計は計算するが機体別原本は更新しない
 - 関連機能・テスト: アプリテスト分離、累計、再送、連番、BAT行再利用試験
 
-## 12. Webトップ画面
+## 12. Webスタイル・デザイン（CSS）
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `render`、`renderStartView`、`onPurposeChanged`、`onCategoryChanged`、`checkPermitExpiry`、`applyLastOperation`、`submitStartOperation`
-- 関数グループ: 共通DOMは `esc` / `el` / `val` / `isChecked` / `busy`、気象は `selectWeather` / `selectWindSpeed` / `selectWindDir`
-- 状態・通信: `updateNetworkStatus`、`pushDraftHistory`、`localFlightAction`、`callServer`、`captureCurrentScreenDraft`
-- 共通画面制御: `clearFormErrors`、`showFormErrors`、`renderError`、`confirmResetSession`、`goBackFromAnywhere`、`sessionHeaderHtml`、`cancelSessionPrompt`、`formatTimeStr`
-- 呼び出し関係: `render` → 状態別画面、トップ入力 → `localFlightAction('startAircraft')`
-- 対象Spreadsheet・欄: 直接書込まず、最終保存用sessionを作成
-- 関連機能: 前回条件引用、場所・目的・気象・カテゴリー・操縦者入力
+- 担当ファイル: `src/web/30_web_styles.css`
+- 主な内容: モバイル最適化、Safe Area（ノッチ対応）、カード、ボタン、チップ、タイマー、入力エラー表示、メディアクエリ
+- AI作業ガイド: UIデザイン、カラー、フォント、余白、レスポンシブ配置の変更時に**このファイルのみ**を参照する。他のJavaScriptファイルを読む必要はない。
 
-## 13. GPS
+## 13. Webシェル・HTML骨格
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `fetchCurrentGps`
-- 呼び出し関係: Geolocation → 国土地理院逆ジオコーディング → 対象入力欄へ反映
-- 対象Spreadsheet・欄: 最終保存時に飛行経路、点検場所、離陸場所、着陸場所へ反映
-- 関連機能: トップ、離陸前、着陸後のGPSボタン
+- 担当ファイル: `src/web/31_web_shell.html`
+- 主な内容: `<!doctype html>`、viewport、PWAメタ設定、アイコン、タイトル、ヘッダー（`#networkBadge`、`#appStatusBadge`）、`#globalBackButton`、`#app`コンテナ、`#loading`オーバーレイ
+- AI作業ガイド: ページ全体の骨格、ヘッダー固定要素、PWA設定、モーダル基盤を変更するときに**このファイルのみ**を参照する。
 
-## 14. LocalStorage / 下書き
+## 14. Webコア・共通DOM・気象・下書き管理
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `createOperationDraftId`、`persistOperationDraft`、`restoreOperationDraft`、`clearOperationDraft`、`saveLastOperation`、`loadLastOperation`
-- 呼び出し関係: 各画面入力をsessionへ取り込み保存、再読込時に復元、完了/破棄時に消去
-- 対象Spreadsheet・欄: 直接書込まない。最終送信時に固定保存計画へ渡る
-- 関連機能: UUID、オフライン下書き、前回条件引用
+- 担当ファイル: `src/web/32_web_core.js`
+- 主要定数・関数:
+  - 定数: `STATE`、`PRE_NAMES`、`POST_NAMES`、`PRE_CHECK_DETAILS`、`POST_CHECK_DETAILS`、`PURPOSE_NAMES`、`METHOD_NAMES`、`SPECIAL_METHODS`、`METHOD_DETAILS`、`SAFETY_TAGS`
+  - DOMユーティリティ: `esc`、`el`、`val`、`isChecked`、`busy`
+  - 気象選択: `selectWeather`、`selectWindSpeed`、`selectWindDir`
+  - LocalStorage下書き: `createOperationDraftId`、`persistOperationDraft`、`restoreOperationDraft`、`clearOperationDraft`
+  - 通信状態監視: `updateNetworkStatus`、`online`/`offline`イベント
+- AI作業ガイド: 法令点検項目名、飛行区分定義、気象チップ選択肢、下書き復元ロジック、通信バッジを変更するときに参照する。画面レイアウトや通信処理の変更時は不要。
 
-## 15. 飛行前点検画面
+## 15. Webエンジン・状態遷移・通信・GPS・ディスパッチャ
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `renderPreView`、`setAllChecks`、`onPreCheckChanged`、`submitPreflight`、`renderPreAbnormalView`
-- 呼び出し関係: トップ → 飛行前画面 → 正常時READY、異常時中止分岐
-- 対象Spreadsheet・欄: 最終保存時に日付シートの飛行前11項目へ反映
-- 関連機能: 装着BAT、任意サイクル数、点検内容表示
+- 担当ファイル: `src/web/33_web_engine.js`
+- 主要関数:
+  - 状態遷移・履歴: `pushDraftHistory`、`localFlightAction`
+  - サーバー通信・エラー: `callServer`、`clearFormErrors`、`showFormErrors`、`renderError`、`confirmResetSession`
+  - 画面戻る・下書き保持: `goBackFromAnywhere`、`captureCurrentScreenDraft`
+  - 直前引用・補助者履歴: `STORAGE_KEY_LAST`、`saveLastOperation`、`loadLastOperation`、`loadAssistantHistory`、`rememberAssistantName`、`assistantOptionsHtml`、`selectedAssistantName`
+  - GPS自動取得: `fetchCurrentGps`（国土地理院API逆ジオコーディング）
+  - メイン描画ディスパッチャ: `render`
+- AI作業ガイド: クライアント状態遷移（phase制御）、サーバー呼び出し共通処理、GPS取得、直前履歴、画面ルーティングを変更するときに参照する。各個別画面の詳細UI変更時は不要。
 
-## 16. BAT交換
+## 16. 運航開始画面（トップ）
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `renderBatteryChangeView`、`submitBatteryChange`
-- 呼び出し関係: 着陸後 → 同じ機体で続行 → BAT最低限確認 → READY
-- 対象Spreadsheet・欄: 次の飛行行と対象BAT履歴へ最終保存
-- 関連機能: BAT番号、ロック、残量・警告確認
+- 担当ファイル: `src/web/34_web_start.js`
+- 主要関数: `renderStartView`、`onPurposeChanged`、`onCategoryChanged`、`showCategoryAutoNotice`、`checkPermitExpiry`、`onMethodChanged`、`getSelectedMethods`、`syncCategoryAuto`、`applyLastOperation`、`submitStartOperation`
+- 呼び出し関係: `render` → `renderStartView`、入力送信 → `callServer('startAircraft')`
+- 対象Spreadsheet・欄: 直接書込まず、セッション初期データ（機体、場所、目的、カテゴリー、許可番号、操縦者、補助者等）を作成
+- AI作業ガイド: 運航開始時の入力項目、カテゴリー自動昇格判定、許可証期限チェック、前回条件引用ボタンの変更時に**このファイルのみ**を参照する。
 
-## 17. 飛行中
+## 17. 飛行前点検・BAT交換・待機・飛行・着陸
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `renderReadyView`、`submitStartFlight`、`renderFlyingView`
-- 呼び出し関係: READYで離陸確定 → FLYING表示 → 着陸完了操作
-- 対象Spreadsheet・欄: 離陸時刻・場所をsessionへ保持し、最終保存時に飛行行へ反映
-- 関連機能: 飛行タイマー、オフライン継続
+- 担当ファイル: `src/web/35_web_flight.js`
+- 主要関数:
+  - 画面共通ヘッダー: `sessionHeaderHtml`
+  - 飛行前点検: `renderPreView`、`setAllChecks`、`onPreCheckChanged`、`submitPreflight`、`renderPreAbnormalView`
+  - バッテリー交換: `renderBatteryChangeView`、`submitBatteryChange`
+  - 離陸待機: `renderReadyView`、`submitStartFlight`
+  - 飛行中: `renderFlyingView`、`updateTimerDisplay`
+  - 着陸後入力: `renderLandingView`、`onSafetyChanged`、`addSafetyTag`、`submitLandFlight`
+  - 着陸後選択・機体交代: `renderAfterLandingView`、`onSwitchAircraftClick`
+- 対象Spreadsheet・欄: 各飛行のBAT、離着陸場所・時刻、実飛行時間、安全影響事項、BAT所感をsessionへ蓄積
+- AI作業ガイド: 飛行前点検UI、離陸待機、飛行中タイマー、着陸後入力項目、機体交代操作の変更時に**このファイルのみ**を参照する。
 
-## 18. 着陸後入力
+## 18. 飛行後点検・一括保存・終了
 
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `renderLandingView`、`updateTimerDisplay`、`onSafetyChanged`、`addSafetyTag`、`submitLandFlight`
-- 呼び出し関係: 着陸完了 → 時刻確定 → 実飛行時間/安全事項入力 → flight確定
-- 対象Spreadsheet・欄: 着陸場所・時刻、飛行時間、安全影響、BAT所感
-- 関連機能: タイマー、自動時刻、任意GPS、安全タグ
+- 担当ファイル: `src/web/36_web_postflight.js`（保存処理本体は `src/12_commit_engine.gs`）
+- 主要関数:
+  - 飛行後点検: `renderPostView`、`setPostChecksForModel`、`setAllPostChecksAllModels`、`onAnyPostCheckChanged`、`submitAllPostflight`
+  - 中止・補助・起動: `cancelSessionPrompt`、`formatTimeStr`、初回起動スクリプト（`restoreOperationDraft`、`updateNetworkStatus`、`render`）
+- 呼び出し関係: 全飛行終了 → `renderPostView` → 一括入力検証 → `callServer('finishAircraft')` → スプレッドシート一括保存
+- 対象Spreadsheet・欄: 日付シート（点検結果・飛行行・ヘッダー）、BAT履歴、機体公式累計
+- AI作業ガイド: 飛行後点検の確認項目、全機体一括正常ボタン、最終保存トリガー、運航中止プロンプト、時刻フォーマットの変更時に参照する。
 
-## 19. 機体交代
-
-- 担当ファイル: `src/30_web_app.gs`
-- 主要関数: `renderAfterLandingView`、`onSwitchAircraftClick`
-- 呼び出し関係: 1飛行確定後 → 別機体選択 → 対象機体の飛行前点検へ
-- 対象Spreadsheet・欄: 保存計画で別No.ブロックへ機体情報・飛行記録を割当
-- 関連機能: EVO Lite ↔ EVO Lite+、機体別累計
-
-## 20. 飛行後点検・最終保存
-
-- 担当ファイル: Webは `src/30_web_app.gs`、保存は `src/12_commit_engine.gs`
-- 主要関数: `renderPostView`、`setPostChecksForModel`、`setAllPostChecksAllModels`、`onAnyPostCheckChanged`、`submitAllPostflight`、`finishAircraft`
-- 呼び出し関係: 全飛行終了 → 使用機体の飛行後点検 → `callServer('finishAircraft')`
-- 対象Spreadsheet・欄: 日付/TEST日付シート、BAT履歴、通常運航時の機体公式累計
-- 関連機能・テスト: 一括保存、固定保存計画、roll-forward、T16～T23
-
-## 21. Legacy互換
+## 19. Legacy互換
 
 - 担当ファイル: `src/13_legacy_compat.gs`（通常作業では読まない）
 - 主要関数: `finishAircraftLegacy_`、`commitSignature_`、`chooseAvailableBlock_`、`appendBatteryHistory_`、`applyAircraftTotals_`

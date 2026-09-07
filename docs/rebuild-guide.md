@@ -42,7 +42,7 @@
 
 ### Step 6: ソースコードの構成確認
 - すべての機能実装が `src/` 配下の各ファイルに正本として存在することを確認する。
-- UIのHTML/CSS/JSは `src/30_web_app.gs` の `APP_HTML` 定数に保持されていることを確認する。
+- UIのHTML/CSS/JSは `src/web/` 配下の7ファイルから `APP_HTML` としてアセンブルされることを確認する。
 
 ### Step 7: ローカルビルドの実行
 - `scripts/source-order.json` の結合順に従い、ビルドスクリプトを実行して `dist/Code.gs` を生成する。

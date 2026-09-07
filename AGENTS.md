@@ -25,7 +25,7 @@
 - 帳票構造 → `src/20_sheet_core.gs`
 - 日付シートへの記録・表示 → `src/21_sheet_records.gs`
 - BAT履歴・機体累計 → `src/22_battery_totals.gs`
-- Web画面 → `src/30_web_app.gs`
+- Webクライアント部品 → `src/web/`（スタイル・シェル・コア・エンジン・画面群の7ファイル）
 
 Web側の詳細な対象関数は `docs/code-map.md` を確認すること。
 
