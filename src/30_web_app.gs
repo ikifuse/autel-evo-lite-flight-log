@@ -38,11 +38,12 @@ const APP_HTML = String.raw`<!doctype html>
       margin: 0;
       padding: 0;
       line-height: 1.5;
+      min-width: 0;
     }
     .wrap {
-      max-width: 640px;
+      max-width: 760px;
       margin: 0 auto;
-      padding: 10px 14px 40px;
+      padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
     }
     header {
       display: flex;
@@ -95,6 +96,7 @@ const APP_HTML = String.raw`<!doctype html>
     .required { color: var(--danger); margin-left: 2px; }
     input[type="text"], input[type="number"], input[type="date"], select, textarea {
       width: 100%;
+      min-height: 44px;
       font-size: 15px;
       padding: 9px 11px;
       border: 1px solid var(--border);
@@ -111,6 +113,7 @@ const APP_HTML = String.raw`<!doctype html>
     .btn {
       display: block;
       width: 100%;
+      min-height: 44px;
       padding: 11px 13px;
       font-size: 15px;
       font-weight: 700;
@@ -139,8 +142,9 @@ const APP_HTML = String.raw`<!doctype html>
       width: auto;
       margin: 0;
       display: inline-block;
+      min-height: 44px;
     }
-    .btn-sm { padding: 5px 9px; font-size: 12px; width: auto; margin: 0; display: inline-block; }
+    .btn-sm { padding: 5px 9px; font-size: 12px; width: auto; min-height: 44px; margin: 0; display: inline-block; }
     .global-back-btn {
       position: sticky;
       top: 8px;
@@ -157,6 +161,7 @@ const APP_HTML = String.raw`<!doctype html>
       text-align: left;
       cursor: pointer;
       box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+      min-height: 44px;
     }
     .check-list {
       display: grid;
@@ -172,6 +177,7 @@ const APP_HTML = String.raw`<!doctype html>
       padding: 7px 9px;
       cursor: pointer;
       font-size: 13.5px;
+      min-height: 44px;
     }
     .check-item input {
       width: 19px;
@@ -201,7 +207,7 @@ const APP_HTML = String.raw`<!doctype html>
       font-weight: 400;
       color: #475569;
     }
-    @media (max-width: 520px) {
+    @media (max-width: 599px) {
       .check-copy {
         grid-template-columns: 1fr;
         gap: 1px;
@@ -245,15 +251,45 @@ const APP_HTML = String.raw`<!doctype html>
     }
     .flex-row {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       align-items: center;
     }
     .flex-between {
       display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
       justify-content: space-between;
       align-items: center;
     }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .method-copy {
+      display: block;
+      width: 100%;
+      min-width: 0;
+    }
+    .method-copy-detailed {
+      display: grid;
+      grid-template-columns: minmax(105px, 42%) minmax(0, 1fr);
+      gap: 8px;
+      align-items: baseline;
+    }
+    .method-label { font-weight: 600; color: #334155; }
+    .method-detail {
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.35;
+      color: var(--muted);
+    }
+    .category-auto-notice {
+      display: none;
+      margin: 5px 0 0;
+      color: #1d4ed8;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .category-auto-notice.visible { display: block; }
+    .assistant-new-box { margin-top: 6px; }
     .text-sm { font-size: 12px; color: var(--muted); }
     .tags-container {
       display: flex;
@@ -346,6 +382,7 @@ const APP_HTML = String.raw`<!doctype html>
       margin: 6px 0 10px;
     }
     .chip-btn {
+      min-height: 44px;
       padding: 6px 12px;
       font-size: 12px;
       font-weight: 600;
@@ -373,6 +410,18 @@ const APP_HTML = String.raw`<!doctype html>
       background: #ea580c;
       color: #ffffff;
       border-color: #c2410c;
+    }
+    @media (max-width: 430px) {
+      .wrap {
+        padding-left: max(10px, env(safe-area-inset-left));
+        padding-right: max(10px, env(safe-area-inset-right));
+      }
+      header { align-items: flex-start; }
+      h1 { font-size: 18px; }
+      .card { padding-left: 13px; padding-right: 13px; }
+    }
+    @media (min-width: 600px) {
+      .grid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     }
   </style>
 </head>
@@ -429,6 +478,17 @@ var POST_CHECK_DETAILS = {
 var PURPOSE_NAMES = ['空撮','報道取材','警備','農林水産業','測量','環境調査','設備メンテナンス','インフラ点検・保守','資材管理','輸送・宅配','自然観測','事故・災害対応等','趣味','研究開発','その他','操縦練習','整備後確認飛行','修理後確認飛行','アプリテスト'];
 var METHOD_NAMES = ['通常飛行（特定飛行なし）','屋内練習','空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
 var SPECIAL_METHODS = ['空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'];
+var METHOD_DETAILS = {
+  '空港等周辺': '空港周辺等',
+  '150m以上': '地表・水面から150m以上',
+  'DID': '人口集中地区',
+  '夜間': '日没〜日の出',
+  '目視外': '直接目視しない飛行',
+  '30m未満': '第三者・物件から30m未満',
+  '催し場所上空': 'イベント等の上空',
+  '危険物輸送': '危険物を輸送',
+  '物件投下': '飛行中に物件を投下'
+};
 var SAFETY_TAGS = [
   '突風による一時ホバリング',
   '鳥類の異常接近・回避',
@@ -442,6 +502,7 @@ var SAFETY_TAGS = [
 ];
 
 var TIMER_INTERVAL = null;
+var CATEGORY_NOTICE_TIMER = null;
 
 // ----------------------------------------------------
 // 共通ユーティリティ
@@ -910,12 +971,61 @@ function captureCurrentScreenDraft(){
 // LocalStorage 管理（下書き・直前履歴）
 // ----------------------------------------------------
 var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
+var STORAGE_KEY_ASSISTANTS = 'EVO_LITE_ASSISTANT_HISTORY_V1';
 
 function saveLastOperation(data){
   try{ localStorage.setItem(STORAGE_KEY_LAST, JSON.stringify(data)); }catch(e){}
 }
 function loadLastOperation(){
   try{ var d = localStorage.getItem(STORAGE_KEY_LAST); return d ? JSON.parse(d) : null; }catch(e){ return null; }
+}
+function loadAssistantHistory(){
+  try{
+    var raw = localStorage.getItem(STORAGE_KEY_ASSISTANTS);
+    var parsed = raw ? JSON.parse(raw) : [];
+    if(!Array.isArray(parsed)) return [];
+    var names = [];
+    parsed.forEach(function(item){
+      var name = typeof item === 'string' ? item.trim() : '';
+      if(name && names.indexOf(name) < 0) names.push(name);
+    });
+    return names;
+  }catch(e){ return []; }
+}
+function saveAssistantHistory(names){
+  try{ localStorage.setItem(STORAGE_KEY_ASSISTANTS, JSON.stringify(names)); }catch(e){}
+}
+function rememberAssistantName(name){
+  name = String(name == null ? '' : name).trim();
+  if(!name) return;
+  var names = loadAssistantHistory();
+  if(names.indexOf(name) < 0){
+    names.push(name);
+    saveAssistantHistory(names);
+  }
+}
+function assistantCandidates(lastAssistant, currentAssistant){
+  var names = loadAssistantHistory();
+  [lastAssistant, currentAssistant].forEach(function(item){
+    var name = String(item == null ? '' : item).trim();
+    if(name && names.indexOf(name) < 0) names.push(name);
+  });
+  return names;
+}
+function assistantOptionsHtml(lastAssistant, currentAssistant){
+  var selectedName = String(currentAssistant == null ? '' : currentAssistant).trim();
+  var html = '<option value=""' + (!selectedName ? ' selected' : '') + '>なし</option>';
+  assistantCandidates(lastAssistant, selectedName).forEach(function(name){
+    html += '<option value="' + esc(name) + '"' + (selectedName === name ? ' selected' : '') + '>' + esc(name) + '</option>';
+  });
+  return html + '<option value="__NEW__">新しい人を入力</option>';
+}
+function onAssistantSelectionChanged(){
+  var box = el('assistantNewBox');
+  if(box) box.style.display = val('assistantSelect') === '__NEW__' ? 'block' : 'none';
+}
+function selectedAssistantName(){
+  return val('assistantSelect') === '__NEW__' ? val('assistantNew') : val('assistantSelect');
 }
 // ----------------------------------------------------
 // GPS自動取得＆逆ジオコーディング（手打ちゼロ）
@@ -1008,6 +1118,7 @@ function render(){
 // ----------------------------------------------------
 function renderStartView(div){
   var last = loadLastOperation() || {};
+  var currentAssistant = STATE && STATE.session ? STATE.session.assistant || '' : '';
 
   var sessionNoticeHtml = '';
   if(STATE && STATE.session){
@@ -1042,7 +1153,10 @@ function renderStartView(div){
   var selMethods = last.method || ['通常飛行（特定飛行なし）'];
   var methods = METHOD_NAMES.map(function(name, i){
     var chk = selMethods.indexOf(name) >= 0 ? ' checked' : '';
-    return '<label class="check-item"><input type="checkbox" id="method'+i+'"'+chk+' onchange="onMethodChanged('+i+')"><span>'+esc(name)+'</span></label>';
+    var detail = METHOD_DETAILS[name] || '';
+    var copyClass = detail ? 'method-copy method-copy-detailed' : 'method-copy';
+    return '<label class="check-item"><input type="checkbox" id="method'+i+'"'+chk+' onchange="onMethodChanged('+i+')"><span class="'+copyClass+'"><span class="method-label">'+esc(name)+'</span>' +
+      (detail ? '<span class="method-detail">'+esc(detail)+'</span>' : '') + '</span></label>';
   }).join('');
 
   div.innerHTML =
@@ -1114,6 +1228,7 @@ function renderStartView(div){
         '<option value="カテゴリーⅡ"' + (last.category==='カテゴリーⅡ'?' selected':'') + '>カテゴリーⅡ（許可承認・特定飛行）</option>' +
         '<option value="カテゴリーⅢ"' + (last.category==='カテゴリーⅢ'?' selected':'') + '>カテゴリーⅢ（第三者上空・一等）</option>' +
       '</select>' +
+      '<div id="categoryAutoNotice" class="category-auto-notice" role="status" aria-live="polite"></div>' +
 
       '<div id="permitBox" style="display:' + (last.category==='カテゴリーⅡ'||last.category==='カテゴリーⅢ'?'block':'none') + ';" class="warn-box">' +
         '<div class="flex-between">' +
@@ -1145,7 +1260,10 @@ function renderStartView(div){
         '</div>' +
         '<div>' +
           '<label>安全運航管理者 / 補助者</label>' +
-          '<input type="text" id="assistant" placeholder="補助者氏名（任意）" value="' + esc(last.assistant || '') + '">' +
+          '<select id="assistantSelect" onchange="onAssistantSelectionChanged()">' + assistantOptionsHtml(last.assistant || '', currentAssistant) + '</select>' +
+          '<div id="assistantNewBox" class="assistant-new-box" style="display:none;">' +
+            '<input type="text" id="assistantNew" placeholder="補助者氏名（任意）">' +
+          '</div>' +
         '</div>' +
       '</div>' +
 
@@ -1165,6 +1283,19 @@ function onCategoryChanged(){
   var cat = val('category');
   el('permitBox').style.display = (cat === 'カテゴリーⅡ' || cat === 'カテゴリーⅢ') ? 'block' : 'none';
   checkPermitExpiry();
+}
+
+function showCategoryAutoNotice(){
+  var notice = el('categoryAutoNotice');
+  if(!notice) return;
+  notice.textContent = '特定飛行を選択したため、カテゴリーⅡに変更しました';
+  notice.classList.add('visible');
+  if(CATEGORY_NOTICE_TIMER) clearTimeout(CATEGORY_NOTICE_TIMER);
+  CATEGORY_NOTICE_TIMER = setTimeout(function(){
+    var current = el('categoryAutoNotice');
+    if(current) current.classList.remove('visible');
+    CATEGORY_NOTICE_TIMER = null;
+  }, 3000);
 }
 
 function checkPermitExpiry(){
@@ -1209,6 +1340,7 @@ function syncCategoryAuto(){
   var cat = el('category');
   if(hasSpecial && cat.value === 'カテゴリーⅠ') {
     cat.value = 'カテゴリーⅡ';
+    showCategoryAutoNotice();
   } else if(!hasSpecial && methods.length > 0 && cat.value !== 'カテゴリーⅠ') {
     cat.value = 'カテゴリーⅠ';
   }
@@ -1258,6 +1390,7 @@ function submitStartOperation(){
 
   var pilot = val('pilot');
   if(!pilot) errors.push({ id: 'pilot', label: '機長（操縦者・点検者）', message: '操縦者氏名を入力してください。' });
+  var assistant = selectedAssistantName();
 
   if(errors.length > 0){
     showFormErrors('startCard', errors);
@@ -1275,7 +1408,7 @@ function submitStartOperation(){
     method: methods,
     inspectionLocation: inspectionLocation,
     pilot: pilot,
-    assistant: val('assistant'),
+    assistant: assistant,
     cert: val('cert'),
     forceNewLocation: isChecked('forceNewLocation'),
     weather: val('weatherVal'),
@@ -1283,9 +1416,9 @@ function submitStartOperation(){
     windDir: val('windDirVal')
   };
 
-  saveLastOperation(payload);
-
   callServer('startAircraft', payload, function(res){
+    saveLastOperation(payload);
+    rememberAssistantName(payload.assistant);
     STATE = res;
     render();
   });

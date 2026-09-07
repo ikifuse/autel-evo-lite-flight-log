@@ -339,7 +339,7 @@ function run() {
     const appStart=current.indexOf('const APP_HTML =');
     assert(appStart>=0,'T15 APP_HTML marker missing');
     const currentApp=current.slice(appStart);
-    const expectedHash='bd71d30cf1593874ebfcee10ff990fe1713694fc8c33cdf1c1c219174f9ae236';
+    const expectedHash='bd9a3504484fe38285ffd9674fbafd214009a37c3737b471f675ef293ed9634a';
     const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
     assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
     const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');
@@ -363,6 +363,107 @@ function run() {
     assert(app.includes('GPSから現在地を取得') && app.includes('function fetchCurrentGps('), 'GPS feature was removed');
     assert(app.includes('ACTIVE_OPERATION_DRAFT_KEY') && app.includes('STORAGE_KEY_LAST'), 'draft or last-operation storage was removed');
     reports.push('TEST 24 OK');
+  }
+
+  {
+    const current=fs.readFileSync(sourcePath,'utf8');
+    const app=current.slice(current.indexOf('const APP_HTML ='));
+
+    assert(app.includes('max-width: 760px;'),'responsive max width is not 760px');
+    assert(app.includes('@media (max-width: 430px)'),'normal-phone breakpoint missing');
+    assert(app.includes('@media (min-width: 600px)'),'small-tablet breakpoint missing');
+    assert(app.includes('env(safe-area-inset-bottom)') && app.includes('env(safe-area-inset-left)') && app.includes('env(safe-area-inset-right)'),'safe-area padding missing');
+    assert(app.includes('min-height: 44px;'),'44px tap target missing');
+    assert(app.includes('.grid-2 { display: grid; grid-template-columns: 1fr;') && app.includes('.grid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }'),'one-column base or 600px two-column rule missing');
+
+    const checkListCss=app.match(/\.check-list \{[\s\S]*?\n    \}/);
+    assert(checkListCss && !checkListCss[0].includes('grid-template-columns'),'flight methods or inspection list was changed to multiple columns');
+    const preView=app.slice(app.indexOf('function renderPreView('),app.indexOf('function setAllChecks(',app.indexOf('function renderPreView(')));
+    const flyingView=app.slice(app.indexOf('function renderFlyingView('),app.indexOf('function renderLandingView(',app.indexOf('function renderFlyingView(')));
+    const postView=app.slice(app.indexOf('function renderPostView('),app.indexOf('function setPostChecksForModel(',app.indexOf('function renderPostView(')));
+    assert(!preView.includes('grid-2'),'preflight checks are not one-column');
+    assert(!flyingView.includes('grid-2'),'flying screen is not one-column');
+    assert(!postView.includes('grid-2'),'final confirmation area is not one-column');
+
+    const methodDetails={
+      '空港等周辺':'空港周辺等', '150m以上':'地表・水面から150m以上', 'DID':'人口集中地区',
+      '夜間':'日没〜日の出', '目視外':'直接目視しない飛行', '30m未満':'第三者・物件から30m未満',
+      '催し場所上空':'イベント等の上空', '危険物輸送':'危険物を輸送', '物件投下':'飛行中に物件を投下'
+    };
+    Object.entries(methodDetails).forEach(([name,detail]) => {
+      assert(app.includes("'"+name+"': '"+detail+"'"),'flight-method detail missing: '+name);
+    });
+    assert(app.includes('method-copy-detailed') && app.includes('method-detail'),'flight-method detail layout missing');
+
+    const syncStart=app.indexOf('function syncCategoryAuto(){');
+    const syncEnd=app.indexOf('function applyLastOperation(){',syncStart);
+    assert(syncStart>=0 && syncEnd>syncStart,'category auto function markers missing');
+    const category={value:'カテゴリーⅠ'};
+    let methods=['DID'];
+    let notices=0;
+    const categoryClient={
+      getSelectedMethods:()=>methods,
+      SPECIAL_METHODS:['空港等周辺','150m以上','DID','夜間','目視外','30m未満','催し場所上空','危険物輸送','物件投下'],
+      el:()=>category,
+      showCategoryAutoNotice:()=>{ notices++; },
+      onCategoryChanged:()=>{}
+    };
+    vm.createContext(categoryClient);
+    vm.runInContext(app.slice(syncStart,syncEnd),categoryClient);
+    categoryClient.syncCategoryAuto();
+    assert(category.value==='カテゴリーⅡ' && notices===1,'category I did not auto-change to II with notice');
+    category.value='カテゴリーⅢ'; methods=['DID']; categoryClient.syncCategoryAuto();
+    assert(category.value==='カテゴリーⅢ' && notices===1,'category III was auto-selected or overwritten for special flight');
+    category.value='カテゴリーⅡ'; methods=['通常飛行（特定飛行なし）']; categoryClient.syncCategoryAuto();
+    assert(category.value==='カテゴリーⅠ' && notices===1,'category did not return to I without special flight');
+    const noticeStart=app.indexOf('function showCategoryAutoNotice(){');
+    const noticeEnd=app.indexOf('function checkPermitExpiry(){',noticeStart);
+    const noticeCode=app.slice(noticeStart,noticeEnd);
+    assert(noticeCode.includes('特定飛行を選択したため、カテゴリーⅡに変更しました') && !noticeCode.includes('alert('),'nonblocking category notice is missing');
+    reports.push('RESPONSIVE and flight-method/category UI OK');
+
+    const assistantStart=app.indexOf('function loadAssistantHistory(){');
+    const assistantEnd=app.indexOf('// GPS自動取得＆逆ジオコーディング',assistantStart);
+    assert(assistantStart>=0 && assistantEnd>assistantStart,'assistant history function markers missing');
+    const stored=new Map();
+    const elements={
+      assistantSelect:{value:''},
+      assistantNew:{value:''},
+      assistantNewBox:{style:{display:'none'}}
+    };
+    const assistantClient={
+      STORAGE_KEY_ASSISTANTS:'EVO_LITE_ASSISTANT_HISTORY_V1',
+      localStorage:{
+        getItem:key=>stored.has(key)?stored.get(key):null,
+        setItem:(key,value)=>stored.set(key,String(value))
+      },
+      el:id=>elements[id]||null,
+      val:id=>elements[id]?String(elements[id].value).trim():'',
+      esc:value=>String(value==null?'':value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
+    };
+    vm.createContext(assistantClient);
+    vm.runInContext(app.slice(assistantStart,assistantEnd),assistantClient);
+
+    let options=assistantClient.assistantOptionsHtml('山田太郎','');
+    assert(options.includes('<option value="" selected>なし</option>'),'assistant initial none option missing');
+    assert(options.includes('<option value="山田太郎">山田太郎</option>'),'previous assistant is not offered as a candidate');
+    assert(!options.includes('value="山田太郎" selected'),'previous assistant was selected automatically');
+    elements.assistantSelect.value='';
+    assert(assistantClient.selectedAssistantName()==='', 'assistant none did not produce an empty string');
+    elements.assistantSelect.value='山田太郎';
+    assert(assistantClient.selectedAssistantName()==='山田太郎','stored assistant could not be selected');
+    elements.assistantSelect.value='__NEW__'; elements.assistantNew.value=' 佐藤花子 ';
+    assistantClient.onAssistantSelectionChanged();
+    assert(elements.assistantNewBox.style.display==='block' && assistantClient.selectedAssistantName()==='佐藤花子','new assistant input did not activate');
+    assistantClient.rememberAssistantName('佐藤花子');
+    assistantClient.rememberAssistantName('佐藤花子');
+    assistantClient.rememberAssistantName(' 山田太郎 ');
+    const history=assistantClient.loadAssistantHistory();
+    assert(history.length===2 && history[0]==='佐藤花子' && history[1]==='山田太郎','assistant history was not deduplicated');
+    assert(history.every(item=>typeof item==='string'),'assistant history contains data other than names');
+    const submitStart=app.slice(app.indexOf('function submitStartOperation(){'),app.indexOf('// セッションヘッダー',app.indexOf('function submitStartOperation(){')));
+    assert(submitStart.includes('assistant: assistant') && submitStart.includes('rememberAssistantName(payload.assistant)'),'assistant string or start-time history save changed');
+    reports.push('ASSISTANT local history dropdown OK');
   }
 
   {
