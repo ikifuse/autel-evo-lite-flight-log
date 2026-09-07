@@ -733,9 +733,11 @@ function callServer(name, arg, onSuccess){
     .withSuccessHandler(function(res){
       busy(false);
       if(name === 'finishAircraft'){
+        STATE = res;
+        render();
         clearOperationDraft();
-        STATE.active = false;
-        STATE.session = null;
+        if(onSuccess) onSuccess(res);
+        return;
       }
       if(onSuccess) onSuccess(res);
       else {
@@ -1829,8 +1831,6 @@ function submitAllPostflight(){
     aircrafts: aircraftPayload,
     checks: aircraftPayload[s.model] ? aircraftPayload[s.model].checks : {}
   }, function(res){
-    STATE = res;
-    render();
     alert('運航記録をスプレッドシートへ保存しました。');
   });
 }

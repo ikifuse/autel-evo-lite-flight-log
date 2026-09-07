@@ -343,8 +343,30 @@ function run() {
     assert(uuidStart>=0 && uuidEnd>uuidStart,'T15 UUID helper markers');
     currentApp=currentApp.slice(0,uuidStart)+currentApp.slice(uuidEnd);
     currentApp=currentApp.replace('draftId:createOperationDraftId()', "draftId:'op_' + Date.now()");
+    const finishSuccessBefore = `      if(name === 'finishAircraft'){
+        clearOperationDraft();
+        STATE.active = false;
+        STATE.session = null;
+      }
+      if(onSuccess) onSuccess(res);`;
+    const finishSuccessAfter = `      if(name === 'finishAircraft'){
+        STATE = res;
+        render();
+        clearOperationDraft();
+        if(onSuccess) onSuccess(res);
+        return;
+      }
+      if(onSuccess) onSuccess(res);`;
+    const postflightCallbackBefore = `  }, function(res){
+    STATE = res;
+    render();
+    alert('運航記録をスプレッドシートへ保存しました。');`;
+    const postflightCallbackAfter = `  }, function(res){
+    alert('運航記録をスプレッドシートへ保存しました。');`;
     const withoutFavoriteChanges = app => app
       .replace(",'アプリテスト'];", '];')
+      .replace(finishSuccessBefore, finishSuccessAfter)
+      .replace(postflightCallbackBefore, postflightCallbackAfter)
       .replace('LocalStorage 管理（下書き・直前履歴・お気に入り）', 'LocalStorage 管理（下書き・直前履歴）')
       .replace("var STORAGE_KEY_FAVORITES = 'EVO_LITE_FAVORITES';\n", '')
       .replace(/    \.(?:preset-bar|favorite-list) \{[\s\S]*?(?=    \.input-error \{)/, '')
@@ -374,6 +396,69 @@ function run() {
     assert(app.includes('GPSから現在地を取得') && app.includes('function fetchCurrentGps('), 'GPS feature was removed');
     assert(app.includes('ACTIVE_OPERATION_DRAFT_KEY') && app.includes('STORAGE_KEY_LAST'), 'draft or last-operation storage was removed');
     reports.push('TEST 24 OK');
+  }
+
+  {
+    const current=fs.readFileSync(sourcePath,'utf8');
+    const app=current.slice(current.indexOf('const APP_HTML ='));
+    const callServerMatch=app.match(/function callServer\(name, arg, onSuccess\)\{[\s\S]*?(?=\n\nfunction clearFormErrors\()/);
+    const submitMatch=app.match(/function submitAllPostflight\(\)\{[\s\S]*?(?=\n\nfunction cancelSessionPrompt\()/);
+    assert(callServerMatch && submitMatch,'client transition function markers');
+
+    function makeFinishClient(renderImpl){
+      const events=[];
+      const handlers={};
+      let draftPresent=true;
+      const runner={
+        withSuccessHandler:function(handler){ handlers.success=handler; return runner; },
+        withFailureHandler:function(handler){ handlers.failure=handler; return runner; },
+        finishAircraft:function(arg){ handlers.arg=arg; }
+      };
+      const client={
+        LOCAL_FLIGHT_ACTIONS:[], navigator:{onLine:true},
+        STATE:{active:true,session:{phase:'POST_ALL',draftId:'op_00000000-0000-4000-8000-000000000999'}},
+        google:{script:{run:runner}},
+        cloneData:function(value){ return JSON.parse(JSON.stringify(value)); },
+        persistOperationDraft:function(){ draftPresent=true; events.push('persist'); },
+        clearOperationDraft:function(){ draftPresent=false; events.push('clear'); },
+        busy:function(value){ events.push('busy:' + value); },
+        render:function(){ events.push('render'); if(renderImpl) renderImpl(); },
+        alert:function(){ events.push('alert'); },
+        renderError:function(){ events.push('renderError'); }
+      };
+      vm.createContext(client);
+      vm.runInContext(callServerMatch[0],client);
+      return { client, events, handlers, draftPresent:function(){ return draftPresent; } };
+    }
+
+    const success=makeFinishClient();
+    const successResponse={active:false,session:null,today:'2026.9.6'};
+    success.client.callServer('finishAircraft',{checks:{}},function(){ success.events.push('notify'); });
+    success.handlers.success(successResponse);
+    assert(success.client.STATE===successResponse,'finish success did not adopt server state');
+    assert(success.client.STATE.active===false && success.client.STATE.session===null,'finish success did not reach top state');
+    assert(success.events.indexOf('render')>=0 && success.events.indexOf('render')<success.events.indexOf('clear'),'finish draft cleared before render');
+    assert(success.events.indexOf('clear')<success.events.indexOf('notify'),'finish notification ran before draft clear');
+    assert(!success.draftPresent(),'finish success left operation draft');
+
+    const renderFailure=makeFinishClient(function(){ throw new Error('render failed'); });
+    renderFailure.client.callServer('finishAircraft',{checks:{}},function(){ renderFailure.events.push('notify'); });
+    let renderFailed=false;
+    try { renderFailure.handlers.success({active:false,session:null}); } catch(error) { renderFailed=true; }
+    assert(renderFailed,'render failure did not propagate');
+    assert(renderFailure.draftPresent(),'render failure cleared operation draft');
+
+    const failure=makeFinishClient();
+    const failureState=failure.client.STATE;
+    failure.client.callServer('finishAircraft',{checks:{}},function(){ failure.events.push('notify'); });
+    failure.handlers.failure({message:'network failure'});
+    assert(failure.draftPresent(),'finish failure cleared operation draft');
+    assert(failure.client.STATE===failureState && failure.client.STATE.active===true && failure.client.STATE.session.phase==='POST_ALL','finish failure changed postflight state');
+    assert(!failure.events.includes('render') && !failure.events.includes('clear') && !failure.events.includes('notify'),'finish failure ran success transition');
+
+    assert(!/STATE = res;|render\(\);/.test(submitMatch[0]),'submitAllPostflight still owns finish state/render');
+    assert(submitMatch[0].includes("alert('運航記録をスプレッドシートへ保存しました。');"),'submitAllPostflight completion notice missing');
+    reports.push('CLIENT finishAircraft success/failure transition OK');
   }
 
   const retrySingle = makeInput([{model:'EVO Lite',minutes:2,battery:1},{model:'EVO Lite',minutes:3,battery:2}]);
