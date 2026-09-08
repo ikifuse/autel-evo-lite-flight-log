@@ -155,6 +155,11 @@ function renderStartView(div){
       '<label>技能証明書番号</label>' +
       '<input type="text" id="cert" placeholder="未所持または技能証明番号" value="' + esc(last.cert || '') + '">' +
       '<button class="btn btn-primary" style="font-size:16px;padding:13px;" onclick="submitStartOperation()">次へ：飛行前点検を開始</button>' +
+    '</div>' +
+    '<div style="text-align:center;margin-top:16px;margin-bottom:8px;">' +
+      '<button type="button" class="diag-trigger-btn" onclick="openCommitDiagnosisModal()">' +
+        '🔧 サーバー保存状態を確認（診断）' +
+      '</button>' +
     '</div>';
 
   checkPermitExpiry();

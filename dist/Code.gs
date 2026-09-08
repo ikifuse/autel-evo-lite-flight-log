@@ -43,7 +43,8 @@ const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
 const COMMIT_PLAN_VERSION = 2;
 const COMMIT_CHUNK_MAX_BYTES = 7000;
 const COMMIT_COMPLETE_RETENTION_DAYS = 30;
-const COMMIT_STALE_DAYS = 7;
+// 未完了保存計画は日数で自動削除せず、整合性と状態（Web画面での復旧/破棄）で管理する。
+const COMMIT_STALE_DAYS = 0; // 0=未完了の日数自動削除・自動failed化は行わない
 const SECURITY_MAX_FLIGHTS = 30;
 const SECURITY_MAX_FLIGHT_MINUTES = 240;
 const SECURITY_MAX_TOTAL_MINUTES = 1440;
@@ -896,34 +897,9 @@ function cleanupCommitPlans_() {
       }
       if (meta.state === 'complete' && meta.completedAt && nowMillis - new Date(meta.completedAt).getTime() > completeLimit) {
         properties.deleteProperty(key);
-      } else if (meta.state !== 'complete' && meta.updatedAt && nowMillis - new Date(meta.updatedAt).getTime() > staleLimit) {
-        const record = loadCommitPlan_(meta.draftId, meta);
-        const operations = [].concat(
-          record.plan.operations.date || [], record.plan.operations.battery || [],
-          record.plan.operations.postflight || [], record.plan.operations.totals || []
-        );
-        let intended = 0;
-        let before = 0;
-        let conflict = 0;
-        operations.forEach(function(operation) {
-          if (sameCommitValue_(operation.before, operation.value)) return;
-          const current = operationCurrentValue_(operation);
-          if (sameCommitValue_(current, operation.value)) intended++;
-          else if (sameCommitValue_(current, operation.before)) before++;
-          else conflict++;
-        });
-        const metadataOk = (record.plan.batteryTargets || []).every(metadataMatches_);
-        if (!conflict && !before && metadataOk) {
-          compactCompletePlan_(record, verifyCommitPlanResult_(record.plan));
-        } else if (!conflict && !intended) {
-          for (let index = 0; index < Number(meta.chunkCount || 0); index++) properties.deleteProperty(commitDataKey_(meta.draftId, index));
-          properties.deleteProperty(key);
-        } else {
-          meta.state = 'failed';
-          meta.stage = conflict ? 'STALE_CONFLICT' : 'STALE_PARTIAL';
-          writeCommitMeta_(meta);
-        }
       }
+      // 未完了保存計画（meta.state !== 'complete'）は日数で勝手に削除・変更しない。
+      // Web画面上の診断（diagnosePendingCommitPlans）と復旧/安全破棄操作で管理する。
     } catch (ignored) {}
   });
   Object.keys(all).forEach(function(key) {
@@ -1002,68 +978,80 @@ function finishAircraft(input) {
         commitFault_('AFTER_PLAN_PERSISTED');
       }
 
-      setCommitProgress_(record, 'writing', record.meta.stage || 'PLAN_READY');
-      const commitSpreadsheet = spreadsheet_();
-
-      currentStage = 'DATE_RECORDS_WRITTEN';
-      applyCommitOperations_(record.plan.operations.date, false, commitSpreadsheet);
-      commitFault_('AFTER_DATE_RECORDS');
-      SpreadsheetApp.flush();
-      applyCommitOperations_(record.plan.operations.date, true, commitSpreadsheet);
-      setCommitProgress_(record, 'writing', currentStage);
-
-      currentStage = 'BAT_HISTORY_WRITTEN';
-      record.plan.batteryTargets.forEach(function(target, index) {
-        applyCommitOperations_(record.plan.operations.battery.filter(function(operation) {
-          return operation.targetIndex === index;
-        }), false, commitSpreadsheet);
-        ensureBatteryMetadata_(target, commitSpreadsheet);
-        commitFault_('AFTER_BAT_' + target.battery);
-        commitFault_('AFTER_BAT_WRITE_BEFORE_PROGRESS');
-      });
-      SpreadsheetApp.flush();
-      applyCommitOperations_(record.plan.operations.battery, true, commitSpreadsheet);
-      record.plan.batteryTargets.forEach(function(target) {
-        if (!metadataMatches_(target, commitSpreadsheet)) throw new Error('BAT履歴の内部識別子を確認できません。');
-      });
-      setCommitProgress_(record, 'writing', currentStage);
-
-      currentStage = 'POSTFLIGHT_WRITTEN';
-      applyCommitOperations_(record.plan.operations.postflight, false, commitSpreadsheet);
-      commitFault_('AFTER_POSTFLIGHT');
-      SpreadsheetApp.flush();
-      applyCommitOperations_(record.plan.operations.postflight, true, commitSpreadsheet);
-      setCommitProgress_(record, 'writing', currentStage);
-
-      currentStage = 'AIRCRAFT_TOTALS_WRITTEN';
-      record.plan.totalTargets.forEach(function(target, index) {
-        applyCommitOperations_(record.plan.operations.totals.filter(function(operation) {
-          return operation.model === target.model;
-        }), false, commitSpreadsheet);
-        if (index === 0 && record.plan.totalTargets.length > 1) commitFault_('BETWEEN_AIRCRAFT_TOTALS');
-      });
-      SpreadsheetApp.flush();
-      applyCommitOperations_(record.plan.operations.totals, true, commitSpreadsheet);
-      setCommitProgress_(record, 'writing', currentStage);
-
-      currentStage = 'FINAL_FLUSH';
-      commitFault_('BEFORE_FINAL_FLUSH');
-      SpreadsheetApp.flush();
-      const resultHash = verifyCommitPlanResult_(record.plan, commitSpreadsheet);
-      record.meta.stage = 'VERIFIED';
-      writeCommitMeta_(record.meta);
-      commitFault_('BEFORE_COMPLETE');
-      compactCompletePlan_(record, resultHash);
-
-      const appState = getAppState();
-      safeCommitCachePut_(COMMIT_RESULT_PREFIX + session.draftId, JSON.stringify(appState));
-      commitFault_('AFTER_COMPLETE_BEFORE_RESPONSE');
-      return appState;
+      return executeCommitPlanRollForward_(record, spreadsheet_());
     } catch (error) {
-      failCommitProgress_(record, currentStage, error);
+      if (record && record.meta.state !== 'complete') {
+        failCommitProgress_(record, record.meta.stage || 'PLAN_READY', error);
+      }
       throw error;
     }
   });
+}
+
+function executeCommitPlanRollForward_(record, commitSpreadsheet) {
+  let currentStage = record.meta.stage || 'PLAN_READY';
+  try {
+    setCommitProgress_(record, 'writing', currentStage);
+    const ss = commitSpreadsheet || spreadsheet_();
+
+    currentStage = 'DATE_RECORDS_WRITTEN';
+    applyCommitOperations_(record.plan.operations.date, false, ss);
+    commitFault_('AFTER_DATE_RECORDS');
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.date, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'BAT_HISTORY_WRITTEN';
+    record.plan.batteryTargets.forEach(function(target, index) {
+      applyCommitOperations_(record.plan.operations.battery.filter(function(operation) {
+        return operation.targetIndex === index;
+      }), false, ss);
+      ensureBatteryMetadata_(target, ss);
+      commitFault_('AFTER_BAT_' + target.battery);
+      commitFault_('AFTER_BAT_WRITE_BEFORE_PROGRESS');
+    });
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.battery, true, ss);
+    record.plan.batteryTargets.forEach(function(target) {
+      if (!metadataMatches_(target, ss)) throw new Error('BAT履歴の内部識別子を確認できません。');
+    });
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'POSTFLIGHT_WRITTEN';
+    applyCommitOperations_(record.plan.operations.postflight, false, ss);
+    commitFault_('AFTER_POSTFLIGHT');
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.postflight, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'AIRCRAFT_TOTALS_WRITTEN';
+    record.plan.totalTargets.forEach(function(target, index) {
+      applyCommitOperations_(record.plan.operations.totals.filter(function(operation) {
+        return operation.model === target.model;
+      }), false, ss);
+      if (index === 0 && record.plan.totalTargets.length > 1) commitFault_('BETWEEN_AIRCRAFT_TOTALS');
+    });
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.totals, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'FINAL_FLUSH';
+    commitFault_('BEFORE_FINAL_FLUSH');
+    SpreadsheetApp.flush();
+    const resultHash = verifyCommitPlanResult_(record.plan, ss);
+    record.meta.stage = 'VERIFIED';
+    writeCommitMeta_(record.meta);
+    commitFault_('BEFORE_COMPLETE');
+    compactCompletePlan_(record, resultHash);
+
+    const appState = getAppState();
+    safeCommitCachePut_(COMMIT_RESULT_PREFIX + record.meta.draftId, JSON.stringify(appState));
+    commitFault_('AFTER_COMPLETE_BEFORE_RESPONSE');
+    return appState;
+  } catch (error) {
+    failCommitProgress_(record, currentStage, error);
+    throw error;
+  }
 }
 
 function isAppTestPurpose_(purpose) {
@@ -1263,6 +1251,396 @@ function buildFixedCommitPlan_(input) {
   };
 }
 
+function commitLog_(msg) {
+  if (typeof Logger !== 'undefined' && typeof Logger.log === 'function') {
+    Logger.log(msg);
+  }
+}
+
+/**
+ * 管理者用：未完了保存計画の読み取り専用診断関数
+ * Apps Scriptエディタから手動実行して、現在の未完了draftの状態を診断・表示する。
+ * ※完全な読み取り専用であり、SpreadsheetやProperties、Cacheを1バイトも変更しません。
+ */
+function diagnosePendingCommitPlans() {
+  const ss = spreadsheet_();
+  const properties = commitProperties_();
+  const all = properties.getProperties();
+  const pendingDrafts = [];
+
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
+    try {
+      const meta = JSON.parse(all[key]);
+      if (meta && meta.draftId && meta.state !== 'complete') {
+        pendingDrafts.push(meta);
+      }
+    } catch (ignored) {}
+  });
+
+  if (!pendingDrafts.length) {
+    const message = '【診断結果】未完了の保存計画はありません（正常な状態です）。';
+    commitLog_(message);
+    return [];
+  }
+
+  const reports = pendingDrafts.map(function(meta) {
+    const report = {
+      draftId: meta.draftId,
+      state: meta.state,
+      stage: meta.stage,
+      lastErrorStage: meta.lastErrorStage || '(なし)',
+      createdAt: meta.createdAt || '(不明)',
+      updatedAt: meta.updatedAt || '(不明)',
+      isAppTest: false,
+      chunksComplete: false,
+      planHashMatches: false,
+      operationCounts: { intended: 0, before: 0, conflict: 0, total: 0 },
+      conflicts: [],
+      batteryMetadata: { total: 0, matched: 0, details: [] },
+      aircraftTotals: { targets: 0, matched: 0, details: [] },
+      canResumeRollForward: false,
+      safeToRecover: false,
+      safeToDiscardTest: false,
+      statusCategory: 'CANNOT_AUTO_PROCESS',
+      resumeBlockReasons: [],
+      discardBlockReasons: []
+    };
+
+    // 1. DATA chunkの読み取り確認（read-only）
+    const chunks = [];
+    let chunksMissing = false;
+    for (let i = 0; i < Number(meta.chunkCount || 0); i++) {
+      const val = all[commitDataKey_(meta.draftId, i)];
+      if (val == null) { chunksMissing = true; break; }
+      chunks.push(val);
+    }
+    report.chunksComplete = !chunksMissing && chunks.length === Number(meta.chunkCount || 0);
+
+    let plan = null;
+    if (report.chunksComplete) {
+      const fullText = chunks.join('');
+      report.planHashMatches = sha256Text_(fullText) === meta.planHash;
+      if (report.planHashMatches) {
+        try { plan = JSON.parse(fullText); } catch (e) {
+          report.resumeBlockReasons.push('保存計画JSONのパースに失敗しました');
+          report.discardBlockReasons.push('保存計画JSONのパースに失敗しました');
+        }
+      } else {
+        report.resumeBlockReasons.push('保存計画DATAのSHA-256ハッシュがMETAと一致しません');
+        report.discardBlockReasons.push('保存計画DATAのSHA-256ハッシュがMETAと一致しません');
+      }
+    } else {
+      report.resumeBlockReasons.push('保存計画DATA chunkの一部または全部が欠落しています');
+      report.discardBlockReasons.push('保存計画DATA chunkの一部または全部が欠落しています');
+    }
+
+    if (!plan) {
+      report.canResumeRollForward = false;
+      report.safeToRecover = false;
+      report.safeToDiscardTest = false;
+      report.statusCategory = 'CANNOT_AUTO_PROCESS';
+      return report;
+    }
+
+    // 運航目的の判定（アプリテストか通常か）
+    const purpose = (plan.normalizedInput && plan.normalizedInput.session) ? plan.normalizedInput.session.purpose : '';
+    report.isAppTest = isAppTestPurpose_(purpose);
+    report.purpose = purpose;
+
+    // 2. Spreadsheetの各operationの状態診断（read-only）
+    const allOps = [].concat(
+      plan.operations.date || [],
+      plan.operations.battery || [],
+      plan.operations.postflight || [],
+      plan.operations.totals || []
+    );
+    report.operationCounts.total = allOps.length;
+
+    allOps.forEach(function(op) {
+      const targetSheet = ss.getSheetByName(op.sheetName);
+      if (!targetSheet) {
+        report.operationCounts.conflict++;
+        report.conflicts.push({
+          stage: op.stage,
+          sheet: op.sheetName,
+          cell: 'row ' + op.row + ', col ' + op.col,
+          kind: op.kind,
+          reason: 'シートが存在しません：' + op.sheetName
+        });
+        report.resumeBlockReasons.push('保存先シートが存在しません：' + op.sheetName);
+        return;
+      }
+      const range = targetSheet.getRange(op.row, op.col);
+      const current = commitRangeProperty_(range, op.kind);
+
+      if (sameCommitValue_(current, op.value)) {
+        report.operationCounts.intended++;
+      } else if (sameCommitValue_(current, op.before)) {
+        report.operationCounts.before++;
+      } else {
+        report.operationCounts.conflict++;
+        report.conflicts.push({
+          stage: op.stage,
+          sheet: op.sheetName,
+          cell: range.getA1Notation(),
+          kind: op.kind,
+          before: op.before,
+          expected: op.value,
+          actual: current
+        });
+      }
+    });
+
+    // 3. BAT Developer Metadataの状態診断（read-only）
+    const batTargets = plan.batteryTargets || [];
+    report.batteryMetadata.total = batTargets.length;
+    batTargets.forEach(function(target) {
+      const matched = metadataMatches_(target, ss);
+      if (matched) {
+        report.batteryMetadata.matched++;
+      } else {
+        report.batteryMetadata.details.push({
+          sheet: target.sheetName,
+          row: target.row,
+          commitId: target.commitId,
+          matched: false
+        });
+      }
+    });
+
+    // 4. 機体累計の状態診断（read-only）
+    const totalTargets = plan.totalTargets || [];
+    report.aircraftTotals.targets = totalTargets.length;
+    if (report.isAppTest) {
+      report.aircraftTotals.note = 'アプリテストのため原本累計は更新対象外（正常）';
+    } else {
+      totalTargets.forEach(function(target) {
+        const targetSheet = ss.getSheetByName(target.sheetName);
+        if (!targetSheet) {
+          report.resumeBlockReasons.push('機体累計シートが存在しません：' + target.sheetName);
+          return;
+        }
+        const cell = targetSheet.getRange(target.row, target.col);
+        const currentTotal = cell.getDisplayValue();
+        const expectedFinal = formatHoursMinutes_(plan.finalByModel[target.model]);
+        const startVal = formatHoursMinutes_(plan.startingByModel[target.model]);
+        const isUpdated = (currentTotal === expectedFinal);
+        const isBefore = (currentTotal === startVal);
+        if (isUpdated) {
+          report.aircraftTotals.matched++;
+        } else if (!isBefore) {
+          report.resumeBlockReasons.push('機体累計セルが計画開始前とも確定予定値とも一致しません（競合）：' + target.model);
+        }
+        report.aircraftTotals.details.push({
+          model: target.model,
+          current: currentTotal,
+          start: startVal,
+          expectedFinal: expectedFinal,
+          isUpdated: isUpdated
+        });
+      });
+    }
+
+    // 5. BAT Developer Metadata の競合チェック（別draftとの矛盾がないか）
+    (plan.batteryTargets || []).forEach(function(target) {
+      const bSheet = ss.getSheetByName(target.sheetName);
+      if (!bSheet) return;
+      const bRange = bSheet.getRange(target.row, 1, 1, 8);
+      if (typeof bRange.getDeveloperMetadata === 'function') {
+        const metas = bRange.getDeveloperMetadata().filter(function(item) {
+          return item.getKey() === BATTERY_COMMIT_METADATA_KEY;
+        });
+        const hasOtherMeta = metas.some(function(item) {
+          return item.getValue() !== target.commitId;
+        });
+        if (hasOtherMeta) {
+          report.resumeBlockReasons.push('BAT履歴行に別の保存計画の識別子が付与されています（競合）：' + target.sheetName + ' ' + target.row + '行');
+        }
+      }
+    });
+
+    // 6. ロールフォワード再開・安全復旧可能かどうかの厳格判定
+    if (report.operationCounts.conflict > 0) {
+      report.resumeBlockReasons.push('セル競合（conflict）が ' + report.operationCounts.conflict + ' 件検出されました');
+    }
+    report.safeToRecover = (report.resumeBlockReasons.length === 0);
+    report.canResumeRollForward = report.safeToRecover;
+
+    // 7. TESTで安全に破棄可能かどうかの厳格判定（すべて満たす場合のみ許可）
+    const discardBlockReasons = [];
+    if (!report.isAppTest) {
+      discardBlockReasons.push('通常運航の保存計画は自動破棄できません（原本保護）');
+    }
+    if (!report.chunksComplete) {
+      discardBlockReasons.push('DATA chunkが一部欠落しています');
+    }
+    if (!report.planHashMatches) {
+      discardBlockReasons.push('保存計画のハッシュが一致しません');
+    }
+
+    // TEST日付シートがすべて削除されていること（残っている場合は通常復旧可能か確認が必要）
+    let anyDateSheetExists = false;
+    (plan.assignments || []).forEach(function(a) {
+      if (ss.getSheetByName(a.sheetName)) anyDateSheetExists = true;
+    });
+    if (anyDateSheetExists) {
+      discardBlockReasons.push('TEST日付シートがまだ存在しています');
+    }
+
+    // BAT operations の実データ書き込みチェック
+    // 当該draft由来のデータ書き込みが1セルでもあれば破棄禁止
+    let batHasRealData = false;
+    (plan.operations.battery || []).forEach(function(op) {
+      const bSheet = ss.getSheetByName(op.sheetName);
+      if (!bSheet) return;
+      const bRange = bSheet.getRange(op.row, op.col);
+      const current = commitRangeProperty_(bRange, op.kind);
+      // 空文字の予定で現在も空文字なら実データ書き込みなし
+      if (String(op.value || '').trim() === '' && String(current || '').trim() === '') return;
+      // セルの現在値が op.before と一致していれば未書き込みなので問題なし
+      if (sameCommitValue_(current, op.before)) return;
+      // それ以外（実データが書かれている、または他者により変更されている）
+      batHasRealData = true;
+      discardBlockReasons.push('BAT履歴セルに変更または書込みがあります：' + op.sheetName + ' ' + bRange.getA1Notation());
+    });
+
+    // BAT Developer Metadata の付与チェック（0件であること）
+    if (report.batteryMetadata.matched > 0) {
+      discardBlockReasons.push('BAT履歴に保存計画の識別子（Developer Metadata）が付与されています（' + report.batteryMetadata.matched + '件）');
+    }
+
+    // 機体正式累計の更新チェック（TEST運航なので更新されていないこと）
+    if (report.aircraftTotals.matched > 0) {
+      discardBlockReasons.push('機体累計が更新されています');
+    }
+
+    report.safeToDiscardTest = (
+      report.isAppTest &&
+      report.chunksComplete &&
+      report.planHashMatches &&
+      !anyDateSheetExists &&
+      !batHasRealData &&
+      report.batteryMetadata.matched === 0 &&
+      report.aircraftTotals.matched === 0 &&
+      discardBlockReasons.length === 0
+    );
+    report.discardBlockReasons = discardBlockReasons;
+
+    // 4状態の分類
+    if (report.safeToRecover) {
+      report.statusCategory = 'SAFE_TO_RECOVER';
+    } else if (report.safeToDiscardTest) {
+      report.statusCategory = 'SAFE_TO_DISCARD_TEST';
+    } else {
+      report.statusCategory = 'CANNOT_AUTO_PROCESS';
+    }
+
+    return report;
+  });
+
+  // commitLog_ で詳細レポートを出力
+  commitLog_('================================================================');
+  commitLog_('【未完了保存計画 診断レポート】 未完了件数: ' + reports.length);
+  commitLog_('================================================================');
+  reports.forEach(function(r, idx) {
+    commitLog_('--- [' + (idx + 1) + '/' + reports.length + '] draftId: ' + r.draftId + ' ---');
+    commitLog_('  状態 (state)       : ' + r.state);
+    commitLog_('  進捗 (stage)       : ' + r.stage);
+    commitLog_('  直前エラー (lastErr): ' + r.lastErrorStage);
+    commitLog_('  作成日時           : ' + r.createdAt);
+    commitLog_('  更新日時           : ' + r.updatedAt);
+    commitLog_('  運航種別           : ' + (r.isAppTest ? 'アプリテスト (TEST運航)' : '通常運航'));
+    commitLog_('  状態分類           : ' + r.statusCategory);
+    commitLog_('  DATA chunk完全性   : ' + (r.chunksComplete ? '完全（全chunk存在）' : '異常（chunk欠落）'));
+    commitLog_('  planHash整合性     : ' + (r.planHashMatches ? '一致（改ざん・破損なし）' : '不一致または未検証'));
+    commitLog_('  操作進捗 (operations): 全 ' + r.operationCounts.total + ' 件中');
+    commitLog_('    ├─ 書込み完了 (intended): ' + r.operationCounts.intended);
+    commitLog_('    ├─ 未書込み   (before)  : ' + r.operationCounts.before);
+    commitLog_('    └─ 競合変更   (conflict): ' + r.operationCounts.conflict);
+    if (r.conflicts.length > 0) {
+      commitLog_('    [競合詳細]: ' + JSON.stringify(r.conflicts));
+    }
+    commitLog_('  BAT Metadata       : ' + r.batteryMetadata.matched + ' / ' + r.batteryMetadata.total + ' 件付与済み');
+    commitLog_('  機体累計状況       : ' + (r.isAppTest ? r.aircraftTotals.note : (r.aircraftTotals.matched + ' / ' + r.aircraftTotals.targets + ' 機体反映済み')));
+    commitLog_('  >> 安全復旧判定    : ' + (r.safeToRecover ? '【安全に復旧可能】' : '【自動復旧不可】 理由: ' + r.resumeBlockReasons.join(', ')));
+    commitLog_('  >> TEST破棄判定    : ' + (r.safeToDiscardTest ? '【TEST安全破棄可能】' : '【破棄不可】 理由: ' + (r.discardBlockReasons || []).join(', ')));
+  });
+  commitLog_('================================================================');
+
+  return reports;
+}
+
+/**
+ * 画面から実行する未完了保存計画の安全な復旧関数（ロールフォワード完了）
+ * 利用者がWebアプリ上の「前回の保存を安全に復旧する」ボタンを押したときに呼び出される。
+ * 安全条件をすべて満たす場合のみ、同じdraftId・同じfixed commit plan・同じUUIDを維持したまま
+ * roll-forwardしてcompleteまで進める。
+ */
+function recoverPendingCommitPlan(draftId) {
+  if (!draftId) throw new Error('復旧対象のdraftIdが指定されていません。');
+  return locked_(function() {
+    cleanupCommitPlans_();
+    const meta = readCommitMeta_(draftId);
+    if (!meta) throw new Error('指定された保存計画METAが見つかりません。');
+    if (meta.state === 'complete') {
+      return { success: true, message: '前回の保存は既に完了しています。現在の運航を保存できます。' };
+    }
+
+    const reports = diagnosePendingCommitPlans();
+    const report = (reports || []).find(function(r) { return r.draftId === draftId; });
+    if (!report) throw new Error('保存計画の診断情報を取得できませんでした。');
+    if (!report.safeToRecover) {
+      throw new Error('安全条件を満たさないため、自動復旧できません：' + (report.resumeBlockReasons || []).join(' / '));
+    }
+
+    const record = loadCommitPlan_(draftId, meta);
+    executeCommitPlanRollForward_(record, spreadsheet_());
+
+    return {
+      success: true,
+      message: '前回の保存を復旧しました。現在の運航を保存できます。'
+    };
+  });
+}
+
+/**
+ * 画面から実行する未完了TEST保存計画の安全破棄関数
+ * 利用者がWebアプリ上の「このTEST保存を破棄して解除」ボタンを押したときに呼び出される。
+ * 厳格な安全条件（TEST運航、シート削除済み、BAT未書込み、Metadata 0件、累計未更新）を
+ * すべて満たす場合のみ、METAとDATA chunkを削除して保留ロックを解除する。
+ */
+function discardPendingTestCommitPlan(draftId) {
+  if (!draftId) throw new Error('破棄対象のdraftIdが指定されていません。');
+  return locked_(function() {
+    const meta = readCommitMeta_(draftId);
+    if (!meta) throw new Error('指定された保存計画が見つかりません。すでに解除されている可能性があります。');
+    if (meta.state === 'complete') {
+      throw new Error('完了済みの保存計画は破棄できません。');
+    }
+
+    const reports = diagnosePendingCommitPlans();
+    const report = (reports || []).find(function(r) { return r.draftId === draftId; });
+    if (!report) throw new Error('保存計画の診断情報を取得できませんでした。');
+    if (!report.safeToDiscardTest) {
+      throw new Error('安全条件を満たさないため、破棄できません：' + (report.discardBlockReasons || []).join(' / '));
+    }
+
+    const properties = commitProperties_();
+    const chunkCount = Number(meta.chunkCount || 0);
+    for (let index = 0; index < chunkCount; index++) {
+      properties.deleteProperty(commitDataKey_(draftId, index));
+    }
+    properties.deleteProperty(commitMetaKey_(draftId));
+
+    commitLog_('TEST未完了保存計画を安全に破棄しました: draftId=' + draftId);
+
+    return {
+      success: true,
+      message: '保留中のテスト保存を破棄しました。現在の下書きをそのまま確定保存できます。'
+    };
+  });
+}
 
 function finishAircraftLegacy_(input) {
   return locked_(function() {
@@ -2236,6 +2614,166 @@ const APP_HTML = String.raw`<!doctype html>
     @media (min-width: 600px) {
       .grid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     }
+
+    /* 保存状態診断モーダル */
+    .diag-modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 23, 42, 0.65);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    .diag-modal-content {
+      background: #ffffff;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 520px;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+      display: flex;
+      flex-direction: column;
+    }
+    .diag-modal-header {
+      padding: 14px 16px;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .diag-modal-header h3 {
+      margin: 0;
+      font-size: 16px;
+      color: #0f172a;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .diag-modal-close {
+      background: transparent;
+      border: none;
+      font-size: 20px;
+      line-height: 1;
+      color: #64748b;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      min-height: 44px;
+      min-width: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .diag-modal-body {
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #334155;
+    }
+    .diag-item-card {
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: #f8fafc;
+    }
+    .diag-item-card.has-pending {
+      border-left: 5px solid #e11d48;
+      background: #fff1f2;
+    }
+    .diag-item-card.is-ok {
+      border-left: 5px solid #10b981;
+      background: #f0fdf4;
+    }
+    .diag-grid {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      row-gap: 6px;
+      column-gap: 8px;
+      font-size: 13px;
+      margin: 8px 0;
+    }
+    .diag-grid-label {
+      color: #64748b;
+      font-weight: 600;
+    }
+    .diag-grid-value {
+      color: #0f172a;
+      font-weight: 500;
+      word-break: break-all;
+    }
+    .diag-detail-toggle {
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: #475569;
+      cursor: pointer;
+      width: 100%;
+      text-align: left;
+      margin-top: 8px;
+      min-height: 40px;
+    }
+    .diag-detail-box {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 8px;
+      margin-top: 6px;
+      font-size: 11px;
+      font-family: monospace;
+      word-break: break-all;
+      white-space: pre-wrap;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+    .diag-trigger-btn {
+      background: #ffffff;
+      border: 1px solid #94a3b8;
+      border-radius: 8px;
+      color: #475569;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin: 16px auto 8px;
+      width: 100%;
+      max-width: 320px;
+      min-height: 44px;
+    }
+    .diag-trigger-btn:hover {
+      background: #f1f5f9;
+      color: #1e293b;
+    }
+    .diag-trigger-link {
+      color: #0284c7;
+      text-decoration: underline;
+      cursor: pointer;
+      font-size: 13px;
+      display: inline-block;
+      padding: 8px;
+      margin-top: 6px;
+      min-height: 44px;
+      box-sizing: border-box;
+    }
   </style>
 </head>
 <body>
@@ -2927,6 +3465,264 @@ function render(){
 }
 
 // ----------------------------------------------------
+// 保存状態の読み取り専用診断モーダル
+// ----------------------------------------------------
+var STAGE_HUMAN_NAMES = {
+  'PLAN_PERSISTED': '保存準備完了',
+  'PREFLIGHT_WRITTEN': '点検記録保存後',
+  'FLIGHTS_WRITTEN': '飛行記録保存後',
+  'BATTERY_WRITTEN': 'BAT履歴保存後',
+  'POSTFLIGHT_WRITTEN': '飛行後点検保存後',
+  'AIRCRAFT_TOTALS_WRITTEN': '機体累計更新後',
+  'FINAL_FLUSH': 'シート反映後（検証前）',
+  'VERIFIED': '検証完了（完了前）'
+};
+
+function openCommitDiagnosisModal(){
+  var existing = el('commitDiagnosisModal');
+  if(existing) existing.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'commitDiagnosisModal';
+  overlay.className = 'diag-modal-overlay';
+  overlay.onclick = function(e){
+    if(e.target === overlay) closeCommitDiagnosisModal();
+  };
+
+  overlay.innerHTML =
+    '<div class="diag-modal-content" onclick="event.stopPropagation()">' +
+      '<div class="diag-modal-header">' +
+        '<h3>📋 保存状態の診断</h3>' +
+        '<button type="button" class="diag-modal-close" onclick="closeCommitDiagnosisModal()" aria-label="閉じる">✕</button>' +
+      '</div>' +
+      '<div class="diag-modal-body" id="diagModalBody">' +
+        '<div style="text-align:center;padding:24px 8px;">' +
+          '<div style="font-size:15px;font-weight:600;color:#1e40af;margin-bottom:8px;">スプレッドシートの保存状態を確認中...</div>' +
+          '<div style="font-size:12px;color:#64748b;">読み取り専用で安全に確認しています（変更はされません）</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+  runCommitDiagnosis();
+}
+
+function closeCommitDiagnosisModal(){
+  var modal = el('commitDiagnosisModal');
+  if(modal) modal.remove();
+}
+
+function runCommitDiagnosis(){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  google.script.run
+    .withSuccessHandler(function(reports){
+      renderCommitDiagnosisResult(reports);
+    })
+    .withFailureHandler(function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="warn-box" style="margin-bottom:12px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 診断処理でエラーが発生しました</strong>' +
+          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
+        '</div>' +
+        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">再試行する</button>' +
+        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    })
+    .diagnosePendingCommitPlans();
+}
+
+function renderCommitDiagnosisResult(reports){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  if(!reports || reports.length === 0){
+    body.innerHTML =
+      '<div class="diag-item-card is-ok">' +
+        '<div style="font-weight:700;font-size:15px;color:#065f46;margin-bottom:6px;">✅ 未完了の保存はありません</div>' +
+        '<div style="font-size:13px;color:#047857;">すべての運航記録は正常に保存・完了しています。<br>スプレッドシートとの競合や保留データはありません。</div>' +
+      '</div>' +
+      '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    return;
+  }
+
+  var html = '<div style="margin-bottom:10px;font-weight:700;color:#991b1b;font-size:14px;">⚠️ 保留中・未完了の保存が ' + reports.length + ' 件見つかりました</div>';
+
+  reports.forEach(function(r, idx){
+    var stateText = r.state === 'failed' ? '失敗（途中で停止）' : (r.state === 'writing' ? '処理中（または通信切断）' : esc(r.state));
+    var stageText = STAGE_HUMAN_NAMES[r.stage] || r.stage || '(不明)';
+    var lastErrStageText = r.lastErrorStage ? (STAGE_HUMAN_NAMES[r.lastErrorStage] || r.lastErrorStage) : '(なし)';
+    var stoppedAtText = r.lastErrorStage && r.lastErrorStage !== '(なし)' ? lastErrStageText + ' で停止' : stageText;
+
+    var counts = r.operationCounts || { intended: 0, before: 0, conflict: 0, total: 0 };
+    var hasCorruption = !r.chunksComplete || !r.planHashMatches;
+    var corruptionText = hasCorruption ? '⚠️ 異常あり（データ欠落・破損の疑い）' : 'なし（正常）';
+
+    var isSafe = !!r.safeToRecover;
+    var recoveryStatusText = isSafe ? 'あり（安全に復旧可能）' : '不可';
+
+    var detailId = 'diagDetail_' + idx;
+
+    html +=
+      '<div class="diag-item-card has-pending">' +
+        '<div style="font-weight:700;font-size:14px;color:#9f1239;margin-bottom:6px;">' +
+          '【保存計画 ' + (idx + 1) + '】 前回の保存が途中で止まっています' +
+        '</div>' +
+        '<div class="diag-grid">' +
+          '<div class="diag-grid-label">状態</div><div class="diag-grid-value"><strong>' + esc(stateText) + '</strong></div>' +
+          '<div class="diag-grid-label">止まった場所</div><div class="diag-grid-value"><strong>' + esc(stoppedAtText) + '</strong></div>' +
+          '<div class="diag-grid-label">未書込み</div><div class="diag-grid-value">' + counts.before + ' 件</div>' +
+          '<div class="diag-grid-label">書込み済み</div><div class="diag-grid-value">' + counts.intended + ' 件（全' + counts.total + '件中）</div>' +
+          '<div class="diag-grid-label">競合件数</div><div class="diag-grid-value">' + (counts.conflict > 0 ? '<span style="color:#dc2626;font-weight:700;">' + counts.conflict + ' 件</span>' : '0 件') + '</div>' +
+          '<div class="diag-grid-label">データ破損の有無</div><div class="diag-grid-value">' + esc(corruptionText) + '</div>' +
+          '<div class="diag-grid-label">安全に復旧できるか</div><div class="diag-grid-value"><strong style="color:' + (isSafe ? '#15803d' : '#b91c1c') + ';">' + recoveryStatusText + '</strong></div>' +
+        '</div>';
+
+    if(r.statusCategory === 'SAFE_TO_RECOVER'){
+      html +=
+        '<div style="margin-top:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px;text-align:center;">' +
+          '<div style="font-size:13px;font-weight:700;color:#065f46;margin-bottom:4px;">✨ 前回の保存を安全に復旧できます</div>' +
+          '<div style="font-size:12px;color:#047857;margin-bottom:10px;line-height:1.4;">' +
+            '前回の続きの書き込みを安全に完了し、保留状態を解除します。<br>（重複記録や累計の二重加算は発生しません）' +
+          '</div>' +
+          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" onclick="executeCommitRecovery(\'' + esc(r.draftId) + '\')">' +
+            '🚀 前回の保存を安全に復旧する' +
+          '</button>' +
+        '</div>';
+    } else if(r.statusCategory === 'SAFE_TO_DISCARD_TEST'){
+      html +=
+        '<div style="margin-top:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;text-align:center;">' +
+          '<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:4px;">💡 このTEST保存は安全に破棄できます</div>' +
+          '<div style="font-size:12px;color:#b45309;margin-bottom:10px;line-height:1.4;">' +
+            'TEST日付シートは既に削除されており、BAT履歴や機体累計にも書き込まれていません。<br>' +
+            'このテスト保存計画を破棄して保留ロックを解除し、現在の入力内容を保存できるようにします。' +
+          '</div>' +
+          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" onclick="executeTestCommitDiscard(\'' + esc(r.draftId) + '\')">' +
+            '🗑️ このTEST保存を破棄して解除' +
+          '</button>' +
+        '</div>';
+    } else {
+      html +=
+        '<div class="warn-box" style="margin-top:10px;background:#fef2f2;border-left:4px solid #ef4444;padding:10px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 自動処理できません。詳細を確認してください</strong>' +
+          '<div style="font-size:12px;color:#7f1d1d;margin-top:4px;">' +
+            '理由: ' + esc((r.resumeBlockReasons || []).concat(r.discardBlockReasons || []).filter(function(v,i,a){return a.indexOf(v)===i;}).join(' / ') || '競合またはデータ不整合') +
+          '</div>' +
+        '</div>';
+    }
+
+    html +=
+        '<button type="button" class="diag-detail-toggle" onclick="toggleDiagDetail(\'' + detailId + '\')">▶ 詳しい技術情報（draftIdなど）を見る</button>' +
+        '<div id="' + detailId + '" class="diag-detail-box" style="display:none;">' +
+          'draftId: ' + esc(r.draftId) + '\n' +
+          '運航種別: ' + (r.isAppTest ? 'アプリテスト (TEST運航)' : '通常運航') + '\n' +
+          '状態分類: ' + esc(r.statusCategory || '') + '\n' +
+          '目的: ' + esc(r.purpose || '') + '\n' +
+          '作成日時: ' + esc(r.createdAt) + '\n' +
+          '更新日時: ' + esc(r.updatedAt) + '\n' +
+          'DATA chunks: ' + (r.chunksComplete ? '完全' : '一部欠落') + '\n' +
+          'planHash一致: ' + (r.planHashMatches ? '一致' : '不一致') + '\n' +
+          'BAT付与状況: ' + r.batteryMetadata.matched + ' / ' + r.batteryMetadata.total + ' 件\n' +
+          '機体累計状況: ' + (r.isAppTest ? r.aircraftTotals.note : (r.aircraftTotals.matched + ' / ' + r.aircraftTotals.targets + ' 件')) + '\n' +
+          (r.conflicts && r.conflicts.length > 0 ? ('\n[競合詳細]:\n' + JSON.stringify(r.conflicts, null, 2)) : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  html +=
+    '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+
+  body.innerHTML = html;
+}
+
+function executeCommitRecovery(draftId){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  body.innerHTML =
+    '<div style="text-align:center;padding:32px 12px;">' +
+      '<div style="font-size:16px;font-weight:700;color:#1e40af;margin-bottom:8px;">前回の保存を復旧中...</div>' +
+      '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">スプレッドシートの残りの書き込みを安全に完了しています</div>' +
+      '<div class="text-sm" style="color:#0369a1;">（端末に入力中の下書きは保持されています）</div>' +
+    '</div>';
+
+  google.script.run
+    .withSuccessHandler(function(res){
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="diag-item-card is-ok" style="padding:16px;text-align:center;">' +
+          '<div style="font-weight:700;font-size:16px;color:#065f46;margin-bottom:8px;">' +
+            '✅ 前回の保存を復旧しました。現在の運航を保存できます' +
+          '</div>' +
+          '<div style="font-size:13px;color:#047857;line-height:1.5;margin-bottom:14px;">' +
+            '前回の保存は正常に完了し、保留状態が解除されました。<br>' +
+            '端末の入力内容はそのまま保持されていますので、このまま「運航日誌を確定する」を押して保存してください。' +
+          '</div>' +
+          '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>' +
+        '</div>';
+    })
+    .withFailureHandler(function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="warn-box" style="margin-bottom:12px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 復旧処理でエラーが発生しました</strong>' +
+          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
+        '</div>' +
+        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">もう一度確認する</button>' +
+        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    })
+    .recoverPendingCommitPlan(draftId);
+}
+
+function executeTestCommitDiscard(draftId){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  body.innerHTML =
+    '<div style="text-align:center;padding:32px 12px;">' +
+      '<div style="font-size:16px;font-weight:700;color:#991b1b;margin-bottom:8px;">テスト保存計画を破棄中...</div>' +
+      '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">保留ロックを安全に解除しています</div>' +
+      '<div class="text-sm" style="color:#0369a1;">（端末に入力中の下書きは保持されています）</div>' +
+    '</div>';
+
+  google.script.run
+    .withSuccessHandler(function(res){
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="diag-item-card is-ok" style="padding:16px;text-align:center;">' +
+          '<div style="font-weight:700;font-size:16px;color:#065f46;margin-bottom:8px;">' +
+            '✅ 保留中のテスト保存を破棄しました' +
+          '</div>' +
+          '<div style="font-size:13px;color:#047857;margin-bottom:16px;line-height:1.5;">' +
+            '保留ロックが解除されました。<br>入力中の下書きは保持されています。<br>「閉じる」を押して、そのまま一括保存を実行できます。' +
+          '</div>' +
+          '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>' +
+        '</div>';
+    })
+    .withFailureHandler(function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="warn-box" style="margin-bottom:12px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 破棄処理でエラーが発生しました</strong>' +
+          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
+        '</div>' +
+        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">再試行する</button>' +
+        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    })
+    .discardPendingTestCommitPlan(draftId);
+}
+
+function toggleDiagDetail(id){
+  var elBox = el(id);
+  if(!elBox) return;
+  var isHidden = elBox.style.display === 'none';
+  elBox.style.display = isHidden ? 'block' : 'none';
+}
+// ----------------------------------------------------
 // 1. 運航開始画面（トップ）
 // ----------------------------------------------------
 function renderStartView(div){
@@ -3083,6 +3879,11 @@ function renderStartView(div){
       '<label>技能証明書番号</label>' +
       '<input type="text" id="cert" placeholder="未所持または技能証明番号" value="' + esc(last.cert || '') + '">' +
       '<button class="btn btn-primary" style="font-size:16px;padding:13px;" onclick="submitStartOperation()">次へ：飛行前点検を開始</button>' +
+    '</div>' +
+    '<div style="text-align:center;margin-top:16px;margin-bottom:8px;">' +
+      '<button type="button" class="diag-trigger-btn" onclick="openCommitDiagnosisModal()">' +
+        '🔧 サーバー保存状態を確認（診断）' +
+      '</button>' +
     '</div>';
 
   checkPermitExpiry();
@@ -3687,6 +4488,11 @@ function renderPostView(div){
       '</div>' +
 
       '<button class="btn btn-primary" style="font-size:16px;padding:14px;margin-top:14px;" onclick="submitAllPostflight()">✅ 全記録を一括保存し、今回の運航日誌を確定する</button>' +
+      '<div style="text-align:center;margin-top:10px;">' +
+        '<button type="button" class="diag-trigger-link" style="background:none;border:none;font-size:13px;" onclick="openCommitDiagnosisModal()">' +
+          '⚠️ 保存が止まった・エラーが出る場合はこちら：保存状態を確認' +
+        '</button>' +
+      '</div>' +
     '</div>';
 }
 

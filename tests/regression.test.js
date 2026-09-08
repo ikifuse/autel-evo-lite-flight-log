@@ -339,7 +339,7 @@ function run() {
     const appStart=current.indexOf('const APP_HTML =');
     assert(appStart>=0,'T15 APP_HTML marker missing');
     const currentApp=current.slice(appStart);
-    const expectedHash='0d50ee01e4919b05242cf0dadf0387e62fecdeef1b78c31e6bd3de9750f2f597';
+    const expectedHash='957a0e3ad27d288b94b80eea226b20b2b4e3b2644de1e06acfd0a299c520fb23';
     const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
     assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
     const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');
@@ -606,26 +606,38 @@ function run() {
   }
   {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'AFTER_PLAN_PERSISTED'); try{e.context.finishAircraft(oldInput);}catch(_){} clearFault(e);
-    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
-    const next=makeInput([{model:'EVO Lite',minutes:3}]); e.context.finishAircraft(next);
-    assert(!e.props.has(key),'stale untouched plan not removed'); reports.push('EXTRA stale untouched cleanup OK');
+    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-365*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    // 1年経過しても未完了draftは勝手に削除されない。新しい保存は安全のためブロックされる
+    const next=makeInput([{model:'EVO Lite',minutes:3}]);
+    let blocked=false; try{e.context.finishAircraft(next);}catch(_){blocked=true;}
+    assert(blocked,'1-year-old pending draft should safely block new save until resolved');
+    assert(e.props.has(key),'1-year-old pending draft was unexpectedly removed');
+    reports.push('EXTRA pending draft preserved regardless of age OK');
   }
   {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'BEFORE_COMPLETE'); try{e.context.finishAircraft(oldInput);}catch(_){} clearFault(e);
-    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
-    e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:3}])); assertCommitComplete(e,oldInput.session.draftId); reports.push('EXTRA stale fully-written recovery OK');
+    const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-365*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    // 1年経過した書き込み完了済みの未完了draftも、recoverPendingCommitPlanで安全に復旧完了できる
+    const res = e.context.recoverPendingCommitPlan(oldInput.session.draftId);
+    assert(res && res.success); assertCommitComplete(e,oldInput.session.draftId);
+    reports.push('EXTRA long-standing fully-written recovery OK');
   }
   {
     const input=makeInput([{model:'EVO Lite',minutes:2}]); const baseline=makeEnvironment(); baseline.context.finishAircraft(JSON.parse(JSON.stringify(input)));
     const e=makeEnvironment(); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
-    const key=`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
-    e.context.finishAircraft(input); assert(snapshotBusiness(e)===snapshotBusiness(baseline),'stale partial roll-forward differs'); reports.push('EXTRA stale partial recovery OK');
+    const key=`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-365*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    // 1年経過した一部書き込み済みdraftも、recoverPendingCommitPlanで安全にロールフォワード完了できる
+    const res = e.context.recoverPendingCommitPlan(input.session.draftId);
+    assert(res && res.success);
+    assert(snapshotBusiness(e)===snapshotBusiness(baseline),'long-standing partial roll-forward differs');
+    reports.push('EXTRA long-standing partial recovery OK');
   }
   {
     const e=makeEnvironment(); const input=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'AFTER_DATE_RECORDS'); try{e.context.finishAircraft(input);}catch(_){} clearFault(e);
     const key=`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); const plan=JSON.parse(Array.from({length:meta.chunkCount},(_,i)=>e.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_${i}`)).join(''));
-    const op=plan.operations.date.find(item=>item.kind==='value'); e.ss.getSheetByName(op.sheetName).getRange(op.row,op.col).setValue('競合'); meta.updatedAt=new Date(Date.now()-8*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
-    let rejected=false; try{e.context.finishAircraft(input);}catch(_){rejected=true;} assert(rejected,'stale conflict accepted'); reports.push('EXTRA stale conflict rejection OK');
+    const op=plan.operations.date.find(item=>item.kind==='value'); e.ss.getSheetByName(op.sheetName).getRange(op.row,op.col).setValue('競合'); meta.updatedAt=new Date(Date.now()-365*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
+    let rejected=false; try{e.context.recoverPendingCommitPlan(input.session.draftId);}catch(_){rejected=true;}
+    assert(rejected,'conflict plan accepted by recovery'); reports.push('EXTRA conflict rejection OK');
   }
   {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); e.context.finishAircraft(oldInput);
@@ -886,6 +898,294 @@ function run() {
     const input=makeInput([{model:'EVO Lite',minutes:5,battery:1}]); input.session.purpose='アプリテスト';
     assertFaultRetryMatches('AFTER_BAT_1',input,'app test BAT roll-forward');
     reports.push('APP TEST roll-forward retry OK');
+  }
+
+  // ----------------------------------------------------
+  // 未完了保存計画のWeb復旧機能（recoverPendingCommitPlan）の検証
+  // ----------------------------------------------------
+  // 1. 各ステージの途中停止からのロールフォワード復旧
+  [
+    'AFTER_DATE_RECORDS',
+    'AFTER_BAT_1',
+    'AFTER_POSTFLIGHT',
+    'BETWEEN_AIRCRAFT_TOTALS',
+    'BEFORE_FINAL_FLUSH',
+    'BEFORE_COMPLETE',
+    'AFTER_COMPLETE_BEFORE_RESPONSE'
+  ].forEach(function(faultPoint) {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }, { model: 'EVO Lite+', minutes: 7, battery: 2 }]);
+    const draftId = input.session.draftId;
+    const env = makeEnvironment();
+    installOneShotFault(env, faultPoint);
+    let failed = false;
+    try { env.context.finishAircraft(JSON.parse(JSON.stringify(input))); } catch (e) { failed = true; }
+    if (faultPoint !== 'AFTER_COMPLETE_BEFORE_RESPONSE') {
+      assert(failed, faultPoint + ' did not fail as expected');
+    }
+    clearFault(env);
+
+    // 診断で安全復旧可能と判定されること
+    const diag = env.context.diagnosePendingCommitPlans();
+    if (faultPoint === 'AFTER_COMPLETE_BEFORE_RESPONSE') {
+      assert(diag.length === 0, 'completed draft should not be pending');
+      const res = env.context.recoverPendingCommitPlan(draftId);
+      assert(res && res.success, 'already complete recovery should succeed');
+    } else {
+      assert(diag.length === 1, faultPoint + ' should have 1 pending draft');
+      assert(diag[0].safeToRecover === true, faultPoint + ' should be safeToRecover');
+      assert(diag[0].operationCounts.conflict === 0, faultPoint + ' should have 0 conflicts');
+
+      // recoverPendingCommitPlan でロールフォワード完了
+      const res = env.context.recoverPendingCommitPlan(draftId);
+      assert(res && res.success, faultPoint + ' recovery failed');
+
+      // 完了後の診断で未完了0件
+      assert(env.context.diagnosePendingCommitPlans().length === 0, faultPoint + ' post-recovery should be clean');
+      assertCommitComplete(env, draftId);
+    }
+  });
+  reports.push('RECOVERY fault points roll-forward recovery OK');
+
+  // 2. 古いfailed draft + 新しい下書きの分離＆復旧
+  {
+    const oldInput = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 1 }]);
+    const oldDraftId = oldInput.session.draftId;
+    const env = makeEnvironment();
+    installOneShotFault(env, 'AFTER_BAT_1');
+    try { env.context.finishAircraft(oldInput); } catch (e) {}
+    clearFault(env);
+
+    // 新しい下書き（別のdraftId）で保存しようとするとブロックされる
+    const newInput = makeInput([{ model: 'EVO Lite', minutes: 15, battery: 2 }]);
+    let blocked = false;
+    try { env.context.finishAircraft(newInput); } catch (e) {
+      blocked = e.message.includes('別の運航記録が保存途中です');
+    }
+    assert(blocked, 'new draft was not blocked by pending old draft');
+
+    // 古いdraftを画面から安全復旧
+    const recoveryRes = env.context.recoverPendingCommitPlan(oldDraftId);
+    assert(recoveryRes && recoveryRes.success, 'old draft recovery failed');
+    assertCommitComplete(env, oldDraftId);
+
+    // 古いdraftが完了したので、新しい下書きが正常に保存できる
+    env.context.finishAircraft(newInput);
+    assertCommitComplete(env, newInput.session.draftId);
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 25, 'cumulative minutes mismatch after recovery and new save');
+    reports.push('RECOVERY old failed draft + new draft workflow OK');
+  }
+
+  // 3. conflictあり時は自動復旧しない
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    const draftId = input.session.draftId;
+    const env = makeEnvironment();
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // 外部からセルを手動編集して競合（conflict）を発生させる
+    const sheet = env.ss.getSheetByName('2026.9.6');
+    sheet.data[32][8] = '99:99'; // 本来の予定値でもbeforeでもない第三の値
+
+    const diag = env.context.diagnosePendingCommitPlans();
+    assert(diag.length === 1 && diag[0].safeToRecover === false, 'conflict draft must not be safeToRecover');
+    assert(diag[0].operationCounts.conflict > 0, 'conflict count must be > 0');
+
+    // recoverPendingCommitPlan を呼ぶと拒否される
+    let rejected = false;
+    try { env.context.recoverPendingCommitPlan(draftId); } catch (e) {
+      rejected = e.message.includes('安全条件を満たさない');
+    }
+    assert(rejected, 'recoverPendingCommitPlan must reject conflict draft');
+    reports.push('RECOVERY conflict safe rejection OK');
+  }
+
+  // 4. TEST運航でBAT履歴は更新されるが機体正式累計は更新されない
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 8, battery: 2 }]);
+    input.session.purpose = 'アプリテスト';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    installOneShotFault(env, 'AFTER_BAT_2');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    const diag = env.context.diagnosePendingCommitPlans();
+    assert(diag.length === 1 && diag[0].isAppTest === true, 'diag should identify app test');
+    assert(diag[0].safeToRecover === true, 'app test should be safeToRecover');
+
+    const recoveryRes = env.context.recoverPendingCommitPlan(draftId);
+    assert(recoveryRes && recoveryRes.success, 'app test recovery failed');
+
+    // TESTシートに記録されていること
+    assert(env.ss.getSheetByName('TEST_2026.9.6'), 'TEST date sheet missing');
+    // BAT履歴が記録され、Developer Metadataが付与されていること
+    const batSheet = env.ss.getSheetByName('BAT_2');
+    assert(value(batSheet, 13, 3) === 'アプリテスト' && value(batSheet, 13, 4) === 8, 'BAT record missing in app test');
+    const meta = batSheet.getRange(13, 1, 1, 8).getDeveloperMetadata();
+    assert(meta.length === 1 && meta[0].getValue() === draftId + ':0', 'BAT metadata missing in app test');
+    // 機体正式累計は更新されないこと
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 750, 'app test must not modify official total');
+    reports.push('RECOVERY APP TEST updates BAT but not aircraft totals OK');
+  }
+
+  // 5. TEST保存計画の安全破棄（実機と同等条件）
+  // TESTシート削除済み + BAT未書込み + Metadataなし のとき安全破棄可能
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    input.session.purpose = 'アプリテスト';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    // 日付シート書き込み直後で障害発生（BAT書き込み前で停止）
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // オーナーがTESTシートを手動削除
+    const testSheet = env.ss.getSheetByName('TEST_2026.9.6');
+    assert(testSheet, 'TEST date sheet should exist before deletion');
+    env.ss.deleteSheet(testSheet);
+
+    // 診断を実行
+    const diag = env.context.diagnosePendingCommitPlans();
+    assert(diag.length === 1, 'should find 1 pending draft');
+    const r = diag[0];
+    assert(r.isAppTest === true, 'should be app test');
+    assert(r.statusCategory === 'SAFE_TO_DISCARD_TEST', 'should be categorized as SAFE_TO_DISCARD_TEST');
+    assert(r.safeToDiscardTest === true, 'should be safeToDiscardTest');
+    assert(r.safeToRecover === false, 'should not be safeToRecover since sheet is deleted');
+
+    // 安全破棄を実行
+    const discardRes = env.context.discardPendingTestCommitPlan(draftId);
+    assert(discardRes && discardRes.success, 'discardPendingTestCommitPlan should succeed');
+
+    // 診断で未完了が0件になっていること
+    const diagAfter = env.context.diagnosePendingCommitPlans();
+    assert(diagAfter.length === 0, 'pending drafts should be empty after discard');
+
+    // 新しい下書きをそのまま一括保存できること
+    const newInput = makeInput([{ model: 'EVO Lite', minutes: 7, battery: 1 }]);
+    newInput.session.purpose = 'アプリテスト';
+    env.context.finishAircraft(newInput);
+    assertCommitComplete(env, newInput.session.draftId);
+    reports.push('RECOVERY APP TEST safe discard when sheet deleted and BAT untouched OK');
+  }
+
+  // 6. TEST破棄禁止条件の網羅検証
+  // 6-a: BATに1セルでも実データ（intendedかつ非空）あり -> safeToDiscardTest === false
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    input.session.purpose = 'アプリテスト';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    installOneShotFault(env, 'AFTER_BAT_1');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // TESTシートを削除
+    env.ss.deleteSheet(env.ss.getSheetByName('TEST_2026.9.6'));
+    // BATに実データ（日付など）が書き込まれている
+    const diag = env.context.diagnosePendingCommitPlans();
+    const r = diag[0];
+    assert(r.safeToDiscardTest === false, 'should NOT be safeToDiscardTest when BAT has data');
+    assert(r.statusCategory === 'CANNOT_AUTO_PROCESS', 'should be CANNOT_AUTO_PROCESS');
+    let rejected = false;
+    try { env.context.discardPendingTestCommitPlan(draftId); } catch (e) { rejected = true; }
+    assert(rejected, 'discard should be rejected when BAT has data');
+    reports.push('RECOVERY reject discard when BAT has real data OK');
+  }
+
+  // 6-b: BAT Developer Metadata が付与されている -> safeToDiscardTest === false
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    input.session.purpose = 'アプリテスト';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    installOneShotFault(env, 'AFTER_BAT_1');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // TESTシートを削除し、BATセルを空文字に戻すが、Metadataは残す
+    env.ss.deleteSheet(env.ss.getSheetByName('TEST_2026.9.6'));
+    const batSheet = env.ss.getSheetByName('BAT_1');
+    for (let c = 1; c <= 8; c++) batSheet.getRange(13, c).setValue('');
+
+    const diag = env.context.diagnosePendingCommitPlans();
+    const r = diag[0];
+    assert(r.batteryMetadata.matched === 1, 'Metadata should still match');
+    assert(r.safeToDiscardTest === false, 'should NOT be safeToDiscardTest when Metadata exists');
+    let rejected = false;
+    try { env.context.discardPendingTestCommitPlan(draftId); } catch (e) { rejected = true; }
+    assert(rejected, 'discard should be rejected when Metadata exists');
+    reports.push('RECOVERY reject discard when BAT metadata exists OK');
+  }
+
+  // 6-c: 通常運航（isAppTest === false） -> safeToDiscardTest === false（通常運航は破棄禁止）
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    input.session.purpose = '空撮';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    const diag = env.context.diagnosePendingCommitPlans();
+    const r = diag[0];
+    assert(r.isAppTest === false, 'should be normal operation');
+    assert(r.safeToDiscardTest === false, 'normal operation must NEVER be discarded');
+    let rejected = false;
+    try { env.context.discardPendingTestCommitPlan(draftId); } catch (e) { rejected = true; }
+    assert(rejected, 'discard must be rejected for normal operation');
+    reports.push('RECOVERY reject discard for normal operation OK');
+  }
+
+  // 6-d: planHash 不一致 -> safeToDiscardTest === false
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    input.session.purpose = 'アプリテスト';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // planHashを書き換えて破損を模擬
+    const key = `EVO_LITE_COMMIT_V2_${draftId}_META`;
+    const meta = JSON.parse(env.props.get(key));
+    meta.planHash = 'corrupted_hash';
+    env.props.set(key, JSON.stringify(meta));
+
+    const diag = env.context.diagnosePendingCommitPlans();
+    const r = diag[0];
+    assert(r.safeToDiscardTest === false, 'must reject discard on planHash mismatch');
+    let rejected = false;
+    try { env.context.discardPendingTestCommitPlan(draftId); } catch (e) { rejected = true; }
+    assert(rejected, 'discard must be rejected on planHash mismatch');
+    reports.push('RECOVERY reject discard on planHash mismatch OK');
+  }
+
+  // 6-e: DATA chunk 欠落 -> safeToDiscardTest === false
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    input.session.purpose = 'アプリテスト';
+    const draftId = input.session.draftId;
+    const env = makeEnvironment('12:30');
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // chunk 0 を削除
+    env.props.delete(`EVO_LITE_COMMIT_V2_${draftId}_DATA_0`);
+
+    const diag = env.context.diagnosePendingCommitPlans();
+    const r = diag[0];
+    assert(r.safeToDiscardTest === false, 'must reject discard on missing chunk');
+    let rejected = false;
+    try { env.context.discardPendingTestCommitPlan(draftId); } catch (e) { rejected = true; }
+    assert(rejected, 'discard must be rejected on missing chunk');
+    reports.push('RECOVERY reject discard on missing chunk OK');
   }
   console.log(reports.join('\n'));
 }

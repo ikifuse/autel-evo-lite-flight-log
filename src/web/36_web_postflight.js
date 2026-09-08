@@ -65,6 +65,11 @@ function renderPostView(div){
       '</div>' +
 
       '<button class="btn btn-primary" style="font-size:16px;padding:14px;margin-top:14px;" onclick="submitAllPostflight()">✅ 全記録を一括保存し、今回の運航日誌を確定する</button>' +
+      '<div style="text-align:center;margin-top:10px;">' +
+        '<button type="button" class="diag-trigger-link" style="background:none;border:none;font-size:13px;" onclick="openCommitDiagnosisModal()">' +
+          '⚠️ 保存が止まった・エラーが出る場合はこちら：保存状態を確認' +
+        '</button>' +
+      '</div>' +
     '</div>';
 }
 
