@@ -600,19 +600,28 @@ function run() {
   {
     const e=makeEnvironment(); const first=makeInput([{model:'EVO Lite',minutes:2}]); const second=makeInput([{model:'EVO Lite',minutes:3}]);
     installOneShotFault(e,'AFTER_PLAN_PERSISTED'); try{e.context.finishAircraft(first);}catch(_){} clearFault(e);
-    let blocked=false; try{e.context.finishAircraft(second);}catch(_){blocked=true;} assert(blocked,'second draft was not blocked by unfinished draft');
-    e.context.finishAircraft(first); e.context.finishAircraft(second);
-    assertCommitComplete(e,first.session.draftId); assertCommitComplete(e,second.session.draftId); reports.push('EXTRA different draft reservation isolation OK');
+    // 新仕様：firstは安全復旧可能なため、second保存時に裏で自動復旧され、secondもそのまま保存完了する！
+    e.context.finishAircraft(second);
+    assertCommitComplete(e,first.session.draftId);
+    assertCommitComplete(e,second.session.draftId);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===5,'both drafts must be committed');
+    reports.push('EXTRA seamless auto-recovery of pending draft during new save OK');
   }
   {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'AFTER_PLAN_PERSISTED'); try{e.context.finishAircraft(oldInput);}catch(_){} clearFault(e);
     const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.updatedAt=new Date(Date.now()-365*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
-    // 1年経過しても未完了draftは勝手に削除されない。新しい保存は安全のためブロックされる
+    // 1年経過しても未完了draftは勝手に削除されないこと
+    assert(e.props.has(key),'1-year-old pending draft was unexpectedly removed');
+    // conflictを発生させる（第三者がセル変更）
+    const plan=JSON.parse(Array.from({length:meta.chunkCount},(_,i)=>e.props.get(`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_DATA_${i}`)).join(''));
+    const op=plan.operations.date.find(item=>item.kind==='value');
+    e.ss.getSheetByName(op.sheetName).getRange(op.row,op.col).setValue('第三者変更');
+    // conflictがあるため自動復旧できず、新しい保存も安全のためブロックされること
     const next=makeInput([{model:'EVO Lite',minutes:3}]);
     let blocked=false; try{e.context.finishAircraft(next);}catch(_){blocked=true;}
-    assert(blocked,'1-year-old pending draft should safely block new save until resolved');
-    assert(e.props.has(key),'1-year-old pending draft was unexpectedly removed');
-    reports.push('EXTRA pending draft preserved regardless of age OK');
+    assert(blocked,'conflict pending draft should safely block new save until resolved');
+    assert(e.props.has(key),'conflict pending draft was preserved');
+    reports.push('EXTRA conflict pending draft safely blocks new save OK');
   }
   {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); installOneShotFault(e,'BEFORE_COMPLETE'); try{e.context.finishAircraft(oldInput);}catch(_){} clearFault(e);
@@ -759,11 +768,12 @@ function run() {
     try { e.context.finishAircraft(second); } catch (_) { failed=true; }
     clearFault(e); assert(failed,'different UUID fault setup did not fail');
     const third=makeInput([{model:'EVO Lite',minutes:4}]);
-    let blocked=false; try { e.context.finishAircraft(third); } catch (_) { blocked=true; }
-    assert(blocked,'different UUID was not blocked by active reservation');
-    e.context.finishAircraft(second); e.context.finishAircraft(third);
-    assert(e.context.aircraftTotalMinutes_('EVO Lite')===9,'UUID retry/competition total mismatch');
-    reports.push('SECURITY same UUID idempotency and different UUID reservation OK');
+    // 新仕様：安全復旧可能なsecondはthird保存時に自動復旧され、thirdもそのまま保存完了する！
+    e.context.finishAircraft(third);
+    assertCommitComplete(e, second.session.draftId);
+    assertCommitComplete(e, third.session.draftId);
+    assert(e.context.aircraftTotalMinutes_('EVO Lite')===9,'UUID auto-recovery and new save total mismatch');
+    reports.push('SECURITY same UUID idempotency and seamless pending auto-recovery OK');
   }
 
   {
@@ -947,6 +957,7 @@ function run() {
   reports.push('RECOVERY fault points roll-forward recovery OK');
 
   // 2. 古いfailed draft + 新しい下書きの分離＆復旧
+  // 2. 新仕様：古い安全復旧可能な本番draftがある場合、新規保存時に裏で自動復旧されて両方完了する
   {
     const oldInput = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 1 }]);
     const oldDraftId = oldInput.session.draftId;
@@ -955,24 +966,31 @@ function run() {
     try { env.context.finishAircraft(oldInput); } catch (e) {}
     clearFault(env);
 
-    // 新しい下書き（別のdraftId）で保存しようとするとブロックされる
+    // 新仕様：新しい下書きを一括保存すると、古いdraftが裏で自動復旧され、今回の保存も一発で完了する！
     const newInput = makeInput([{ model: 'EVO Lite', minutes: 15, battery: 2 }]);
-    let blocked = false;
-    try { env.context.finishAircraft(newInput); } catch (e) {
-      blocked = e.message.includes('別の運航記録が保存途中です');
-    }
-    assert(blocked, 'new draft was not blocked by pending old draft');
-
-    // 古いdraftを画面から安全復旧
-    const recoveryRes = env.context.recoverPendingCommitPlan(oldDraftId);
-    assert(recoveryRes && recoveryRes.success, 'old draft recovery failed');
-    assertCommitComplete(env, oldDraftId);
-
-    // 古いdraftが完了したので、新しい下書きが正常に保存できる
     env.context.finishAircraft(newInput);
+
+    assertCommitComplete(env, oldDraftId);
     assertCommitComplete(env, newInput.session.draftId);
-    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 25, 'cumulative minutes mismatch after recovery and new save');
-    reports.push('RECOVERY old failed draft + new draft workflow OK');
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 25, 'cumulative minutes mismatch after seamless auto-recovery and new save');
+    reports.push('RECOVERY seamless auto-recovery of old draft during new save OK');
+  }
+
+  // 2-b. 手動復旧関数（recoverPendingCommitPlan）単体の動作検証
+  {
+    const oldInput = makeInput([{ model: 'EVO Lite', minutes: 8, battery: 1 }]);
+    const oldDraftId = oldInput.session.draftId;
+    const env = makeEnvironment();
+    installOneShotFault(env, 'AFTER_BAT_1');
+    try { env.context.finishAircraft(oldInput); } catch (e) {}
+    clearFault(env);
+
+    // 画面の診断・復旧ボタンから安全復旧を単独実行できること
+    const recoveryRes = env.context.recoverPendingCommitPlan(oldDraftId);
+    assert(recoveryRes && recoveryRes.success, 'manual recovery failed');
+    assertCommitComplete(env, oldDraftId);
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 8);
+    reports.push('RECOVERY manual recoverPendingCommitPlan OK');
   }
 
   // 3. conflictあり時は自動復旧しない
@@ -1187,6 +1205,316 @@ function run() {
     assert(rejected, 'discard must be rejected on missing chunk');
     reports.push('RECOVERY reject discard on missing chunk OK');
   }
+
+  // ============================================================================
+  // 追加テスト：二段階保護・永続化途中障害・複数pending直前再診断
+  // ============================================================================
+
+  // 7. リクエストがサーバーへ到達しない（フェーズA：端末保持の検証）
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5 }]);
+    const env = makeEnvironment();
+    // サーバーへ送信されない（到達しない）ためサーバーPropertiesは空
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    // 端末側で保持されていた同じdraftId・同じ内容で後から送信すると正常完了
+    env.context.finishAircraft(input);
+    assertCommitComplete(env, input.session.draftId);
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 5);
+    reports.push('PHASE A client draft retention and safe retry OK');
+  }
+
+  // 8. DATA chunk 1個目の途中で停止（孤立DATA chunkのクリーンアップ）
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 5 }]);
+    const env = makeEnvironment();
+    // DATA chunk永続化中にプロパティ設定でエラー
+    env.controls.failNextProperty = true;
+    let failed = false;
+    try { env.context.finishAircraft(input); } catch (e) { failed = true; }
+    assert(failed, 'should fail during first property write');
+    // METAは作成されていないこと
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+
+    // 新規保存を実行すると、孤立chunkは掃除され、新規保存が正常完了すること
+    const next = makeInput([{ model: 'EVO Lite', minutes: 6 }]);
+    env.context.finishAircraft(next);
+    assertCommitComplete(env, next.session.draftId);
+    assert(![...env.props.keys()].some(k => k.includes(input.session.draftId)), 'orphan chunk should be cleaned up');
+    reports.push('CHUNK failure on first DATA chunk and cleanup OK');
+  }
+
+  // 9. 一部 DATA chunks のみ保存して停止、全 chunks 保存後 META 作成前に停止
+  {
+    const input = makeInput(Array.from({ length: 14 }, () => ({ model: 'EVO Lite', minutes: 1 })));
+    const env = makeEnvironment();
+    // 2個目のプロパティ書き込みで失敗
+    env.controls.propertyFailAt = 2;
+    let failed = false;
+    try { env.context.finishAircraft(input); } catch (e) { failed = true; }
+    assert(failed, 'should fail during partial chunk write');
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+
+    // 次回保存で孤立chunksが掃除され、新規保存が正常完了すること
+    env.controls.propertyFailAt = 0;
+    const next = makeInput([{ model: 'EVO Lite', minutes: 4 }]);
+    env.context.finishAircraft(next);
+    assertCommitComplete(env, next.session.draftId);
+    reports.push('CHUNK failure on partial/pre-meta chunks and cleanup OK');
+  }
+
+  // 10. META 作成直後に停止（書き込み前） -> 次回保存時に自動復旧
+  {
+    const input = makeInput([{ model: 'EVO Lite', minutes: 7 }]);
+    const env = makeEnvironment('01:00');
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    // METAはあるがまだSpreadsheetには書かれていない
+    const meta = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    assert(meta && meta.state !== 'complete' && meta.stage === 'PLAN_READY');
+
+    // 新規保存を実行：裏で前回のinputが自動復旧され、今回の保存も完了
+    const next = makeInput([{ model: 'EVO Lite', minutes: 8 }]);
+    env.context.finishAircraft(next);
+    assertCommitComplete(env, input.session.draftId);
+    assertCommitComplete(env, next.session.draftId);
+    // 累計: 60 + 7 + 8 = 75分
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 75);
+    reports.push('ROLLFORWARD auto-recovery after META creation OK');
+  }
+
+  // 11. 未完了本番draftが2件存在（古い順に両方安全復旧可能）
+  // 本番A before=100→110, 本番B before=110→120 -> A->Bの順で成功
+  {
+    const env = makeEnvironment('01:40'); // 100分
+    const inputA = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 1 }]);
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(inputA); } catch (e) {}
+    clearFault(env);
+
+    // draft B を baselineB (A完了後の110分前提、Aのblock 1使用済み前提) で作成してenvへ注入
+    const baselineB = makeEnvironment('01:50'); // 110分
+    const dateSheetB = baselineB.ss.add(makeTemplate());
+    dateSheetB.name = '2026.9.6';
+    markUsed(dateSheetB, 1); // block 1使用済みにすることでBはblock 2に割り当てられる
+    const inputB = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 2 }]);
+    installOneShotFault(baselineB, 'AFTER_PLAN_PERSISTED');
+    try { baselineB.context.finishAircraft(inputB); } catch (e) {}
+    clearFault(baselineB);
+
+    for (const [key, val] of baselineB.props.entries()) {
+      if (key.includes(inputB.session.draftId)) env.props.set(key, val);
+    }
+    const metaA = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`));
+    metaA.createdAt = new Date(Date.now() - 2000).toISOString();
+    env.props.set(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`, JSON.stringify(metaA));
+
+    // これで env には：
+    // - draft A: pending (createdAt: -2000ms, battery: 1, block: 1, before=100, intended=110)
+    // - draft B: pending (createdAt: now, battery: 2, block: 2, before=110, intended=120)
+    // 現在のSpreadsheet累計: 100
+
+    // 新規運航 C を保存！
+    const inputC = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 3 }]);
+    env.context.finishAircraft(inputC);
+
+    // A, B, C すべて complete
+    assertCommitComplete(env, inputA.session.draftId);
+    assertCommitComplete(env, inputB.session.draftId);
+    assertCommitComplete(env, inputC.session.draftId);
+    // 最終累計: 100 + 10 + 10 + 5 = 125分 (02:05)
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 125);
+    reports.push('QUEUE sequential auto-recovery A(100->110) then B(110->120) then C OK');
+  }
+
+  // 12. 本番A before=100→110, 本番B before=100→115 -> A完了後Bをconflictで停止
+  {
+    const env = makeEnvironment('01:40'); // 100分
+    const inputA = makeInput([{ model: 'EVO Lite', minutes: 10 }]);
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(inputA); } catch (e) {}
+    clearFault(env);
+
+    // draft B (初期値100のままで作成されたplan: before=100, intended=115)
+    const baselineB = makeEnvironment('01:40'); // 100分
+    const inputB = makeInput([{ model: 'EVO Lite', minutes: 15 }]);
+    installOneShotFault(baselineB, 'AFTER_PLAN_PERSISTED');
+    try { baselineB.context.finishAircraft(inputB); } catch (e) {}
+    clearFault(baselineB);
+
+    for (const [key, val] of baselineB.props.entries()) {
+      if (key.includes(inputB.session.draftId)) env.props.set(key, val);
+    }
+    const metaA = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`));
+    metaA.createdAt = new Date(Date.now() - 2000).toISOString();
+    env.props.set(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`, JSON.stringify(metaA));
+
+    // これで env には：
+    // - draft A: pending (before=100, intended=110)
+    // - draft B: pending (before=100, intended=115)
+    // A完了後、現在値は110になるため、Bのbefore(100)ともintended(115)とも一致しない
+
+    // 新規運航 C を保存しようとする
+    const inputC = makeInput([{ model: 'EVO Lite', minutes: 5 }]);
+    let blocked = false;
+    try { env.context.finishAircraft(inputC); } catch (e) { blocked = true; }
+    assert(blocked, 'new save must be blocked because B conflicts with A completion');
+
+    // Aはcompleteされたが、Bはconflictで停止され、Cは保存されていないこと
+    assertCommitComplete(env, inputA.session.draftId);
+    const metaB = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputB.session.draftId}_META`));
+    assert(metaB.state !== 'complete', 'B must remain incomplete');
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${inputC.session.draftId}_META`), 'C must not be stored');
+    reports.push('QUEUE A completes then B conflict stops new save OK');
+  }
+
+  // 13. AとBが同じBAT行を異なるcommitIdで対象にしている -> 停止
+  {
+    const env = makeEnvironment('01:40');
+    const inputA = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 1 }]);
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(inputA); } catch (e) {}
+    clearFault(env);
+
+    // draft B も同じ初期状態から BAT_1 の13行目を対象とするplanを作成
+    const baselineB = makeEnvironment('01:40');
+    const inputB = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 1 }]);
+    installOneShotFault(baselineB, 'AFTER_PLAN_PERSISTED');
+    try { baselineB.context.finishAircraft(inputB); } catch (e) {}
+    clearFault(baselineB);
+
+    for (const [key, val] of baselineB.props.entries()) {
+      if (key.includes(inputB.session.draftId)) env.props.set(key, val);
+    }
+    const metaA = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`));
+    metaA.createdAt = new Date(Date.now() - 2000).toISOString();
+    env.props.set(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`, JSON.stringify(metaA));
+
+    // 新規運航 C 保存時、Aが復旧された後、Bの直前再診断でBAT Metadata/セル競合が検知され停止すること
+    const inputC = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 2 }]);
+    let blocked = false;
+    try { env.context.finishAircraft(inputC); } catch (e) { blocked = true; }
+    assert(blocked, 'same BAT row between A and B must cause conflict stop');
+    reports.push('QUEUE same BAT row conflict stops new save OK');
+  }
+
+  // 14. A complete 後に B を必ず再診断していることの検証
+  {
+    const env = makeEnvironment('01:40');
+    const inputA = makeInput([{ model: 'EVO Lite', minutes: 10 }]);
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(inputA); } catch (e) {}
+    clearFault(env);
+
+    // draft B は A完了後の110分前提で正常作成
+    const baselineB = makeEnvironment('01:50');
+    const inputB = makeInput([{ model: 'EVO Lite', minutes: 10 }]);
+    installOneShotFault(baselineB, 'AFTER_PLAN_PERSISTED');
+    try { baselineB.context.finishAircraft(inputB); } catch (e) {}
+    clearFault(baselineB);
+
+    for (const [key, val] of baselineB.props.entries()) {
+      if (key.includes(inputB.session.draftId)) env.props.set(key, val);
+    }
+    const metaA = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`));
+    metaA.createdAt = new Date(Date.now() - 2000).toISOString();
+    env.props.set(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`, JSON.stringify(metaA));
+
+    // A完了直後にBの前提が壊れるように、Aの復旧処理完了フックでBの対象セルを第三者変更
+    vm.runInContext(`
+      const origFlush = SpreadsheetApp.flush;
+      let flushedCount = 0;
+      SpreadsheetApp.flush = function() {
+        origFlush();
+        flushedCount++;
+        // A完了のflushのタイミングで、原本累計を故意に不整合値に変更
+        if (flushedCount === 5) {
+          spreadsheet_().getSheetByName('点検整備記録_EVO Lite_原本').getRange(6, 7).setValue('03:00');
+        }
+      };
+    `, env.context);
+
+    // 新規運航 C 保存時、Aは完了するが、Bの直前再診断で03:00 != 110/120が検知されて停止すること
+    const inputC = makeInput([{ model: 'EVO Lite', minutes: 5 }]);
+    let blocked = false;
+    try { env.context.finishAircraft(inputC); } catch (e) { blocked = true; }
+    assert(blocked, 'B must be re-diagnosed after A and stop on conflict');
+    reports.push('QUEUE re-diagnosis of B after A verified OK');
+  }
+
+  // 15. 本番 pending + TEST 安全残骸
+  {
+    const env = makeEnvironment('01:00');
+    // 1. TEST運航が途中で停止（日付シート書き込み後、BAT書き込み前）
+    const testInput = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    testInput.session.purpose = 'アプリテスト';
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(testInput); } catch (e) {}
+    clearFault(env);
+    // オーナーがTESTシートを手動削除（これでTEST安全残骸が成立）
+    env.ss.deleteSheet(env.ss.getSheetByName('TEST_2026.9.6'));
+
+    // 2. 本番運航が途中で停止（安全復旧可能）
+    const normalInput = makeInput([{ model: 'EVO Lite', minutes: 10, battery: 1 }]);
+    const testMeta = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${testInput.session.draftId}_META`));
+    testMeta.createdAt = new Date(Date.now() - 3000).toISOString();
+    env.props.set(`EVO_LITE_COMMIT_V2_${testInput.session.draftId}_META`, JSON.stringify(testMeta));
+
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(normalInput); } catch (e) {}
+    clearFault(env);
+
+    // 3. 新規本番保存を実行！
+    // 期待動作：TEST安全残骸は自動整理、本番pendingは自動復旧、新規保存も完了！
+    const newInput = makeInput([{ model: 'EVO Lite', minutes: 6, battery: 2 }]);
+    env.context.finishAircraft(newInput);
+
+    // TESTのdraftは整理されて消去されていること
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${testInput.session.draftId}_META`), 'TEST debris should be discarded');
+    // 本番pendingとnewInputは両方complete
+    assertCommitComplete(env, normalInput.session.draftId);
+    assertCommitComplete(env, newInput.session.draftId);
+    // 累計: 60 + 10 + 6 = 76分
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 76);
+    reports.push('QUEUE TEST debris auto-discarded + normal pending auto-recovered OK');
+  }
+
+  // 16. 本番安全復旧可能 + 別の本番 conflict
+  {
+    const env = makeEnvironment('01:00');
+    // draft A: 本番で安全復旧可能
+    const inputA = makeInput([{ model: 'EVO Lite', minutes: 5 }]);
+    installOneShotFault(env, 'AFTER_PLAN_PERSISTED');
+    try { env.context.finishAircraft(inputA); } catch (e) {}
+    clearFault(env);
+
+    // draft B: baselineBで作成して注入し、DATA chunkを1個削除して破損・不整合にする
+    const baselineB = makeEnvironment('01:05');
+    const inputB = makeInput([{ model: 'EVO Lite', minutes: 8 }]);
+    installOneShotFault(baselineB, 'AFTER_PLAN_PERSISTED');
+    try { baselineB.context.finishAircraft(inputB); } catch (e) {}
+    clearFault(baselineB);
+
+    for (const [key, val] of baselineB.props.entries()) {
+      if (key.includes(inputB.session.draftId)) env.props.set(key, val);
+    }
+    const metaA = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`));
+    metaA.createdAt = new Date(Date.now() - 2000).toISOString();
+    env.props.set(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`, JSON.stringify(metaA));
+
+    // BのDATA_0を削除して破損状態にする
+    env.props.delete(`EVO_LITE_COMMIT_V2_${inputB.session.draftId}_DATA_0`);
+
+    // 新規保存 C を実行すると、Bの不整合により安全停止すること
+    const inputC = makeInput([{ model: 'EVO Lite', minutes: 3 }]);
+    let blocked = false;
+    try { env.context.finishAircraft(inputC); } catch (e) { blocked = true; }
+    assert(blocked, 'must block new save when any pending draft has conflict');
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${inputC.session.draftId}_META`), 'C must not be created');
+    reports.push('QUEUE 1 safe + 1 conflict stops new save safely OK');
+  }
+
   console.log(reports.join('\n'));
 }
 

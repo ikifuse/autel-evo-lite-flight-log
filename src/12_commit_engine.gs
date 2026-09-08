@@ -466,6 +466,9 @@ function finishAircraft(input) {
           if (legacyPlan.status === 'complete') return getAppState();
           throw new Error('旧方式で途中保存された運航記録があります。重複防止のため自動保存を停止しました。入力内容を保持したまま管理者へ連絡してください。');
         }
+        // 新規保存の前に、過去の未完了draftを時系列順に直前再診断しながら自動解決（TEST安全残骸の自動整理 / 本番の安全自動復旧）
+        resolvePendingCommitPlansBeforeSave_(session.draftId, spreadsheet_(), commitProperties_());
+
         const plan = buildFixedCommitPlan_(normalizedInput);
         record = storeCommitPlan_(plan, signature);
         commitFault_('AFTER_PLAN_PERSISTED');
@@ -751,6 +754,348 @@ function commitLog_(msg) {
 }
 
 /**
+ * 1件の未完了draftについて最新のSpreadsheet実状態から詳細診断を行う関数
+ * ※完全な読み取り専用であり、SpreadsheetやProperties、Cacheを1バイトも変更しません。
+ */
+function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
+  const ss = spreadsheet || spreadsheet_();
+  const props = properties || commitProperties_();
+
+  const report = {
+    draftId: meta.draftId,
+    state: meta.state,
+    stage: meta.stage,
+    lastErrorStage: meta.lastErrorStage || '(なし)',
+    createdAt: meta.createdAt || '(不明)',
+    updatedAt: meta.updatedAt || '(不明)',
+    isAppTest: false,
+    chunksComplete: false,
+    planHashMatches: false,
+    operationCounts: { intended: 0, before: 0, conflict: 0, total: 0 },
+    conflicts: [],
+    batteryMetadata: { total: 0, matched: 0, details: [] },
+    aircraftTotals: { targets: 0, matched: 0, details: [] },
+    canResumeRollForward: false,
+    safeToRecover: false,
+    safeToDiscardTest: false,
+    statusCategory: 'CANNOT_AUTO_PROCESS',
+    resumeBlockReasons: [],
+    discardBlockReasons: []
+  };
+
+  // 1. DATA chunkの読み取り確認（read-only）
+  const chunks = [];
+  let chunksMissing = false;
+  for (let i = 0; i < Number(meta.chunkCount || 0); i++) {
+    const val = props.getProperty(commitDataKey_(meta.draftId, i));
+    if (val == null) { chunksMissing = true; break; }
+    chunks.push(val);
+  }
+  report.chunksComplete = !chunksMissing && chunks.length === Number(meta.chunkCount || 0);
+
+  let plan = null;
+  if (report.chunksComplete) {
+    const fullText = chunks.join('');
+    report.planHashMatches = sha256Text_(fullText) === meta.planHash;
+    if (report.planHashMatches) {
+      try { plan = JSON.parse(fullText); } catch (e) {
+        report.resumeBlockReasons.push('保存計画JSONのパースに失敗しました');
+        report.discardBlockReasons.push('保存計画JSONのパースに失敗しました');
+      }
+    } else {
+      report.resumeBlockReasons.push('保存計画DATAのSHA-256ハッシュがMETAと一致しません');
+      report.discardBlockReasons.push('保存計画DATAのSHA-256ハッシュがMETAと一致しません');
+    }
+  } else {
+    report.resumeBlockReasons.push('保存計画DATA chunkの一部または全部が欠落しています');
+    report.discardBlockReasons.push('保存計画DATA chunkの一部または全部が欠落しています');
+  }
+
+  if (!plan) {
+    report.canResumeRollForward = false;
+    report.safeToRecover = false;
+    report.safeToDiscardTest = false;
+    report.statusCategory = 'CANNOT_AUTO_PROCESS';
+    return report;
+  }
+
+  // 運航目的の判定（アプリテストか通常か）
+  const purpose = (plan.normalizedInput && plan.normalizedInput.session) ? plan.normalizedInput.session.purpose : '';
+  report.isAppTest = isAppTestPurpose_(purpose);
+  report.purpose = purpose;
+
+  // 2. Spreadsheetの各operationの状態診断（read-only）
+  const allOps = [].concat(
+    plan.operations.date || [],
+    plan.operations.battery || [],
+    plan.operations.postflight || [],
+    plan.operations.totals || []
+  );
+  report.operationCounts.total = allOps.length;
+
+  allOps.forEach(function(op) {
+    const targetSheet = ss.getSheetByName(op.sheetName);
+    if (!targetSheet) {
+      report.operationCounts.conflict++;
+      report.conflicts.push({
+        stage: op.stage,
+        sheet: op.sheetName,
+        cell: 'row ' + op.row + ', col ' + op.col,
+        kind: op.kind,
+        reason: 'シートが存在しません：' + op.sheetName
+      });
+      report.resumeBlockReasons.push('保存先シートが存在しません：' + op.sheetName);
+      return;
+    }
+    const range = targetSheet.getRange(op.row, op.col);
+    const current = commitRangeProperty_(range, op.kind);
+
+    if (sameCommitValue_(current, op.value)) {
+      report.operationCounts.intended++;
+    } else if (sameCommitValue_(current, op.before)) {
+      report.operationCounts.before++;
+    } else {
+      report.operationCounts.conflict++;
+      report.conflicts.push({
+        stage: op.stage,
+        sheet: op.sheetName,
+        cell: range.getA1Notation(),
+        kind: op.kind,
+        before: op.before,
+        expected: op.value,
+        actual: current
+      });
+    }
+  });
+
+  // 3. BAT Developer Metadataの状態診断（read-only）
+  const batTargets = plan.batteryTargets || [];
+  report.batteryMetadata.total = batTargets.length;
+  batTargets.forEach(function(target) {
+    const matched = metadataMatches_(target, ss);
+    if (matched) {
+      report.batteryMetadata.matched++;
+    } else {
+      report.batteryMetadata.details.push({
+        sheet: target.sheetName,
+        row: target.row,
+        commitId: target.commitId,
+        matched: false
+      });
+    }
+  });
+
+  // 4. 機体累計の状態診断（read-only）
+  const totalTargets = plan.totalTargets || [];
+  report.aircraftTotals.targets = totalTargets.length;
+  if (report.isAppTest) {
+    report.aircraftTotals.note = 'アプリテストのため原本累計は更新対象外（正常）';
+  } else {
+    totalTargets.forEach(function(target) {
+      const targetSheet = ss.getSheetByName(target.sheetName);
+      if (!targetSheet) {
+        report.resumeBlockReasons.push('機体累計シートが存在しません：' + target.sheetName);
+        return;
+      }
+      const cell = targetSheet.getRange(target.row, target.col);
+      const currentTotal = cell.getDisplayValue();
+      const expectedFinal = formatHoursMinutes_(plan.finalByModel[target.model]);
+      const startVal = formatHoursMinutes_(plan.startingByModel[target.model]);
+      const isUpdated = (currentTotal === expectedFinal);
+      const isBefore = (currentTotal === startVal);
+      if (isUpdated) {
+        report.aircraftTotals.matched++;
+      } else if (!isBefore) {
+        report.resumeBlockReasons.push('機体累計セルが計画開始前とも確定予定値とも一致しません（競合）：' + target.model);
+      }
+      report.aircraftTotals.details.push({
+        model: target.model,
+        current: currentTotal,
+        start: startVal,
+        expectedFinal: expectedFinal,
+        isUpdated: isUpdated
+      });
+    });
+  }
+
+  // 5. BAT Developer Metadata の競合チェック（別draftとの矛盾がないか）
+  (plan.batteryTargets || []).forEach(function(target) {
+    const bSheet = ss.getSheetByName(target.sheetName);
+    if (!bSheet) return;
+    const bRange = bSheet.getRange(target.row, 1, 1, 8);
+    if (typeof bRange.getDeveloperMetadata === 'function') {
+      const metas = bRange.getDeveloperMetadata().filter(function(item) {
+        return item.getKey() === BATTERY_COMMIT_METADATA_KEY;
+      });
+      const hasOtherMeta = metas.some(function(item) {
+        return item.getValue() !== target.commitId;
+      });
+      if (hasOtherMeta) {
+        report.resumeBlockReasons.push('BAT履歴行に別の保存計画の識別子が付与されています（競合）：' + target.sheetName + ' ' + target.row + '行');
+      }
+    }
+  });
+
+  // 6. ロールフォワード再開・安全復旧可能かどうかの厳格判定
+  if (report.operationCounts.conflict > 0) {
+    report.resumeBlockReasons.push('セル競合（conflict）が ' + report.operationCounts.conflict + ' 件検出されました');
+  }
+  report.safeToRecover = (report.resumeBlockReasons.length === 0);
+  report.canResumeRollForward = report.safeToRecover;
+
+  // 7. TESTで安全に破棄可能かどうかの厳格判定（すべて満たす場合のみ許可）
+  const discardBlockReasons = [];
+  if (!report.isAppTest) {
+    discardBlockReasons.push('通常運航の保存計画は自動破棄できません（原本保護）');
+  }
+  if (!report.chunksComplete) {
+    discardBlockReasons.push('DATA chunkが一部欠落しています');
+  }
+  if (!report.planHashMatches) {
+    discardBlockReasons.push('保存計画のハッシュが一致しません');
+  }
+
+  // TEST日付シートがすべて削除されていること（残っている場合は通常復旧可能か確認が必要）
+  let anyDateSheetExists = false;
+  (plan.assignments || []).forEach(function(a) {
+    if (ss.getSheetByName(a.sheetName)) anyDateSheetExists = true;
+  });
+  if (anyDateSheetExists) {
+    discardBlockReasons.push('TEST日付シートがまだ存在しています');
+  }
+
+  // BAT operations の実データ書き込みチェック
+  // 当該draft由来のデータ書き込みが1セルでもあれば破棄禁止
+  let batHasRealData = false;
+  (plan.operations.battery || []).forEach(function(op) {
+    const bSheet = ss.getSheetByName(op.sheetName);
+    if (!bSheet) return;
+    const bRange = bSheet.getRange(op.row, op.col);
+    const current = commitRangeProperty_(bRange, op.kind);
+    // 空文字の予定で現在も空文字なら実データ書き込みなし
+    if (String(op.value || '').trim() === '' && String(current || '').trim() === '') return;
+    // セルの現在値が op.before と一致していれば未書き込みなので問題なし
+    if (sameCommitValue_(current, op.before)) return;
+    // それ以外（実データが書かれている、または他者により変更されている）
+    batHasRealData = true;
+    discardBlockReasons.push('BAT履歴セルに変更または書込みがあります：' + op.sheetName + ' ' + bRange.getA1Notation());
+  });
+
+  // BAT Developer Metadata の付与チェック（0件であること）
+  if (report.batteryMetadata.matched > 0) {
+    discardBlockReasons.push('BAT履歴に保存計画の識別子（Developer Metadata）が付与されています（' + report.batteryMetadata.matched + '件）');
+  }
+
+  // 機体正式累計の更新チェック（TEST運航なので更新されていないこと）
+  if (report.aircraftTotals.matched > 0) {
+    discardBlockReasons.push('機体累計が更新されています');
+  }
+
+  report.safeToDiscardTest = (
+    report.isAppTest &&
+    report.chunksComplete &&
+    report.planHashMatches &&
+    !anyDateSheetExists &&
+    !batHasRealData &&
+    report.batteryMetadata.matched === 0 &&
+    report.aircraftTotals.matched === 0 &&
+    discardBlockReasons.length === 0
+  );
+  report.discardBlockReasons = discardBlockReasons;
+
+  // 4状態の分類
+  if (report.safeToRecover) {
+    report.statusCategory = 'SAFE_TO_RECOVER';
+  } else if (report.safeToDiscardTest) {
+    report.statusCategory = 'SAFE_TO_DISCARD_TEST';
+  } else {
+    report.statusCategory = 'CANNOT_AUTO_PROCESS';
+  }
+
+  return report;
+}
+
+/**
+ * TEST保存計画の内部安全破棄ヘルパー
+ */
+function discardPendingTestPlanInternal_(draftId, meta, properties) {
+  const props = properties || commitProperties_();
+  const chunkCount = Number(meta.chunkCount || 0);
+  for (let index = 0; index < chunkCount; index++) {
+    props.deleteProperty(commitDataKey_(draftId, index));
+  }
+  props.deleteProperty(commitMetaKey_(draftId));
+}
+
+/**
+ * 新規保存前に、過去の未完了draftを時系列順に直前再診断しながら自動解決するパイプライン
+ * 1. createdAt の昇順（古い順）に整列
+ * 2. 各draftの実行直前に最新のSpreadsheet実状態で再診断（前回の結果使い回し禁止）
+ * 3. TEST安全残骸 → 自動整理して次へ
+ * 4. 本番（または実データありTEST）で100%安全復旧可能 → executeCommitPlanRollForward_ で確定復旧 → Spreadsheet.flush() で実状態同期
+ * 5. 1件でも安全条件を満たせない場合（conflict、破損、先行完了状態との矛盾等） → 即座に例外で新規保存を安全停止
+ */
+function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, properties) {
+  const ss = spreadsheet || spreadsheet_();
+  const props = properties || commitProperties_();
+  const all = props.getProperties();
+  const pendingMetas = [];
+
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
+    try {
+      const meta = JSON.parse(all[key]);
+      if (meta && meta.draftId && meta.draftId !== currentDraftId && meta.state !== 'complete') {
+        pendingMetas.push(meta);
+      }
+    } catch (ignored) {}
+  });
+
+  if (!pendingMetas.length) return [];
+
+  // createdAt の昇順（古い順）にソート
+  pendingMetas.sort(function(a, b) {
+    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return timeA - timeB;
+  });
+
+  const resolved = [];
+
+  for (let i = 0; i < pendingMetas.length; i++) {
+    const targetMeta = pendingMetas[i];
+
+    // ★重要：各draftの実行直前に必ず最新のSpreadsheet実状態で再診断（診断結果の使い回し禁止）
+    const report = diagnoseSingleCommitPlan_(targetMeta, ss, props);
+
+    if (report.safeToDiscardTest) {
+      discardPendingTestPlanInternal_(targetMeta.draftId, targetMeta, props);
+      commitLog_('保留中のTEST安全残骸を自動整理しました: ' + targetMeta.draftId);
+      resolved.push({ draftId: targetMeta.draftId, action: 'DISCARDED_TEST' });
+      continue;
+    }
+
+    if (report.safeToRecover) {
+      const record = loadCommitPlan_(targetMeta.draftId, targetMeta);
+      executeCommitPlanRollForward_(record, ss);
+      SpreadsheetApp.flush(); // ★確定直後にflushし、次draftの再診断に実状態を確実に反映
+      commitLog_('未完了の保存計画を自動復旧しました: ' + targetMeta.draftId);
+      resolved.push({ draftId: targetMeta.draftId, action: 'RECOVERED' });
+      continue;
+    }
+
+    // 1件でも安全条件を満たせない場合（conflict、破損、先行完了状態との矛盾等）：
+    // fixed commit planの勝手な書き換え・再計算は禁止。即座に新規保存を安全停止！
+    const reasons = (report.resumeBlockReasons || []).concat(report.discardBlockReasons || []);
+    const errMsg = '未完了の運航記録（' + targetMeta.draftId + '）に競合または不整合が検出されたため、安全のため保存を停止しました：' + reasons.join(' / ');
+    commitLog_('自動解決停止: ' + errMsg);
+    throw new Error(errMsg);
+  }
+
+  return resolved;
+}
+
+/**
  * 管理者用：未完了保存計画の読み取り専用診断関数
  * Apps Scriptエディタから手動実行して、現在の未完了draftの状態を診断・表示する。
  * ※完全な読み取り専用であり、SpreadsheetやProperties、Cacheを1バイトも変更しません。
@@ -777,259 +1122,15 @@ function diagnosePendingCommitPlans() {
     return [];
   }
 
+  // 古い順に診断
+  pendingDrafts.sort(function(a, b) {
+    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return timeA - timeB;
+  });
+
   const reports = pendingDrafts.map(function(meta) {
-    const report = {
-      draftId: meta.draftId,
-      state: meta.state,
-      stage: meta.stage,
-      lastErrorStage: meta.lastErrorStage || '(なし)',
-      createdAt: meta.createdAt || '(不明)',
-      updatedAt: meta.updatedAt || '(不明)',
-      isAppTest: false,
-      chunksComplete: false,
-      planHashMatches: false,
-      operationCounts: { intended: 0, before: 0, conflict: 0, total: 0 },
-      conflicts: [],
-      batteryMetadata: { total: 0, matched: 0, details: [] },
-      aircraftTotals: { targets: 0, matched: 0, details: [] },
-      canResumeRollForward: false,
-      safeToRecover: false,
-      safeToDiscardTest: false,
-      statusCategory: 'CANNOT_AUTO_PROCESS',
-      resumeBlockReasons: [],
-      discardBlockReasons: []
-    };
-
-    // 1. DATA chunkの読み取り確認（read-only）
-    const chunks = [];
-    let chunksMissing = false;
-    for (let i = 0; i < Number(meta.chunkCount || 0); i++) {
-      const val = all[commitDataKey_(meta.draftId, i)];
-      if (val == null) { chunksMissing = true; break; }
-      chunks.push(val);
-    }
-    report.chunksComplete = !chunksMissing && chunks.length === Number(meta.chunkCount || 0);
-
-    let plan = null;
-    if (report.chunksComplete) {
-      const fullText = chunks.join('');
-      report.planHashMatches = sha256Text_(fullText) === meta.planHash;
-      if (report.planHashMatches) {
-        try { plan = JSON.parse(fullText); } catch (e) {
-          report.resumeBlockReasons.push('保存計画JSONのパースに失敗しました');
-          report.discardBlockReasons.push('保存計画JSONのパースに失敗しました');
-        }
-      } else {
-        report.resumeBlockReasons.push('保存計画DATAのSHA-256ハッシュがMETAと一致しません');
-        report.discardBlockReasons.push('保存計画DATAのSHA-256ハッシュがMETAと一致しません');
-      }
-    } else {
-      report.resumeBlockReasons.push('保存計画DATA chunkの一部または全部が欠落しています');
-      report.discardBlockReasons.push('保存計画DATA chunkの一部または全部が欠落しています');
-    }
-
-    if (!plan) {
-      report.canResumeRollForward = false;
-      report.safeToRecover = false;
-      report.safeToDiscardTest = false;
-      report.statusCategory = 'CANNOT_AUTO_PROCESS';
-      return report;
-    }
-
-    // 運航目的の判定（アプリテストか通常か）
-    const purpose = (plan.normalizedInput && plan.normalizedInput.session) ? plan.normalizedInput.session.purpose : '';
-    report.isAppTest = isAppTestPurpose_(purpose);
-    report.purpose = purpose;
-
-    // 2. Spreadsheetの各operationの状態診断（read-only）
-    const allOps = [].concat(
-      plan.operations.date || [],
-      plan.operations.battery || [],
-      plan.operations.postflight || [],
-      plan.operations.totals || []
-    );
-    report.operationCounts.total = allOps.length;
-
-    allOps.forEach(function(op) {
-      const targetSheet = ss.getSheetByName(op.sheetName);
-      if (!targetSheet) {
-        report.operationCounts.conflict++;
-        report.conflicts.push({
-          stage: op.stage,
-          sheet: op.sheetName,
-          cell: 'row ' + op.row + ', col ' + op.col,
-          kind: op.kind,
-          reason: 'シートが存在しません：' + op.sheetName
-        });
-        report.resumeBlockReasons.push('保存先シートが存在しません：' + op.sheetName);
-        return;
-      }
-      const range = targetSheet.getRange(op.row, op.col);
-      const current = commitRangeProperty_(range, op.kind);
-
-      if (sameCommitValue_(current, op.value)) {
-        report.operationCounts.intended++;
-      } else if (sameCommitValue_(current, op.before)) {
-        report.operationCounts.before++;
-      } else {
-        report.operationCounts.conflict++;
-        report.conflicts.push({
-          stage: op.stage,
-          sheet: op.sheetName,
-          cell: range.getA1Notation(),
-          kind: op.kind,
-          before: op.before,
-          expected: op.value,
-          actual: current
-        });
-      }
-    });
-
-    // 3. BAT Developer Metadataの状態診断（read-only）
-    const batTargets = plan.batteryTargets || [];
-    report.batteryMetadata.total = batTargets.length;
-    batTargets.forEach(function(target) {
-      const matched = metadataMatches_(target, ss);
-      if (matched) {
-        report.batteryMetadata.matched++;
-      } else {
-        report.batteryMetadata.details.push({
-          sheet: target.sheetName,
-          row: target.row,
-          commitId: target.commitId,
-          matched: false
-        });
-      }
-    });
-
-    // 4. 機体累計の状態診断（read-only）
-    const totalTargets = plan.totalTargets || [];
-    report.aircraftTotals.targets = totalTargets.length;
-    if (report.isAppTest) {
-      report.aircraftTotals.note = 'アプリテストのため原本累計は更新対象外（正常）';
-    } else {
-      totalTargets.forEach(function(target) {
-        const targetSheet = ss.getSheetByName(target.sheetName);
-        if (!targetSheet) {
-          report.resumeBlockReasons.push('機体累計シートが存在しません：' + target.sheetName);
-          return;
-        }
-        const cell = targetSheet.getRange(target.row, target.col);
-        const currentTotal = cell.getDisplayValue();
-        const expectedFinal = formatHoursMinutes_(plan.finalByModel[target.model]);
-        const startVal = formatHoursMinutes_(plan.startingByModel[target.model]);
-        const isUpdated = (currentTotal === expectedFinal);
-        const isBefore = (currentTotal === startVal);
-        if (isUpdated) {
-          report.aircraftTotals.matched++;
-        } else if (!isBefore) {
-          report.resumeBlockReasons.push('機体累計セルが計画開始前とも確定予定値とも一致しません（競合）：' + target.model);
-        }
-        report.aircraftTotals.details.push({
-          model: target.model,
-          current: currentTotal,
-          start: startVal,
-          expectedFinal: expectedFinal,
-          isUpdated: isUpdated
-        });
-      });
-    }
-
-    // 5. BAT Developer Metadata の競合チェック（別draftとの矛盾がないか）
-    (plan.batteryTargets || []).forEach(function(target) {
-      const bSheet = ss.getSheetByName(target.sheetName);
-      if (!bSheet) return;
-      const bRange = bSheet.getRange(target.row, 1, 1, 8);
-      if (typeof bRange.getDeveloperMetadata === 'function') {
-        const metas = bRange.getDeveloperMetadata().filter(function(item) {
-          return item.getKey() === BATTERY_COMMIT_METADATA_KEY;
-        });
-        const hasOtherMeta = metas.some(function(item) {
-          return item.getValue() !== target.commitId;
-        });
-        if (hasOtherMeta) {
-          report.resumeBlockReasons.push('BAT履歴行に別の保存計画の識別子が付与されています（競合）：' + target.sheetName + ' ' + target.row + '行');
-        }
-      }
-    });
-
-    // 6. ロールフォワード再開・安全復旧可能かどうかの厳格判定
-    if (report.operationCounts.conflict > 0) {
-      report.resumeBlockReasons.push('セル競合（conflict）が ' + report.operationCounts.conflict + ' 件検出されました');
-    }
-    report.safeToRecover = (report.resumeBlockReasons.length === 0);
-    report.canResumeRollForward = report.safeToRecover;
-
-    // 7. TESTで安全に破棄可能かどうかの厳格判定（すべて満たす場合のみ許可）
-    const discardBlockReasons = [];
-    if (!report.isAppTest) {
-      discardBlockReasons.push('通常運航の保存計画は自動破棄できません（原本保護）');
-    }
-    if (!report.chunksComplete) {
-      discardBlockReasons.push('DATA chunkが一部欠落しています');
-    }
-    if (!report.planHashMatches) {
-      discardBlockReasons.push('保存計画のハッシュが一致しません');
-    }
-
-    // TEST日付シートがすべて削除されていること（残っている場合は通常復旧可能か確認が必要）
-    let anyDateSheetExists = false;
-    (plan.assignments || []).forEach(function(a) {
-      if (ss.getSheetByName(a.sheetName)) anyDateSheetExists = true;
-    });
-    if (anyDateSheetExists) {
-      discardBlockReasons.push('TEST日付シートがまだ存在しています');
-    }
-
-    // BAT operations の実データ書き込みチェック
-    // 当該draft由来のデータ書き込みが1セルでもあれば破棄禁止
-    let batHasRealData = false;
-    (plan.operations.battery || []).forEach(function(op) {
-      const bSheet = ss.getSheetByName(op.sheetName);
-      if (!bSheet) return;
-      const bRange = bSheet.getRange(op.row, op.col);
-      const current = commitRangeProperty_(bRange, op.kind);
-      // 空文字の予定で現在も空文字なら実データ書き込みなし
-      if (String(op.value || '').trim() === '' && String(current || '').trim() === '') return;
-      // セルの現在値が op.before と一致していれば未書き込みなので問題なし
-      if (sameCommitValue_(current, op.before)) return;
-      // それ以外（実データが書かれている、または他者により変更されている）
-      batHasRealData = true;
-      discardBlockReasons.push('BAT履歴セルに変更または書込みがあります：' + op.sheetName + ' ' + bRange.getA1Notation());
-    });
-
-    // BAT Developer Metadata の付与チェック（0件であること）
-    if (report.batteryMetadata.matched > 0) {
-      discardBlockReasons.push('BAT履歴に保存計画の識別子（Developer Metadata）が付与されています（' + report.batteryMetadata.matched + '件）');
-    }
-
-    // 機体正式累計の更新チェック（TEST運航なので更新されていないこと）
-    if (report.aircraftTotals.matched > 0) {
-      discardBlockReasons.push('機体累計が更新されています');
-    }
-
-    report.safeToDiscardTest = (
-      report.isAppTest &&
-      report.chunksComplete &&
-      report.planHashMatches &&
-      !anyDateSheetExists &&
-      !batHasRealData &&
-      report.batteryMetadata.matched === 0 &&
-      report.aircraftTotals.matched === 0 &&
-      discardBlockReasons.length === 0
-    );
-    report.discardBlockReasons = discardBlockReasons;
-
-    // 4状態の分類
-    if (report.safeToRecover) {
-      report.statusCategory = 'SAFE_TO_RECOVER';
-    } else if (report.safeToDiscardTest) {
-      report.statusCategory = 'SAFE_TO_DISCARD_TEST';
-    } else {
-      report.statusCategory = 'CANNOT_AUTO_PROCESS';
-    }
-
-    return report;
+    return diagnoseSingleCommitPlan_(meta, ss, properties);
   });
 
   // commitLog_ で詳細レポートを出力
@@ -1080,11 +1181,10 @@ function recoverPendingCommitPlan(draftId) {
       return { success: true, message: '前回の保存は既に完了しています。現在の運航を保存できます。' };
     }
 
-    const reports = diagnosePendingCommitPlans();
-    const report = (reports || []).find(function(r) { return r.draftId === draftId; });
-    if (!report) throw new Error('保存計画の診断情報を取得できませんでした。');
-    if (!report.safeToRecover) {
-      throw new Error('安全条件を満たさないため、自動復旧できません：' + (report.resumeBlockReasons || []).join(' / '));
+    const report = diagnoseSingleCommitPlan_(meta, spreadsheet_(), commitProperties_());
+    if (!report || !report.safeToRecover) {
+      const reasons = report ? report.resumeBlockReasons : [];
+      throw new Error('安全条件を満たさないため、自動復旧できません：' + (reasons || []).join(' / '));
     }
 
     const record = loadCommitPlan_(draftId, meta);
@@ -1112,20 +1212,13 @@ function discardPendingTestCommitPlan(draftId) {
       throw new Error('完了済みの保存計画は破棄できません。');
     }
 
-    const reports = diagnosePendingCommitPlans();
-    const report = (reports || []).find(function(r) { return r.draftId === draftId; });
-    if (!report) throw new Error('保存計画の診断情報を取得できませんでした。');
-    if (!report.safeToDiscardTest) {
-      throw new Error('安全条件を満たさないため、破棄できません：' + (report.discardBlockReasons || []).join(' / '));
+    const report = diagnoseSingleCommitPlan_(meta, spreadsheet_(), commitProperties_());
+    if (!report || !report.safeToDiscardTest) {
+      const reasons = report ? report.discardBlockReasons : [];
+      throw new Error('安全条件を満たさないため、破棄できません：' + (reasons || []).join(' / '));
     }
 
-    const properties = commitProperties_();
-    const chunkCount = Number(meta.chunkCount || 0);
-    for (let index = 0; index < chunkCount; index++) {
-      properties.deleteProperty(commitDataKey_(draftId, index));
-    }
-    properties.deleteProperty(commitMetaKey_(draftId));
-
+    discardPendingTestPlanInternal_(draftId, meta, commitProperties_());
     commitLog_('TEST未完了保存計画を安全に破棄しました: draftId=' + draftId);
 
     return {
