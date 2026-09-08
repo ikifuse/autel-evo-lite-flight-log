@@ -339,7 +339,7 @@ function run() {
     const appStart=current.indexOf('const APP_HTML =');
     assert(appStart>=0,'T15 APP_HTML marker missing');
     const currentApp=current.slice(appStart);
-    const expectedHash='bd9a3504484fe38285ffd9674fbafd214009a37c3737b471f675ef293ed9634a';
+    const expectedHash='0d50ee01e4919b05242cf0dadf0387e62fecdeef1b78c31e6bd3de9750f2f597';
     const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
     assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
     const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');

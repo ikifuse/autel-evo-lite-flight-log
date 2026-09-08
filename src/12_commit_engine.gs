@@ -465,10 +465,9 @@ function finishAircraft(input) {
     let record = null;
     let currentStage = 'PLAN_READY';
     try {
+      cleanupCommitPlans_();
       let existingMeta = readCommitMeta_(session.draftId);
       if (!existingMeta) ensureCommitPlanCapacity_(normalizedInput);
-      cleanupCommitPlans_();
-      existingMeta = readCommitMeta_(session.draftId);
       if (existingMeta) {
         if (existingMeta.signature !== signature) {
           throw new Error('同じ運航下書きIDで送信内容が変更されています。元の内容を保持したまま管理者へ連絡してください。');

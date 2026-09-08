@@ -36,7 +36,7 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.06.2';
+const APP_VERSION = '2026.09.09.1';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
@@ -971,10 +971,9 @@ function finishAircraft(input) {
     let record = null;
     let currentStage = 'PLAN_READY';
     try {
+      cleanupCommitPlans_();
       let existingMeta = readCommitMeta_(session.draftId);
       if (!existingMeta) ensureCommitPlanCapacity_(normalizedInput);
-      cleanupCommitPlans_();
-      existingMeta = readCommitMeta_(session.draftId);
       if (existingMeta) {
         if (existingMeta.signature !== signature) {
           throw new Error('同じ運航下書きIDで送信内容が変更されています。元の内容を保持したまま管理者へ連絡してください。');
@@ -3116,8 +3115,8 @@ function checkPermitExpiry(){
   var badge = el('permitExpireBadge');
   if(!badge) return;
   var exp = val('permitExpire');
-  if(!exp){ badge.innerHTML = ''; return; }
-  var today = new Date().toISOString().slice(0, 10);
+  var now = new Date();
+  var today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
   if(exp < today){
     badge.innerHTML = '<span class="alert-pill">⚠ 許可証の期限が切れています！</span>';
   } else {

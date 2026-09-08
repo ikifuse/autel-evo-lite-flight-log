@@ -187,8 +187,8 @@ function checkPermitExpiry(){
   var badge = el('permitExpireBadge');
   if(!badge) return;
   var exp = val('permitExpire');
-  if(!exp){ badge.innerHTML = ''; return; }
-  var today = new Date().toISOString().slice(0, 10);
+  var now = new Date();
+  var today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
   if(exp < today){
     badge.innerHTML = '<span class="alert-pill">⚠ 許可証の期限が切れています！</span>';
   } else {
