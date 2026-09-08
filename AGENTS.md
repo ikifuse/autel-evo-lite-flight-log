@@ -9,6 +9,7 @@
 ## 作業原則
 
 - 最初に `docs/code-map.md` から対象機能を特定する。
+- ロジック変更時は、必ず `docs/invariants.md` の不変条件に違反しないことを確認する。
 - 対象機能に記載されたファイルから読み、必要性が確認できるまで探索を広げない。
 - 無関係なリファクタリングは禁止。
 - 挙動変更を依頼されていない構造整理では、ロジックを変更しない。
@@ -31,6 +32,11 @@ Web側の詳細な対象関数は `docs/code-map.md` を確認すること。
 
 ## 仕様・ドキュメント入口
 
+- 目的別文書インデックス → `docs/index.md`
+- 壊してはいけない条件・掟 → `docs/invariants.md`
+- 全体構造・データフロー → `docs/architecture.md`
+- 機能追加・変更手順 → `docs/feature-guide.md`
+- コード対応索引 → `docs/code-map.md`
 - 全体設計・状態遷移・保存方式 → `01_ドローン運航記録_設計書.md`
 - Spreadsheet・帳票・原本仕様 → `docs/spreadsheet-spec.md`
 - テスト・障害検証仕様 → `docs/test-spec.md`
