@@ -31,7 +31,7 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.09.2';
+const APP_VERSION = '2026.09.09.3';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
@@ -65,8 +65,6 @@ const SECURITY_TEXT_LIMITS = {
   note: 1000,
   detail: 2000
 };
-const BATTERY_COMMIT_METADATA_KEY = 'EVO_FLIGHT_COMMIT';
-const DATE_COMMIT_METADATA_KEY = 'EVO_FLIGHT_DATE_COMMIT';
 const TEMPLATE_NAME = '日常点検';
 const BATTERY_SHEET_PREFIX = 'BAT_';
 const BATTERY_FIRST_ROW = 13;

@@ -17,7 +17,7 @@
 本システムのテストスイート `tests/regression.test.js` は、Google Apps Script（GAS）の各ランタイムAPI（`SpreadsheetApp`, `PropertiesService`, `CacheService`, `LockService`, `HtmlService` 等）を忠実に模擬したNode.js環境で動作する。
 
 - **対象コード**: `scripts/build.mjs` によって生成された `dist/Code.gs` を直接ロードして検証する。
-- **GAS固有API境界**: Developer Metadataのモックは、実GASが対応するSheet全体・行全体を許可し、任意セル・部分Rangeへの追加を例外にする。NodeモックのPASSだけを実GAS実行済みとは扱わない。
+- **GAS固有API境界**: モックにはGoogle Apps Script公式APIに存在するメソッドだけを実装し、`getEntireRow()`のような便利APIを追加しない。NodeモックのPASSだけを実GAS実行済みとは扱わない。
 - **検証の基本原理**:
   1. 「障害なしで1回保存した結果」と、
   2. 「処理途中で意図的に障害・例外を注入し、その後同一UUID（draftId）で再送・再試行した結果」
@@ -56,7 +56,7 @@
 | テストID | 障害注入ポイント | 再試行時の検証要件 |
 |---|---|---|
 | **T16** | 日付シート書込み直後 | 日付シートが既に書き込まれていることを検知し、二重書き込みせずBAT履歴へ進むこと |
-| **T17** | BAT_1書込み直後 | BAT_1のDeveloper Metadataを照合し、BAT_1をスキップしてBAT_2以降を書き込むこと |
+| **T17** | BAT_1書込み直後 | BAT_1の現在値がfixed planのintendedと一致することを照合し、BAT_1をスキップして残りを書き込むこと |
 | **T18** | BAT_2書込み直後 | BAT_1およびBAT_2を重複追加せず、残りのBATおよび点検へ進むこと |
 | **T19** | 飛行後点検書込み直後 | 点検記録の完了を検証し、機体累計更新フェーズへ正しく進むこと |
 | **T20** | EVO Lite累計更新後、EVO Lite+更新前 | EVO Liteの累計を二重加算せず、EVO Lite+のみを加算して整合させること |

@@ -37,13 +37,13 @@
   ▼
 [スプレッドシート書き込み (段階別ロールフォワード)]
   │  ├─ Phase 1: 日常点検シート (ヘッダー・点検・飛行行)
-  │  ├─ Phase 2: バッテリー個別履歴 (BAT_1〜7 + Developer Metadata)
+  │  ├─ Phase 2: バッテリー個別履歴 (BAT_1〜7)
   │  ├─ Phase 3: 飛行後点検記録
   │  └─ Phase 4: 機体公式累計更新 (点検整備記録原本 ※通常運航時のみ)
   │
   ▼
 [flush & 読み戻し照合]
-  │  ・全セルの値・書式・Metadataが計画値と完全一致するか確認
+  │  ・全セルの値・書式がfixed planの計画値と一致するか確認
   │
   ▼
 [完了確定 (complete)]
@@ -113,7 +113,7 @@
              ※以降の同一UUID再送には、追加書込みなしで即座に成功応答
 ```
 
-DATE ownershipは日付Sheet全体のDeveloper Metadataに `draftId|block=N` を保存し、BAT ownershipは対象行全体のDeveloper Metadataに `draftId:flightIndex` を保存する。いずれもGASが対応しない任意セル・部分RangeへのMetadata追加は行わない。
+DATEブロックとBAT行のownershipは、Script Propertiesへ永続化した同一`draftId`のfixed commit plan、active reservation、Script Lock、対象セルのbefore/intended/conflict判定を正本とする。Spreadsheet上に既存のDeveloper Metadataがあっても読み書き・削除せず、保存成功・復旧・二重書込み防止の条件には使用しない。
 
 ---
 

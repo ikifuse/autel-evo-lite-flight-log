@@ -650,7 +650,7 @@ function renderCommitDiagnosisResult(reports){
           '更新日時: ' + esc(r.updatedAt) + '\n' +
           'DATA chunks: ' + (r.chunksComplete ? '完全' : '一部欠落') + '\n' +
           'planHash一致: ' + (r.planHashMatches ? '一致' : '不一致') + '\n' +
-          'BAT付与状況: ' + r.batteryMetadata.matched + ' / ' + r.batteryMetadata.total + ' 件\n' +
+          'セル状態: intended ' + r.operationCounts.intended + ' / before ' + r.operationCounts.before + ' / conflict ' + r.operationCounts.conflict + ' 件\n' +
           '機体累計状況: ' + (r.isAppTest ? r.aircraftTotals.note : (r.aircraftTotals.matched + ' / ' + r.aircraftTotals.targets + ' 件')) + '\n' +
           (r.conflicts && r.conflicts.length > 0 ? ('\n[競合詳細]:\n' + JSON.stringify(r.conflicts, null, 2)) : '') +
         '</div>' +

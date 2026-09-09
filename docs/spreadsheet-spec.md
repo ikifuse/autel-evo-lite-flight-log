@@ -81,15 +81,13 @@
 - 保存完了後にTESTシートを手動削除しても、新しいUUIDによる次回テスト時には必要な連番TESTシートを再生成する。
 - 同じcomplete済みUUIDの再送時は、削除されたシートを再生成・復元することはせず、complete証明から正常応答のみを返す。
 
-### 4.1 日付ブロックのDeveloper Metadata
+### 4.1 日付ブロックの固定予約
 
-- 日付シートのownershipは、Google Apps Scriptが公式に対応する**Sheet-level Developer Metadata**で記録する。
-- Metadata Key: `EVO_FLIGHT_DATE_COMMIT`
-- Metadata Value: `draftId|block=1` または `draftId|block=2`
-- Metadataの所属Sheetで日付・連番・TEST/本番を、値内のblock番号でNo.1/No.2を区別する。
-- 任意の1セルやブロック部分RangeにはDeveloper Metadataを追加しない。
-- 同じdraftIdの再送では同一metadataを重複追加せず、別のactive pendingが同じブロックを所有している場合は競合停止する。
-- 完了後の手動修正・空欄整理は正常運用であり、古いcomplete済みownershipだけを理由に新規保存を妨げない。
+- 日付シートのownershipは、Script Properties上のfixed commit planに`sheetName`と`blockNo`を固定して記録する。
+- 未完了planの割当てはactive reservationとして扱い、別draftの新規割当てから除外する。
+- 同じdraftIdの再送では同じ固定セルをbefore/intendedで照合し、別ブロックを再選択しない。
+- pending中の対象セルがbefore/intended以外なら競合停止する。complete後の手動修正・空欄整理は正常運用であり、次回保存を妨げない。
+- 既存のDeveloper Metadataは削除しないが、新しい保存処理では読み書きせず、ownership判定にも使用しない。
 
 ---
 
@@ -110,15 +108,14 @@
 | G | 飛行経路・場所 | 離陸場所・飛行場所 |
 | H | 予約 | 将来拡張用・予約領域 |
 
-### 5.2 行の決定とDeveloper Metadata
+### 5.2 行の決定と固定予約
 
 - 新規保存計画の作成時に、第1列（A列）が空欄である最初の行を走査して予約する。
-- 予約した**行全体**には、Google Apps Scriptが公式に対応するentire-row Developer Metadataを付与する。A:Hだけの部分Rangeには付与しない。
-  - **Metadata Key**: `EVO_FLIGHT_COMMIT`
-  - **Metadata Value**: `draftId:flightIndex`（例: `op_xxxx:0`）
-- 保存再試行時は、同一のDeveloper Metadataを持つ行を照合し、別行への二重追記を防止する。
+- 予約した`sheetName`、`row`、`flightIndex`をfixed commit planへ保存し、active pendingの同じ行は別draftの候補から除外する。
+- 保存再試行時は行を再選択せず、固定したA:Hの各セルをbefore/intendedで照合して二重追記を防止する。
 - 表示セルの内容が保存完了後に利用者によって手動で空欄化された場合、新しいUUIDの運航はその空き行を再利用できる。
 - 保存処理中（pending状態）の手動セル変更は競合検知により安全に停止する。
+- 既存のDeveloper Metadataは保持するが、保存・診断・復旧・行選択の判断材料にはしない。
 
 ---
 

@@ -41,7 +41,7 @@
 - 主要関数: `buildFixedCommitPlan_`、`storeCommitPlan_`、`loadCommitPlan_`、`applyCommitOperations_`、`verifyCommitPlanResult_`、`finishAircraft`
 - 呼び出し関係: `finishAircraft` → 入力検証 → 固定計画作成/再読込 → 段階別上書き → flush・照合 → complete
 - 対象Spreadsheet・欄: 日付シート、BAT履歴、飛行後点検、機体公式累計の固定セル
-- 関連機能・テスト: UUID冪等性、Propertiesチャンク、Developer Metadata、T16～T23・追加障害試験
+- 関連機能・テスト: UUID冪等性、Propertiesチャンク、before/intended/conflict照合、T16～T23・追加障害試験
 
 ## 5. 日付シート生成とNo.1/No.2枠
 
@@ -77,9 +77,9 @@
 
 ## 9. BAT履歴
 
-- 担当ファイル: `src/22_battery_totals.gs`、固定行・metadata管理は `src/12_commit_engine.gs`
-- 主要関数: `fixedBatteryRow_`、`writeBatteryHistoryAt_`、`ensureBatteryMetadata_`、`metadataMatches_`
-- 呼び出し関係: `buildFixedCommitPlan_`で行固定 → `finishAircraft`で上書き・metadata・照合
+- 担当ファイル: `src/22_battery_totals.gs`、固定行・保存計画管理は `src/12_commit_engine.gs`
+- 主要関数: `fixedBatteryRow_`、`writeBatteryHistoryAt_`、`activeCommitReservations_`、`applyCommitOperations_`
+- 呼び出し関係: `buildFixedCommitPlan_`で行固定 → `finishAircraft`でbefore/intended照合・上書き・readback
 - 対象Spreadsheet・欄: `BAT_1`～`BAT_7`の個別履歴行
 - 関連機能・テスト: TEST 8・13、T17・T18、BAT行再利用・二重保存防止試験
 
