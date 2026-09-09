@@ -1515,6 +1515,275 @@ function run() {
     reports.push('QUEUE 1 safe + 1 conflict stops new save safely OK');
   }
 
+  // 17. E34 alignment問題の再現 & 同値format正規化（general vs general-left）
+  {
+    const env = makeEnvironment('01:00');
+    // 2フライト入力（1フライト目が33行目、2フライト目が34行目 -> E34が2フライト目の着陸場所セル）
+    const input = makeInput([
+      { model: 'EVO Lite', minutes: 5, battery: 1 },
+      { model: 'EVO Lite', minutes: 5, battery: 1 }
+    ]);
+    input.session.purpose = 'アプリテスト';
+
+    // 計画作成
+    const plan = env.context.buildFixedCommitPlan_(env.context.normalizedCommitInput_(input));
+    const alignOp = plan.operations.date.find(op => op.row === 34 && op.col === 5 && op.kind === 'horizontalAlignment');
+    assert(alignOp, 'alignOp for E34 must exist in plan');
+    assert(alignOp.before === 'general' || alignOp.before === '' || alignOp.before === null, 'initial align before should be general-like');
+    assert(alignOp.value === 'center', 'intended align should be center');
+
+    // GAS内部仕様：文字列書き込み後に range.getHorizontalAlignment() が 'general-left' を返す状態を再現
+    assert(env.context.sameCommitValue_('general-left', 'general', 'horizontalAlignment'), 'general-left and general must be equivalent');
+    assert(env.context.sameCommitValue_('general', 'general-left', 'horizontalAlignment'), 'general and general-left must be symmetric');
+    assert(env.context.sameCommitValue_('', 'general-left', 'horizontalAlignment'), 'empty and general-left must be equivalent');
+    assert(env.context.sameCommitValue_('center', 'center', 'horizontalAlignment'), 'center and center must be equivalent');
+
+    reports.push('ALIGNMENT E34 general vs general-left normalization equivalence OK');
+  }
+
+  // 18. 本当に異なるformat変更（right）なら競合検知 & value競合なら必ず停止
+  {
+    const env = makeEnvironment('01:00');
+    const input = makeInput([
+      { model: 'EVO Lite', minutes: 5, battery: 1 },
+      { model: 'EVO Lite', minutes: 5, battery: 1 }
+    ]);
+    input.session.purpose = 'アプリテスト';
+
+    // 途中停止（AFTER_DATE_RECORDS）
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    const meta = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    const ss = env.context.spreadsheet_();
+    const sheet = ss.getSheetByName('TEST_2026.9.6');
+
+    // 意図的に人間がE34を 'right' に変更した場合 -> 確実にconflict検知
+    sheet.getRange(34, 5).setHorizontalAlignment('right');
+    const reportFormatConflict = env.context.diagnoseSingleCommitPlan_(meta, ss);
+    assert(!reportFormatConflict.safeToRecover, 'intentional format change (right) must block recovery');
+    assert(reportFormatConflict.operationCounts.conflict > 0, 'conflict must be detected for right alignment');
+    const conflictFound = reportFormatConflict.conflicts.some(c => c.cell === 'R34C5' && c.kind === 'horizontalAlignment');
+    assert(conflictFound, 'E34 horizontalAlignment conflict must be reported');
+
+    // 元に戻して、今度はvalue競合（テキスト書き換え）を検証
+    sheet.getRange(34, 5).setHorizontalAlignment('center');
+    sheet.getRange(34, 5).setValue('別の着陸場所');
+    const reportValueConflict = env.context.diagnoseSingleCommitPlan_(meta, ss);
+    assert(!reportValueConflict.safeToRecover, 'value conflict must block recovery');
+    assert(reportValueConflict.operationCounts.conflict > 0, 'conflict must be detected for value difference');
+
+    reports.push('CONFLICT intentional format change and value difference detected safely OK');
+  }
+
+  // 19. 現在と同じ「DATE完了寸前（E34がgeneral-left） + BAT未書込み」から完全roll-forward
+  {
+    const env = makeEnvironment('01:00');
+    const input = makeInput([
+      { model: 'EVO Lite', minutes: 5, battery: 1 },
+      { model: 'EVO Lite', minutes: 5, battery: 1 }
+    ]);
+    input.session.purpose = 'アプリテスト';
+
+    // 途中停止（AFTER_DATE_RECORDS）
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(input); } catch (e) {}
+    clearFault(env);
+
+    const ss = env.context.spreadsheet_();
+    const sheet = ss.getSheetByName('TEST_2026.9.6');
+
+    // E34が general-left になっている実機状態をシミュレート
+    sheet.getRange(34, 5).setHorizontalAlignment('general-left');
+
+    const meta = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    const report = env.context.diagnoseSingleCommitPlan_(meta, ss);
+    assert(report.safeToRecover, 'must be safe to recover despite E34 being general-left');
+    assert(report.operationCounts.conflict === 0, 'conflict count must be 0');
+
+    // 手動復旧を実行（Web画面のボタン押下に相当）
+    const result = env.context.recoverPendingCommitPlan(input.session.draftId);
+    assert(result.success, 'recovery must succeed');
+
+    // 復旧後の検証：
+    // E34が center になっていること
+    assert(sheet.getRange(34, 5).getHorizontalAlignment() === 'center', 'E34 must be centered after roll-forward');
+    // BAT履歴が書き込まれ、Developer Metadataが付与されていること
+    const batSheet = ss.getSheetByName('BAT_1') || ss.getSheetByName('点検整備記録_EVO Lite_BAT_1');
+    assert(batSheet.getRange(13, 1).getValue() !== '', 'BAT history row must be written');
+    const batMeta = batSheet.getRange(13, 1, 1, 8).getDeveloperMetadata();
+    assert(batMeta.some(m => m.getKey() === 'EVO_FLIGHT_COMMIT'), 'BAT metadata must be added');
+    // DATE Developer Metadataが付与されていること
+    const dateRange = env.context.dateBlockRange_({ sheetName: 'TEST_2026.9.6', blockNo: 1 }, ss);
+    const dateMeta = dateRange.getDeveloperMetadata();
+    assert(dateMeta.some(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue() === input.session.draftId), 'DATE metadata must be added');
+    // 状態が complete になっていること
+    assertCommitComplete(env, input.session.draftId);
+
+    reports.push('ROLLFORWARD full recovery from DATE-written + E34 general-left + BAT-unwritten OK');
+  }
+
+  // 20. TESTシート再作成でも旧draft実データなしなら安全整理 & 実データありなら破棄禁止
+  {
+    const env = makeEnvironment('01:00');
+
+    // --- ケースA: 実データあり（今回Pixelで起きた状態） -> 破棄禁止 ---
+    const inputA = makeInput([{ model: 'EVO Lite', minutes: 5, battery: 1 }]);
+    inputA.session.purpose = 'アプリテスト';
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(inputA); } catch (e) {}
+    clearFault(env);
+
+    const metaA = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`));
+    const reportA = env.context.diagnoseSingleCommitPlan_(metaA, env.context.spreadsheet_());
+    // 日付シートに実データ（35件書き込み済み）があるため、破棄禁止でなければならない！
+    assert(!reportA.safeToDiscardTest, 'draft with real date data must NOT be safe to discard');
+    assert(reportA.discardBlockReasons.some(r => r.includes('実データ')), 'reason must cite real data in date sheet');
+
+    // --- ケースB: 日付シートが再作成されたが、該当ブロックに旧draftの実データもMetadataもない -> 安全破棄可能 ---
+    const ss = env.context.spreadsheet_();
+    // 日付シートを再作成（空のテンプレート状態）
+    ss.deleteSheet(ss.getSheetByName('TEST_2026.9.6'));
+    ss.add(new MockSheet('TEST_2026.9.6'));
+
+    const reportB = env.context.diagnoseSingleCommitPlan_(metaA, ss);
+    assert(reportB.safeToDiscardTest, 'draft without real date data on recreated sheet must be safe to discard');
+    assert(reportB.safeToDiscardTest && !reportB.safeToRecover, 'category should be SAFE_TO_DISCARD_TEST');
+
+    // 新規保存を実行すると、ケースBのTEST安全残骸が自動整理されること
+    const inputB = makeInput([{ model: 'EVO Lite', minutes: 8, battery: 2 }]);
+    env.context.finishAircraft(inputB);
+
+    assert(!env.props.has(`EVO_LITE_COMMIT_V2_${inputA.session.draftId}_META`), 'old test debris must be auto-discarded');
+    assertCommitComplete(env, inputB.session.draftId);
+
+    reports.push('DISCARD date real data prevents discard, empty recreated sheet allows safe discard OK');
+  }
+
+  // 21. DATE ownership metadata 導入時の同一draft再送 & 保存完了後の手動編集耐性
+  {
+    const env = makeEnvironment('01:00');
+    const input = makeInput([{ model: 'EVO Lite', minutes: 12, battery: 1 }]);
+    input.session.purpose = 'アプリテスト';
+
+    // 正常保存を完了
+    env.context.finishAircraft(input);
+    assertCommitComplete(env, input.session.draftId);
+
+    const ss = env.context.spreadsheet_();
+    const dateRange = env.context.dateBlockRange_({ sheetName: 'TEST_2026.9.6', blockNo: 1 }, ss);
+    const dateMeta = dateRange.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    assert(dateMeta.length === 1, 'exactly 1 DATE metadata should exist for block');
+    assert(dateMeta[0].getValue() === input.session.draftId, 'metadata must hold draftId');
+
+    // 同一draftIdの再送（冪等性確認）
+    const result2 = env.context.finishAircraft(input);
+    assert(result2, 'resending same draftId must return app state safely');
+    const dateMetaAfterResend = dateRange.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    assert(dateMetaAfterResend.length === 1, 'metadata must not be duplicated on resend');
+
+    // 保存完了後のSpreadsheet手動編集耐性：
+    // オーナーが後から備考や文字揃えを手動変更しても、次回の保存や診断に支障がないこと
+    const sheet = ss.getSheetByName('TEST_2026.9.6');
+    sheet.getRange(34, 5).setValue('手動修正された着陸場所');
+    sheet.getRange(34, 5).setHorizontalAlignment('right');
+
+    // 次の新しい運航を保存できること
+    const nextInput = makeInput([{ model: 'EVO Lite', minutes: 15, battery: 2 }]);
+    nextInput.session.purpose = 'アプリテスト';
+    env.context.finishAircraft(nextInput);
+    assertCommitComplete(env, nextInput.session.draftId);
+
+    reports.push('METADATA DATE ownership idempotency and manual spreadsheet edit tolerance OK');
+  }
+
+  // 22. 本番運航モード（isAppTest === false）での途中停止からの完全roll-forward実証 & value競合停止
+  {
+    const env = makeEnvironment('01:00'); // 初期累計 60分
+    // 通常の本番運航（purpose: '操縦練習' -> isAppTest === false）
+    const input = makeInput([
+      { model: 'EVO Lite', minutes: 5, battery: 1 },
+      { model: 'EVO Lite', minutes: 5, battery: 1 }
+    ]);
+    input.session.purpose = '操縦練習';
+
+    // 1. DATE書き込み直後で障害注入し途中停止
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    let stopped = false;
+    try { env.context.finishAircraft(input); } catch (e) { stopped = true; }
+    clearFault(env);
+    assert(stopped, 'production save must stop at fault injection point');
+
+    const meta = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    assert(meta.state !== 'complete', 'meta must be incomplete');
+
+    const ss = env.context.spreadsheet_();
+    const dateSheet = ss.getSheetByName('2026.9.6');
+    assert(dateSheet, 'production date sheet must exist');
+
+    // 2. Google Sheets仕様：文字列書き込み後にE34が general-left に変化した状態をシミュレート
+    dateSheet.getRange(34, 5).setHorizontalAlignment('general-left');
+
+    // 3. 診断：E34が general-left でもAPI等価として扱われ、safeToRecover === true
+    const report1 = env.context.diagnoseSingleCommitPlan_(meta, ss);
+    assert(!report1.isAppTest, 'must be recognized as production operation');
+    assert(report1.safeToRecover, 'production pending must be safe to recover with general-left alignment');
+    assert(report1.operationCounts.conflict === 0, 'no conflict should be reported');
+
+    // 4. 【本番value競合の安全停止テスト】
+    // 本番日付シートの実データ（例: 着陸場所）を手動変更した場合、確実にconflictとして停止すること
+    const origVal = dateSheet.getRange(34, 5).getValue();
+    dateSheet.getRange(34, 5).setValue('手動書き換え着陸場');
+    const reportConflict = env.context.diagnoseSingleCommitPlan_(meta, ss);
+    assert(!reportConflict.safeToRecover, 'value mismatch in production must block recovery');
+    assert(reportConflict.operationCounts.conflict > 0, 'conflict must be detected for value change');
+    assert(reportConflict.conflicts.some(c => c.cell === 'R34C5'), 'E34 conflict must be reported');
+
+    // 再送しようとしても安全にエラー停止すること
+    let blockedOnConflict = false;
+    try { env.context.finishAircraft(input); } catch (e) { blockedOnConflict = true; }
+    assert(blockedOnConflict, 'finishAircraft must refuse roll-forward when value conflict exists');
+
+    // 5. 手動書き換えを元に戻し、正式にロールフォワードを実行！
+    dateSheet.getRange(34, 5).setValue(origVal);
+    dateSheet.getRange(34, 5).setHorizontalAlignment('general-left'); // 再び general-left
+
+    // 同じdraftIdを再送して確定保存（自動roll-forward）
+    const resultState = env.context.finishAircraft(input);
+    assert(resultState, 'finishAircraft roll-forward must succeed');
+    assertCommitComplete(env, input.session.draftId);
+
+    // 6. 復旧結果の厳密検証
+    // ① E34が center に正しく更新されていること
+    assert(dateSheet.getRange(34, 5).getHorizontalAlignment() === 'center', 'E34 must be center aligned');
+    // ② DATE Developer Metadata が付与されていること
+    const dateRange = env.context.dateBlockRange_({ sheetName: '2026.9.6', blockNo: 1 }, ss);
+    const dateMetas = dateRange.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    assert(dateMetas.length === 1, 'exactly 1 DATE metadata must exist');
+    assert(dateMetas[0].getValue() === input.session.draftId, 'metadata draftId must match');
+    // ③ BAT履歴が1回だけ書き込まれ、BAT Developer Metadataが付与されていること
+    const batSheet = ss.getSheetByName('BAT_1');
+    assert(batSheet.getRange(13, 1).getValue() !== '', 'BAT row 13 must be written');
+    assert(batSheet.getRange(14, 1).getValue() !== '', 'BAT row 14 must be written');
+    assert(batSheet.getRange(15, 1).getValue() === '', 'BAT row 15 must be empty (no duplicate write)');
+    const batMetas = batSheet.getRange(13, 1, 1, 8).getDeveloperMetadata();
+    assert(batMetas.some(m => m.getKey() === 'EVO_FLIGHT_COMMIT'), 'BAT metadata must be added');
+    // ④ 本番なので機体正式原本累計が正確に1回だけ更新されていること（60分 + 10分 = 70分 -> 01:10）
+    const officialTotalMinutes = env.context.aircraftTotalMinutes_('EVO Lite');
+    assert(officialTotalMinutes === 70, `official total minutes must be 70, got ${officialTotalMinutes}`);
+    const masterCellVal = ss.getSheetByName('点検整備記録_EVO Lite_原本').getRange(6, 7).getDisplayValue();
+    assert(masterCellVal === '01:10', `master sheet display value must be 01:10, got ${masterCellVal}`);
+
+    // 7. 【冪等性テスト】同じdraftIdをもう一度送っても二重書き込みや二重加算が起きないこと
+    const retryState = env.context.finishAircraft(input);
+    assert(retryState, 'resend complete draft must succeed safely');
+    assert(batSheet.getRange(15, 1).getValue() === '', 'BAT row 15 must remain empty');
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 70, 'official total minutes must remain 70 on resend');
+
+    reports.push('PRODUCTION roll-forward recovery, official totals update, value conflict stop and idempotency OK');
+  }
+
   console.log(reports.join('\n'));
 }
 

@@ -30,7 +30,31 @@ function sha256Text_(text) {
   return Utilities.base64EncodeWebSafe(digest);
 }
 
-function sameCommitValue_(left, right) { return canonicalJson_(left) === canonicalJson_(right); }
+function normalizeCommitFormatValue_(val, kind) {
+  const str = (val == null) ? '' : String(val).trim();
+  if (kind === 'horizontalAlignment') {
+    const lower = str.toLowerCase();
+    if (lower === 'general' || lower === 'general-left' || lower === 'general-right' || lower === '' || lower === 'null') {
+      return 'general';
+    }
+    return lower;
+  }
+  if (kind === 'verticalAlignment') {
+    const lower = str.toLowerCase();
+    if (lower === 'general' || lower === '' || lower === 'null') {
+      return 'bottom';
+    }
+    return lower;
+  }
+  return str;
+}
+
+function sameCommitValue_(left, right, kind) {
+  if (kind === 'horizontalAlignment' || kind === 'verticalAlignment') {
+    return normalizeCommitFormatValue_(left, kind) === normalizeCommitFormatValue_(right, kind);
+  }
+  return canonicalJson_(left) === canonicalJson_(right);
+}
 
 function recordCommitCell_(range, value, kind) {
   const sheet = range.getSheet();
@@ -324,9 +348,9 @@ function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
     if (!sheet) throw new Error('固定保存先シートが見つかりません：' + operation.sheetName);
     const range = sheet.getRange(operation.row, operation.col);
     const current = commitRangeProperty_(range, operation.kind);
-    if (sameCommitValue_(current, operation.value)) return;
+    if (sameCommitValue_(current, operation.value, operation.kind)) return;
     if (verifyOnly) throw new Error('保存後の読取確認に失敗しました：' + operation.sheetName + '!' + range.getA1Notation());
-    if (!sameCommitValue_(current, operation.before)) {
+    if (!sameCommitValue_(current, operation.before, operation.kind)) {
       throw new Error('保存対象セルが保存開始後に変更されています：' + operation.sheetName + '!' + range.getA1Notation());
     }
     if (operation.kind === 'format') range.setNumberFormat(operation.value);
@@ -338,6 +362,32 @@ function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
     else range.setValue(decodedCellValue_(operation.value));
     if (!verifyOnly) commitFault_('AFTER_' + String(operation.stage || 'WRITE').toUpperCase() + '_OP_' + operationIndex);
   });
+}
+
+function dateBlockRange_(assignment, spreadsheet) {
+  const ss = spreadsheet || spreadsheet_();
+  const sheet = ss.getSheetByName(assignment.sheetName);
+  if (!sheet) return null;
+  const block = block_(assignment.blockNo);
+  return sheet.getRange(9, block.startCol, 1, 1);
+}
+
+function dateMetadataMatches_(assignment, spreadsheet, draftId) {
+  const range = dateBlockRange_(assignment, spreadsheet);
+  if (!range) return false;
+  if (typeof range.getDeveloperMetadata !== 'function') return true;
+  return range.getDeveloperMetadata().some(function(item) {
+    return item.getKey() === DATE_COMMIT_METADATA_KEY && item.getValue() === draftId;
+  });
+}
+
+function ensureDateMetadata_(assignment, spreadsheet, draftId) {
+  const ss = spreadsheet || spreadsheet_();
+  if (dateMetadataMatches_(assignment, ss, draftId)) return;
+  const range = dateBlockRange_(assignment, ss);
+  if (range && typeof range.addDeveloperMetadata === 'function') {
+    range.addDeveloperMetadata(DATE_COMMIT_METADATA_KEY, draftId);
+  }
 }
 
 function metadataMatches_(target, spreadsheet) {
@@ -495,6 +545,9 @@ function executeCommitPlanRollForward_(record, commitSpreadsheet) {
     commitFault_('AFTER_DATE_RECORDS');
     SpreadsheetApp.flush();
     applyCommitOperations_(record.plan.operations.date, true, ss);
+    (record.plan.assignments || []).forEach(function(assignment) {
+      ensureDateMetadata_(assignment, ss, record.meta.draftId);
+    });
     setCommitProgress_(record, 'writing', currentStage);
 
     currentStage = 'BAT_HISTORY_WRITTEN';
@@ -850,9 +903,9 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     const range = targetSheet.getRange(op.row, op.col);
     const current = commitRangeProperty_(range, op.kind);
 
-    if (sameCommitValue_(current, op.value)) {
+    if (sameCommitValue_(current, op.value, op.kind)) {
       report.operationCounts.intended++;
-    } else if (sameCommitValue_(current, op.before)) {
+    } else if (sameCommitValue_(current, op.before, op.kind)) {
       report.operationCounts.before++;
     } else {
       report.operationCounts.conflict++;
@@ -955,14 +1008,47 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     discardBlockReasons.push('保存計画のハッシュが一致しません');
   }
 
-  // TEST日付シートがすべて削除されていること（残っている場合は通常復旧可能か確認が必要）
-  let anyDateSheetExists = false;
-  (plan.assignments || []).forEach(function(a) {
-    if (ss.getSheetByName(a.sheetName)) anyDateSheetExists = true;
+  // DATE operations / Developer Metadata の実データ書き込みチェック
+  // （TESTシートが存在していても、該当ブロックに実データ書き込みもMetadataもなければ安全破棄可能）
+  let dateHasRealData = false;
+  (plan.assignments || []).forEach(function(assignment) {
+    const dSheet = ss.getSheetByName(assignment.sheetName);
+    if (!dSheet) return;
+
+    // ① DATE Developer Metadata チェック（当該draftまたは別draftのメタデータがあるか）
+    const dRange = dateBlockRange_(assignment, ss);
+    if (dRange && typeof dRange.getDeveloperMetadata === 'function') {
+      const metas = dRange.getDeveloperMetadata().filter(function(item) {
+        return item.getKey() === DATE_COMMIT_METADATA_KEY;
+      });
+      if (metas.length > 0) {
+        dateHasRealData = true;
+        discardBlockReasons.push('日付シートに保存計画の識別子（Developer Metadata）が付与されています：' + assignment.sheetName);
+        return;
+      }
+    }
+
+    // ② DATE operations の実データチェック（実データ書き込みが1セルでもあれば破棄禁止）
+    const dateOps = (plan.operations.date || []).filter(function(op) {
+      return op.sheetName === assignment.sheetName;
+    });
+    dateOps.forEach(function(op) {
+      if (dateHasRealData) return;
+      const cellRange = dSheet.getRange(op.row, op.col);
+      const current = commitRangeProperty_(cellRange, op.kind);
+      // 空文字の予定で現在も空文字なら実データ書き込みなし
+      if (String(op.value || '').trim() === '' && String(current || '').trim() === '') return;
+      // セルの現在値が空（未入力）なら実データ書き込みは存在しない
+      if (String(current || '').trim() === '') return;
+      // セルの現在値が op.before と一致していれば未書き込みなので問題なし
+      if (sameCommitValue_(current, op.before, op.kind)) return;
+      // 書式設定のみの差で実データ（値）が未入力なら実データ書き込みとみなさない
+      if (op.kind !== 'value' && op.kind !== 'text' && String(cellRange.getValue() || '').trim() === '') return;
+
+      dateHasRealData = true;
+      discardBlockReasons.push('日付シートに対象保存計画の実データ書込みが存在します：' + op.sheetName + ' ' + cellRange.getA1Notation());
+    });
   });
-  if (anyDateSheetExists) {
-    discardBlockReasons.push('TEST日付シートがまだ存在しています');
-  }
 
   // BAT operations の実データ書き込みチェック
   // 当該draft由来のデータ書き込みが1セルでもあれば破棄禁止
@@ -974,8 +1060,10 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     const current = commitRangeProperty_(bRange, op.kind);
     // 空文字の予定で現在も空文字なら実データ書き込みなし
     if (String(op.value || '').trim() === '' && String(current || '').trim() === '') return;
+    // セルの現在値が空（未入力）なら実データ書き込みは存在しない
+    if (String(current || '').trim() === '') return;
     // セルの現在値が op.before と一致していれば未書き込みなので問題なし
-    if (sameCommitValue_(current, op.before)) return;
+    if (sameCommitValue_(current, op.before, op.kind)) return;
     // それ以外（実データが書かれている、または他者により変更されている）
     batHasRealData = true;
     discardBlockReasons.push('BAT履歴セルに変更または書込みがあります：' + op.sheetName + ' ' + bRange.getA1Notation());
@@ -995,7 +1083,7 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     report.isAppTest &&
     report.chunksComplete &&
     report.planHashMatches &&
-    !anyDateSheetExists &&
+    !dateHasRealData &&
     !batHasRealData &&
     report.batteryMetadata.matched === 0 &&
     report.aircraftTotals.matched === 0 &&
