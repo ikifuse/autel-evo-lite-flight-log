@@ -113,6 +113,8 @@
              ※以降の同一UUID再送には、追加書込みなしで即座に成功応答
 ```
 
+DATE ownershipは日付Sheet全体のDeveloper Metadataに `draftId|block=N` を保存し、BAT ownershipは対象行全体のDeveloper Metadataに `draftId:flightIndex` を保存する。いずれもGASが対応しない任意セル・部分RangeへのMetadata追加は行わない。
+
 ---
 
 ## 4. 関連仕様書へのリンク

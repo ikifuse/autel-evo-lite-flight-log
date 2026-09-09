@@ -52,12 +52,18 @@ class MockRange {
   setVerticalAlignment(alignment) { this.sheet.verticalAlignments[`${this.row}|${this.col}`] = alignment; return this; }
   getWrap() { return this.sheet.wraps[`${this.row}|${this.col}`] || false; }
   setWrap(wrap) { this.sheet.wraps[`${this.row}|${this.col}`] = !!wrap; return this; }
+  getEntireRow() { return new MockRange(this.sheet, this.row, 1, this.numRows, this.sheet.getMaxColumns()); }
   addDeveloperMetadata(key, value) {
-    this.sheet.metadata.push({ row:this.row, col:this.col, rows:this.numRows, cols:this.numCols, key, value });
+    const wholeRow = this.col === 1 && this.numCols === this.sheet.getMaxColumns();
+    const wholeColumn = this.row === 1 && this.numRows === this.sheet.getMaxRows();
+    if (!wholeRow && !wholeColumn) {
+      throw new Error('Adding developer metadata to arbitrary ranges is not currently supported.');
+    }
+    this.sheet.metadata.push({ scope:wholeRow ? 'ROW' : 'COLUMN', row:this.row, col:this.col, rows:this.numRows, cols:this.numCols, key, value });
     return this;
   }
   getDeveloperMetadata() {
-    return this.sheet.metadata.filter(item => item.row === this.row && item.col === this.col && item.rows === this.numRows && item.cols === this.numCols)
+    return this.sheet.metadata.filter(item => item.scope !== 'SHEET' && item.row === this.row && item.col === this.col && item.rows === this.numRows && item.cols === this.numCols)
       .map(item => ({ getKey:()=>item.key, getValue:()=>item.value }));
   }
   getMergedRanges() {
@@ -75,7 +81,16 @@ class MockSheet {
   getRange(row, col, numRows, numCols) { return new MockRange(this, row, col, numRows, numCols); }
   getDataRange() { return new MockRange(this, 1, 1, this.data.length, this.data[0].length); }
   getLastRow() { return this.data.length; }
+  getMaxRows() { return this.data.length; }
   getMaxColumns() { return this.data[0].length; }
+  addDeveloperMetadata(key, value) {
+    this.metadata.push({ scope:'SHEET', key, value });
+    return this;
+  }
+  getDeveloperMetadata() {
+    return this.metadata.filter(item => item.scope === 'SHEET')
+      .map(item => ({ getKey:()=>item.key, getValue:()=>item.value }));
+  }
   copyTo(ss) {
     const copy = new MockSheet('Copy ' + Date.now() + Math.random(), this.data.length, this.data[0].length);
     copy.data = this.data.map(row => row.slice()); copy.merges = this.merges.map(m => ({...m})); copy.formats = {...this.formats}; copy.fontSizes = {...this.fontSizes}; copy.horizontalAlignments = {...this.horizontalAlignments}; copy.verticalAlignments = {...this.verticalAlignments}; copy.wraps = {...this.wraps}; copy.formulas = {...this.formulas}; copy.metadata = this.metadata.map(m => ({...m})); ss.add(copy); return copy;
@@ -882,11 +897,11 @@ function run() {
     const first=makeInput([{model:'EVO Lite',minutes:5,battery:3}]); first.session.purpose='アプリテスト';
     e.context.finishAircraft(first);
     const batterySheet=e.ss.getSheetByName('BAT_3');
-    const oldMetadata=batterySheet.getRange(13,1,1,8).getDeveloperMetadata().map(item=>item.getValue());
+    const oldMetadata=batterySheet.getRange(13,1).getEntireRow().getDeveloperMetadata().map(item=>item.getValue());
     batterySheet.getRange(13,1,1,8).setValues([Array(8).fill('')]);
     const second=makeInput([{model:'EVO Lite',minutes:6,battery:3}]); second.session.purpose='アプリテスト';
     e.context.finishAircraft(second);
-    const metadata=batterySheet.getRange(13,1,1,8).getDeveloperMetadata().map(item=>item.getValue());
+    const metadata=batterySheet.getRange(13,1).getEntireRow().getDeveloperMetadata().map(item=>item.getValue());
     assert(value(batterySheet,13,3)==='アプリテスト' && value(batterySheet,13,4)===6,'cleared BAT row was not reused');
     assert(oldMetadata.length===1 && metadata.includes(oldMetadata[0]) && metadata.includes(second.session.draftId+':0'),'Developer Metadata blocked safe BAT row reuse');
     assert(e.context.aircraftTotalMinutes_('EVO Lite')===750,'BAT row reuse changed official total');
@@ -1041,7 +1056,7 @@ function run() {
     // BAT履歴が記録され、Developer Metadataが付与されていること
     const batSheet = env.ss.getSheetByName('BAT_2');
     assert(value(batSheet, 13, 3) === 'アプリテスト' && value(batSheet, 13, 4) === 8, 'BAT record missing in app test');
-    const meta = batSheet.getRange(13, 1, 1, 8).getDeveloperMetadata();
+    const meta = batSheet.getRange(13, 1).getEntireRow().getDeveloperMetadata();
     assert(meta.length === 1 && meta[0].getValue() === draftId + ':0', 'BAT metadata missing in app test');
     // 機体正式累計は更新されないこと
     assert(env.context.aircraftTotalMinutes_('EVO Lite') === 750, 'app test must not modify official total');
@@ -1612,12 +1627,12 @@ function run() {
     // BAT履歴が書き込まれ、Developer Metadataが付与されていること
     const batSheet = ss.getSheetByName('BAT_1') || ss.getSheetByName('点検整備記録_EVO Lite_BAT_1');
     assert(batSheet.getRange(13, 1).getValue() !== '', 'BAT history row must be written');
-    const batMeta = batSheet.getRange(13, 1, 1, 8).getDeveloperMetadata();
+    const batMeta = batSheet.getRange(13, 1).getEntireRow().getDeveloperMetadata();
     assert(batMeta.some(m => m.getKey() === 'EVO_FLIGHT_COMMIT'), 'BAT metadata must be added');
     // DATE Developer Metadataが付与されていること
-    const dateRange = env.context.dateBlockRange_({ sheetName: 'TEST_2026.9.6', blockNo: 1 }, ss);
-    const dateMeta = dateRange.getDeveloperMetadata();
-    assert(dateMeta.some(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue() === input.session.draftId), 'DATE metadata must be added');
+    const dateSheet = ss.getSheetByName('TEST_2026.9.6');
+    const dateMeta = dateSheet.getDeveloperMetadata();
+    assert(dateMeta.some(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue() === input.session.draftId + '|block=1'), 'DATE sheet metadata must identify draft and block');
     // 状態が complete になっていること
     assertCommitComplete(env, input.session.draftId);
 
@@ -1672,15 +1687,15 @@ function run() {
     assertCommitComplete(env, input.session.draftId);
 
     const ss = env.context.spreadsheet_();
-    const dateRange = env.context.dateBlockRange_({ sheetName: 'TEST_2026.9.6', blockNo: 1 }, ss);
-    const dateMeta = dateRange.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    const dateSheet = ss.getSheetByName('TEST_2026.9.6');
+    const dateMeta = dateSheet.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue().endsWith('|block=1'));
     assert(dateMeta.length === 1, 'exactly 1 DATE metadata should exist for block');
-    assert(dateMeta[0].getValue() === input.session.draftId, 'metadata must hold draftId');
+    assert(dateMeta[0].getValue() === input.session.draftId + '|block=1', 'metadata must hold draftId and block number');
 
     // 同一draftIdの再送（冪等性確認）
     const result2 = env.context.finishAircraft(input);
     assert(result2, 'resending same draftId must return app state safely');
-    const dateMetaAfterResend = dateRange.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    const dateMetaAfterResend = dateSheet.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue().endsWith('|block=1'));
     assert(dateMetaAfterResend.length === 1, 'metadata must not be duplicated on resend');
 
     // 保存完了後のSpreadsheet手動編集耐性：
@@ -1758,16 +1773,15 @@ function run() {
     // ① E34が center に正しく更新されていること
     assert(dateSheet.getRange(34, 5).getHorizontalAlignment() === 'center', 'E34 must be center aligned');
     // ② DATE Developer Metadata が付与されていること
-    const dateRange = env.context.dateBlockRange_({ sheetName: '2026.9.6', blockNo: 1 }, ss);
-    const dateMetas = dateRange.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    const dateMetas = dateSheet.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue().endsWith('|block=1'));
     assert(dateMetas.length === 1, 'exactly 1 DATE metadata must exist');
-    assert(dateMetas[0].getValue() === input.session.draftId, 'metadata draftId must match');
+    assert(dateMetas[0].getValue() === input.session.draftId + '|block=1', 'metadata draftId and block must match');
     // ③ BAT履歴が1回だけ書き込まれ、BAT Developer Metadataが付与されていること
     const batSheet = ss.getSheetByName('BAT_1');
     assert(batSheet.getRange(13, 1).getValue() !== '', 'BAT row 13 must be written');
     assert(batSheet.getRange(14, 1).getValue() !== '', 'BAT row 14 must be written');
     assert(batSheet.getRange(15, 1).getValue() === '', 'BAT row 15 must be empty (no duplicate write)');
-    const batMetas = batSheet.getRange(13, 1, 1, 8).getDeveloperMetadata();
+    const batMetas = batSheet.getRange(13, 1).getEntireRow().getDeveloperMetadata();
     assert(batMetas.some(m => m.getKey() === 'EVO_FLIGHT_COMMIT'), 'BAT metadata must be added');
     // ④ 本番なので機体正式原本累計が正確に1回だけ更新されていること（60分 + 10分 = 70分 -> 01:10）
     const officialTotalMinutes = env.context.aircraftTotalMinutes_('EVO Lite');
@@ -1782,6 +1796,147 @@ function run() {
     assert(env.context.aircraftTotalMinutes_('EVO Lite') === 70, 'official total minutes must remain 70 on resend');
 
     reports.push('PRODUCTION roll-forward recovery, official totals update, value conflict stop and idempotency OK');
+  }
+
+  // 23. 実GASのDeveloper Metadata location制約をモックでも強制する
+  {
+    const env = makeEnvironment();
+    const sheet = env.context.spreadsheet_().getSheetByName('BAT_1');
+    let cellRejected = false;
+    let partialRowRejected = false;
+    try { sheet.getRange(13, 1).addDeveloperMetadata('INVALID', 'cell'); } catch (error) { cellRejected = true; }
+    try { sheet.getRange(13, 1, 1, 8).addDeveloperMetadata('INVALID', 'partial'); } catch (error) { partialRowRejected = true; }
+    assert(cellRejected && partialRowRejected, 'mock must reject arbitrary-range Developer Metadata like real GAS');
+    sheet.getRange(13, 1).getEntireRow().addDeveloperMetadata('ROW_OK', 'row');
+    sheet.addDeveloperMetadata('SHEET_OK', 'sheet');
+    assert(sheet.getRange(13, 1).getEntireRow().getDeveloperMetadata().some(m => m.getKey() === 'ROW_OK'), 'entire-row metadata must be supported');
+    assert(sheet.getDeveloperMetadata().some(m => m.getKey() === 'SHEET_OK'), 'sheet-level metadata must be supported');
+    reports.push('GAS METADATA scope enforcement: arbitrary range rejected, row/sheet accepted OK');
+  }
+
+  // 24. No.1/No.2をSheet-level metadataの値で区別し、BATはentire-rowへ付与する
+  {
+    const env = makeEnvironment('01:00');
+    const input = makeInput(Array.from({ length: 8 }, (_, i) => ({ model:'EVO Lite', minutes:1, battery:(i % 7) + 1 })));
+    input.session.purpose = 'アプリテスト';
+    env.context.finishAircraft(input);
+
+    const ss = env.context.spreadsheet_();
+    const dateSheet = ss.getSheetByName('TEST_2026.9.6');
+    const dateMetas = dateSheet.getDeveloperMetadata().filter(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT');
+    assert(dateMetas.length === 2, 'one DATE sheet metadata entry per used block is required');
+    assert(dateMetas.some(m => m.getValue() === input.session.draftId + '|block=1'), 'No.1 ownership metadata is missing');
+    assert(dateMetas.some(m => m.getValue() === input.session.draftId + '|block=2'), 'No.2 ownership metadata is missing');
+
+    const bat1 = ss.getSheetByName('BAT_1');
+    const batMetaRecord = bat1.metadata.find(m => m.key === 'EVO_FLIGHT_COMMIT');
+    assert(batMetaRecord && batMetaRecord.scope === 'ROW' && batMetaRecord.cols === bat1.getMaxColumns(), 'BAT metadata must cover the entire row');
+    assertCommitComplete(env, input.session.draftId);
+    reports.push('GAS METADATA DATE sheet/block identity and BAT entire-row ownership OK');
+  }
+
+  // 25. Pixel実機で残っている同一draftId・DATE書込み済み状態を新規planなしで復旧する
+  {
+    const env = makeEnvironment('01:00');
+    const input = makeInput([
+      { model:'EVO Lite', minutes:5, battery:1 },
+      { model:'EVO Lite', minutes:5, battery:2 }
+    ]);
+    input.session.draftId = 'op_e9ea02a2-15dc-4dce-9997-0e582dc0eccb';
+    input.session.purpose = 'アプリテスト';
+
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(input); } catch (error) {}
+    clearFault(env);
+
+    const metaKey = `EVO_LITE_COMMIT_V2_${input.session.draftId}_META`;
+    const beforeMeta = JSON.parse(env.props.get(metaKey));
+    const beforeHash = beforeMeta.planHash;
+    const beforeChunks = Array.from({ length:beforeMeta.chunkCount }, (_, i) => env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_${i}`));
+    assert(beforeMeta.stage === 'DATE_RECORDS_WRITTEN', 'fixture must stop at DATE_RECORDS_WRITTEN');
+
+    const report = env.context.diagnoseSingleCommitPlan_(beforeMeta, env.context.spreadsheet_());
+    assert(report.safeToRecover && report.operationCounts.conflict === 0, 'current Pixel pending draft shape must be safe to recover');
+    assert(report.batteryMetadata.matched === 0 && report.batteryMetadata.total === 2, 'fixture must have BAT metadata 0/2');
+
+    const result = env.context.recoverPendingCommitPlan(input.session.draftId);
+    assert(result.success, 'current Pixel pending draft must recover');
+    const afterMeta = JSON.parse(env.props.get(metaKey));
+    assert(afterMeta.state === 'complete', 'current Pixel pending draft must reach complete');
+    assert(afterMeta.planHash === beforeHash, 'recovery must keep the original fixed plan hash');
+    assert(beforeChunks.every((chunk, i) => chunk && (afterMeta.chunkCount === 0 || env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_DATA_${i}`) === chunk)), 'recovery must not replace the fixed plan');
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 60, 'TEST recovery must not update official aircraft total');
+    assert(env.context.spreadsheet_().getSheetByName('BAT_1').getRange(14, 1).getValue() === '', 'BAT_1 must be written exactly once');
+    assert(env.context.spreadsheet_().getSheetByName('BAT_2').getRange(14, 1).getValue() === '', 'BAT_2 must be written exactly once');
+    reports.push('PIXEL pending draft same-plan roll-forward recovery without official total update OK');
+  }
+
+  // 26. 同じDATEブロックを別のactive pendingが所有する場合は診断段階で競合停止する
+  {
+    const env = makeEnvironment();
+    const input = makeInput([{ model:'EVO Lite', minutes:5, battery:1 }]);
+    installOneShotFault(env, 'AFTER_DATE_RECORDS');
+    try { env.context.finishAircraft(input); } catch (error) {}
+    clearFault(env);
+
+    const ss = env.context.spreadsheet_();
+    const dateSheet = ss.getSheetByName('2026.9.6');
+    const otherDraftId = 'op_00000000-0000-4000-8000-000000009999';
+    dateSheet.addDeveloperMetadata('EVO_FLIGHT_DATE_COMMIT', otherDraftId + '|block=1');
+    env.props.set(`EVO_LITE_COMMIT_V2_${otherDraftId}_META`, JSON.stringify({ draftId:otherDraftId, state:'writing' }));
+
+    const meta = JSON.parse(env.props.get(`EVO_LITE_COMMIT_V2_${input.session.draftId}_META`));
+    const report = env.context.diagnoseSingleCommitPlan_(meta, ss);
+    assert(!report.safeToRecover, 'DATE ownership conflict must block recovery');
+    assert(report.dateMetadata.details.some(item => item.blockNo === 1 && item.conflicted), 'DATE ownership conflict detail is missing');
+    reports.push('DATE ownership conflict blocks recovery before write OK');
+  }
+
+  // 27. 飛行前点検後に離陸せず終了する0飛行は、異常ではなく正常保存とする
+  for (const purpose of ['操縦練習', 'アプリテスト']) {
+    const env = makeEnvironment('01:00');
+    const input = makeInput([{ model:'EVO Lite', minutes:1, battery:1 }]);
+    input.session.flights = [];
+    input.session.purpose = purpose;
+
+    const result = env.context.finishAircraft(input);
+    assert(result, `${purpose}: zero-flight save must succeed`);
+    assertCommitComplete(env, input.session.draftId);
+
+    const ss = env.context.spreadsheet_();
+    const dateSheetName = purpose === 'アプリテスト' ? 'TEST_2026.9.6' : '2026.9.6';
+    const dateSheet = ss.getSheetByName(dateSheetName);
+    assert(dateSheet, `${purpose}: zero-flight date sheet must be created`);
+    assert(dateSheet.getDeveloperMetadata().some(m => m.getKey() === 'EVO_FLIGHT_DATE_COMMIT' && m.getValue() === input.session.draftId + '|block=1'), `${purpose}: zero-flight DATE ownership is missing`);
+    assert(ss.getSheetByName('BAT_1').getRange(13, 1).getValue() === '', `${purpose}: zero-flight must not write BAT history`);
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 60, `${purpose}: zero-flight must not change official total`);
+
+    env.context.finishAircraft(input);
+    assert(ss.getSheetByName('BAT_1').getRange(13, 1).getValue() === '', `${purpose}: zero-flight resend must remain idempotent`);
+  }
+  reports.push('ZERO-FLIGHT normal and APP TEST save, no BAT/total mutation and idempotency OK');
+
+  // 28. 2機を交互に使った場合も、機体別累計と各BAT履歴を1回だけ保存する
+  {
+    const env = makeEnvironment('01:00', '02:00');
+    const input = makeInput([
+      { model:'EVO Lite', minutes:3, battery:1 },
+      { model:'EVO Lite+', minutes:4, battery:2 },
+      { model:'EVO Lite', minutes:5, battery:3 },
+      { model:'EVO Lite+', minutes:6, battery:4 }
+    ]);
+    env.context.finishAircraft(input);
+
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 68, 'alternating operation Lite total mismatch');
+    assert(env.context.aircraftTotalMinutes_('EVO Lite+') === 130, 'alternating operation Lite+ total mismatch');
+    for (let battery = 1; battery <= 4; battery++) {
+      const sheet = env.context.spreadsheet_().getSheetByName('BAT_' + battery);
+      assert(sheet.getRange(13, 1).getValue() !== '' && sheet.getRange(14, 1).getValue() === '', `alternating operation BAT_${battery} must be written once`);
+    }
+
+    env.context.finishAircraft(input);
+    assert(env.context.aircraftTotalMinutes_('EVO Lite') === 68 && env.context.aircraftTotalMinutes_('EVO Lite+') === 130, 'alternating operation resend changed official totals');
+    reports.push('TWO-AIRCRAFT alternating flights, battery changes and idempotent totals OK');
   }
 
   console.log(reports.join('\n'));

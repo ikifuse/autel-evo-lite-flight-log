@@ -40,7 +40,7 @@ AIエージェントおよび開発者は、一般的なWeb開発のベストプ
 ## 4. バッテリー履歴（BAT）の重複防止と再利用
 
 * **条件（Rule）**:
-  * BAT履歴行にはDeveloper Metadata（`EVO_FLIGHT_COMMIT` = `draftId:flightIndex`）を付与する。
+  * BAT履歴の行全体にはDeveloper Metadata（`EVO_FLIGHT_COMMIT` = `draftId:flightIndex`）を付与する。任意セルやA:Hだけの部分Rangeには付与しない。
   * 同一UUIDの再試行時は、Metadataが一致する行を認識して別行への二重追記を防止する。
   * 利用者が保存完了後に表示セルを手動で空欄化・整理した場合、将来の新しいUUIDはその空き行を再利用できる。
 * **背景と理由（Why）**:

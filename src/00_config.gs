@@ -31,7 +31,7 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.09.1';
+const APP_VERSION = '2026.09.09.2';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';

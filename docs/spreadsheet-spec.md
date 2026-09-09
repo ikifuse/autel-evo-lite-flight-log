@@ -81,6 +81,16 @@
 - 保存完了後にTESTシートを手動削除しても、新しいUUIDによる次回テスト時には必要な連番TESTシートを再生成する。
 - 同じcomplete済みUUIDの再送時は、削除されたシートを再生成・復元することはせず、complete証明から正常応答のみを返す。
 
+### 4.1 日付ブロックのDeveloper Metadata
+
+- 日付シートのownershipは、Google Apps Scriptが公式に対応する**Sheet-level Developer Metadata**で記録する。
+- Metadata Key: `EVO_FLIGHT_DATE_COMMIT`
+- Metadata Value: `draftId|block=1` または `draftId|block=2`
+- Metadataの所属Sheetで日付・連番・TEST/本番を、値内のblock番号でNo.1/No.2を区別する。
+- 任意の1セルやブロック部分RangeにはDeveloper Metadataを追加しない。
+- 同じdraftIdの再送では同一metadataを重複追加せず、別のactive pendingが同じブロックを所有している場合は競合停止する。
+- 完了後の手動修正・空欄整理は正常運用であり、古いcomplete済みownershipだけを理由に新規保存を妨げない。
+
 ---
 
 ## 5. バッテリー個別シート（BAT_1 ～ BAT_7）仕様
@@ -103,7 +113,7 @@
 ### 5.2 行の決定とDeveloper Metadata
 
 - 新規保存計画の作成時に、第1列（A列）が空欄である最初の行を走査して予約する。
-- 予約した行には、Spreadsheet Developer Metadataを付与する。
+- 予約した**行全体**には、Google Apps Scriptが公式に対応するentire-row Developer Metadataを付与する。A:Hだけの部分Rangeには付与しない。
   - **Metadata Key**: `EVO_FLIGHT_COMMIT`
   - **Metadata Value**: `draftId:flightIndex`（例: `op_xxxx:0`）
 - 保存再試行時は、同一のDeveloper Metadataを持つ行を照合し、別行への二重追記を防止する。

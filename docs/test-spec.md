@@ -17,6 +17,7 @@
 本システムのテストスイート `tests/regression.test.js` は、Google Apps Script（GAS）の各ランタイムAPI（`SpreadsheetApp`, `PropertiesService`, `CacheService`, `LockService`, `HtmlService` 等）を忠実に模擬したNode.js環境で動作する。
 
 - **対象コード**: `scripts/build.mjs` によって生成された `dist/Code.gs` を直接ロードして検証する。
+- **GAS固有API境界**: Developer Metadataのモックは、実GASが対応するSheet全体・行全体を許可し、任意セル・部分Rangeへの追加を例外にする。NodeモックのPASSだけを実GAS実行済みとは扱わない。
 - **検証の基本原理**:
   1. 「障害なしで1回保存した結果」と、
   2. 「処理途中で意図的に障害・例外を注入し、その後同一UUID（draftId）で再送・再試行した結果」

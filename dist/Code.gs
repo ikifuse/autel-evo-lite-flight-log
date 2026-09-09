@@ -36,7 +36,7 @@
 // ============================================================================
 const SPREADSHEET_ID = '10PMEteELQRRWnqc5mVmF6tQCfxFEJEGe2LitpDhYqk8';
 const TZ = 'Asia/Tokyo';
-const APP_VERSION = '2026.09.09.1';
+const APP_VERSION = '2026.09.09.2';
 const COMMIT_RESULT_PREFIX = 'EVO_LITE_COMMIT_RESULT_';
 const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
@@ -872,37 +872,83 @@ function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
   });
 }
 
-function dateBlockRange_(assignment, spreadsheet) {
+function dateOwnershipValue_(assignment, draftId) {
+  return String(draftId) + '|block=' + Number(assignment.blockNo);
+}
+
+function dateOwnershipParts_(value) {
+  const match = String(value || '').match(/^(op_[0-9a-f-]+)\|block=([12])$/i);
+  return match ? { draftId: match[1], blockNo: Number(match[2]) } : null;
+}
+
+function dateMetadataForBlock_(assignment, spreadsheet) {
   const ss = spreadsheet || spreadsheet_();
   const sheet = ss.getSheetByName(assignment.sheetName);
-  if (!sheet) return null;
-  const block = block_(assignment.blockNo);
-  return sheet.getRange(9, block.startCol, 1, 1);
+  if (!sheet) return [];
+  if (typeof sheet.getDeveloperMetadata !== 'function') {
+    throw new Error('日付シートのDeveloper Metadataを読み取れません：' + assignment.sheetName);
+  }
+  const suffix = '|block=' + Number(assignment.blockNo);
+  return sheet.getDeveloperMetadata().filter(function(item) {
+    if (item.getKey() !== DATE_COMMIT_METADATA_KEY) return false;
+    const value = String(item.getValue() || '');
+    // ブロック番号を持たない旧・不明形式は、安全側に倒して当該ブロック候補として扱う。
+    return value.indexOf('|block=') < 0 || value.slice(-suffix.length) === suffix;
+  });
 }
 
 function dateMetadataMatches_(assignment, spreadsheet, draftId) {
-  const range = dateBlockRange_(assignment, spreadsheet);
-  if (!range) return false;
-  if (typeof range.getDeveloperMetadata !== 'function') return true;
-  return range.getDeveloperMetadata().some(function(item) {
-    return item.getKey() === DATE_COMMIT_METADATA_KEY && item.getValue() === draftId;
+  const expected = dateOwnershipValue_(assignment, draftId);
+  return dateMetadataForBlock_(assignment, spreadsheet).some(function(item) {
+    return item.getValue() === expected;
+  });
+}
+
+function dateMetadataConflict_(assignment, spreadsheet, draftId, properties) {
+  const props = properties || commitProperties_();
+  return dateMetadataForBlock_(assignment, spreadsheet).some(function(item) {
+    const parts = dateOwnershipParts_(item.getValue());
+    if (!parts) return true;
+    if (parts.draftId === draftId) return false;
+    const raw = props.getProperty(commitMetaKey_(parts.draftId));
+    if (!raw) return false;
+    try { return JSON.parse(raw).state !== 'complete'; }
+    catch (error) { return true; }
   });
 }
 
 function ensureDateMetadata_(assignment, spreadsheet, draftId) {
   const ss = spreadsheet || spreadsheet_();
   if (dateMetadataMatches_(assignment, ss, draftId)) return;
-  const range = dateBlockRange_(assignment, ss);
-  if (range && typeof range.addDeveloperMetadata === 'function') {
-    range.addDeveloperMetadata(DATE_COMMIT_METADATA_KEY, draftId);
+  const sheet = ss.getSheetByName(assignment.sheetName);
+  if (!sheet) throw new Error('固定保存先シートが見つかりません：' + assignment.sheetName);
+  if (dateMetadataConflict_(assignment, ss, draftId)) {
+    throw new Error('日付シートのNo.' + assignment.blockNo + 'に別の保存計画の識別子があります：' + assignment.sheetName);
   }
+  if (typeof sheet.addDeveloperMetadata !== 'function') {
+    throw new Error('日付シートへDeveloper Metadataを追加できません：' + assignment.sheetName);
+  }
+  // GASが公式に対応するSheet-level metadataを使用する。
+  // 所属シート + value内のblock番号でNo.1/No.2を一意に識別する。
+  sheet.addDeveloperMetadata(DATE_COMMIT_METADATA_KEY, dateOwnershipValue_(assignment, draftId));
+}
+
+function batteryMetadataRange_(target, spreadsheet) {
+  const sheet = (spreadsheet || spreadsheet_()).getSheetByName(target.sheetName);
+  if (!sheet) return null;
+  const cell = sheet.getRange(target.row, 1);
+  if (typeof cell.getEntireRow !== 'function') {
+    throw new Error('BAT履歴行全体を取得できません：' + target.sheetName + ' ' + target.row + '行');
+  }
+  return cell.getEntireRow();
 }
 
 function metadataMatches_(target, spreadsheet) {
-  const sheet = (spreadsheet || spreadsheet_()).getSheetByName(target.sheetName);
-  if (!sheet) return false;
-  const range = sheet.getRange(target.row, 1, 1, 8);
-  if (typeof range.getDeveloperMetadata !== 'function') return true;
+  const range = batteryMetadataRange_(target, spreadsheet);
+  if (!range) return false;
+  if (typeof range.getDeveloperMetadata !== 'function') {
+    throw new Error('BAT履歴のDeveloper Metadataを読み取れません：' + target.sheetName + ' ' + target.row + '行');
+  }
   return range.getDeveloperMetadata().some(function(item) {
     return item.getKey() === BATTERY_COMMIT_METADATA_KEY && item.getValue() === target.commitId;
   });
@@ -911,11 +957,13 @@ function metadataMatches_(target, spreadsheet) {
 function ensureBatteryMetadata_(target, spreadsheet) {
   const ss = spreadsheet || spreadsheet_();
   if (metadataMatches_(target, ss)) return;
-  const sheet = ss.getSheetByName(target.sheetName);
-  const range = sheet.getRange(target.row, 1, 1, 8);
-  if (typeof range.addDeveloperMetadata === 'function') {
-    range.addDeveloperMetadata(BATTERY_COMMIT_METADATA_KEY, target.commitId);
+  const range = batteryMetadataRange_(target, ss);
+  if (!range) throw new Error('BAT履歴シートが見つかりません：' + target.sheetName);
+  if (typeof range.addDeveloperMetadata !== 'function') {
+    throw new Error('BAT履歴行へDeveloper Metadataを追加できません：' + target.sheetName + ' ' + target.row + '行');
   }
+  // GASが公式に対応するentire-row metadataを使用する。A:Hの部分Rangeには付与しない。
+  range.addDeveloperMetadata(BATTERY_COMMIT_METADATA_KEY, target.commitId);
 }
 
 function verifyCommitPlanResult_(plan, spreadsheet) {
@@ -926,7 +974,12 @@ function verifyCommitPlanResult_(plan, spreadsheet) {
   (plan.batteryTargets || []).forEach(function(target) {
     if (!metadataMatches_(target, ss)) throw new Error('BAT履歴の内部識別子を確認できません：' + target.sheetName + ' ' + target.row + '行');
   });
-  return sha256Text_(canonicalJson_({ operations: plan.operations, batteryTargets: plan.batteryTargets }));
+  (plan.assignments || []).forEach(function(assignment) {
+    if (!dateMetadataMatches_(assignment, ss, plan.draftId)) {
+      throw new Error('日付シートの内部識別子を確認できません：' + assignment.sheetName + ' No.' + assignment.blockNo);
+    }
+  });
+  return sha256Text_(canonicalJson_({ operations: plan.operations, batteryTargets: plan.batteryTargets, assignments: plan.assignments }));
 }
 
 function cleanupCommitPlans_() {
@@ -934,7 +987,6 @@ function cleanupCommitPlans_() {
   const all = properties.getProperties();
   const nowMillis = now_().getTime();
   const completeLimit = COMMIT_COMPLETE_RETENTION_DAYS * 86400000;
-  const staleLimit = COMMIT_STALE_DAYS * 86400000;
   const metaByDraft = {};
   Object.keys(all).forEach(function(key) {
     if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
@@ -1334,6 +1386,7 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     planHashMatches: false,
     operationCounts: { intended: 0, before: 0, conflict: 0, total: 0 },
     conflicts: [],
+    dateMetadata: { total: 0, matched: 0, details: [] },
     batteryMetadata: { total: 0, matched: 0, details: [] },
     aircraftTotals: { targets: 0, matched: 0, details: [] },
     canResumeRollForward: false,
@@ -1429,7 +1482,26 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     }
   });
 
-  // 3. BAT Developer Metadataの状態診断（read-only）
+  // 3. DATE Sheet-level Developer Metadataの状態診断（read-only）
+  const dateAssignments = plan.assignments || [];
+  report.dateMetadata.total = dateAssignments.length;
+  dateAssignments.forEach(function(assignment) {
+    const matched = dateMetadataMatches_(assignment, ss, meta.draftId);
+    const conflicted = dateMetadataConflict_(assignment, ss, meta.draftId, props);
+    if (matched) report.dateMetadata.matched++;
+    if (conflicted) {
+      report.resumeBlockReasons.push('日付シートのNo.' + assignment.blockNo + 'に別の保存計画の識別子があります（競合）：' + assignment.sheetName);
+    }
+    report.dateMetadata.details.push({
+      sheet: assignment.sheetName,
+      blockNo: assignment.blockNo,
+      ownershipValue: dateOwnershipValue_(assignment, meta.draftId),
+      matched: matched,
+      conflicted: conflicted
+    });
+  });
+
+  // 4. BAT entire-row Developer Metadataの状態診断（read-only）
   const batTargets = plan.batteryTargets || [];
   report.batteryMetadata.total = batTargets.length;
   batTargets.forEach(function(target) {
@@ -1446,7 +1518,7 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     }
   });
 
-  // 4. 機体累計の状態診断（read-only）
+  // 5. 機体累計の状態診断（read-only）
   const totalTargets = plan.totalTargets || [];
   report.aircraftTotals.targets = totalTargets.length;
   if (report.isAppTest) {
@@ -1479,11 +1551,11 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     });
   }
 
-  // 5. BAT Developer Metadata の競合チェック（別draftとの矛盾がないか）
+  // 6. BAT Developer Metadata の競合チェック（別draftとの矛盾がないか）
   (plan.batteryTargets || []).forEach(function(target) {
     const bSheet = ss.getSheetByName(target.sheetName);
     if (!bSheet) return;
-    const bRange = bSheet.getRange(target.row, 1, 1, 8);
+    const bRange = batteryMetadataRange_(target, ss);
     if (typeof bRange.getDeveloperMetadata === 'function') {
       const metas = bRange.getDeveloperMetadata().filter(function(item) {
         return item.getKey() === BATTERY_COMMIT_METADATA_KEY;
@@ -1497,14 +1569,14 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     }
   });
 
-  // 6. ロールフォワード再開・安全復旧可能かどうかの厳格判定
+  // 7. ロールフォワード再開・安全復旧可能かどうかの厳格判定
   if (report.operationCounts.conflict > 0) {
     report.resumeBlockReasons.push('セル競合（conflict）が ' + report.operationCounts.conflict + ' 件検出されました');
   }
   report.safeToRecover = (report.resumeBlockReasons.length === 0);
   report.canResumeRollForward = report.safeToRecover;
 
-  // 7. TESTで安全に破棄可能かどうかの厳格判定（すべて満たす場合のみ許可）
+  // 8. TESTで安全に破棄可能かどうかの厳格判定（すべて満たす場合のみ許可）
   const discardBlockReasons = [];
   if (!report.isAppTest) {
     discardBlockReasons.push('通常運航の保存計画は自動破棄できません（原本保護）');
@@ -1524,12 +1596,10 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     if (!dSheet) return;
 
     // ① DATE Developer Metadata チェック（当該draftまたは別draftのメタデータがあるか）
-    const dRange = dateBlockRange_(assignment, ss);
-    if (dRange && typeof dRange.getDeveloperMetadata === 'function') {
-      const metas = dRange.getDeveloperMetadata().filter(function(item) {
-        return item.getKey() === DATE_COMMIT_METADATA_KEY;
-      });
-      if (metas.length > 0) {
+    if (typeof dSheet.getDeveloperMetadata === 'function') {
+      const ownMetadata = dateMetadataMatches_(assignment, ss, meta.draftId);
+      const conflictingMetadata = dateMetadataConflict_(assignment, ss, meta.draftId, props);
+      if (ownMetadata || conflictingMetadata) {
         dateHasRealData = true;
         discardBlockReasons.push('日付シートに保存計画の識別子（Developer Metadata）が付与されています：' + assignment.sheetName);
         return;
@@ -1751,7 +1821,8 @@ function diagnosePendingCommitPlans() {
     if (r.conflicts.length > 0) {
       commitLog_('    [競合詳細]: ' + JSON.stringify(r.conflicts));
     }
-    commitLog_('  BAT Metadata       : ' + r.batteryMetadata.matched + ' / ' + r.batteryMetadata.total + ' 件付与済み');
+    commitLog_('  DATE Metadata      : ' + r.dateMetadata.matched + ' / ' + r.dateMetadata.total + ' ブロック付与済み');
+    commitLog_('  BAT Metadata       : ' + r.batteryMetadata.matched + ' / ' + r.batteryMetadata.total + ' 行付与済み');
     commitLog_('  機体累計状況       : ' + (r.isAppTest ? r.aircraftTotals.note : (r.aircraftTotals.matched + ' / ' + r.aircraftTotals.targets + ' 機体反映済み')));
     commitLog_('  >> 安全復旧判定    : ' + (r.safeToRecover ? '【安全に復旧可能】' : '【自動復旧不可】 理由: ' + r.resumeBlockReasons.join(', ')));
     commitLog_('  >> TEST破棄判定    : ' + (r.safeToDiscardTest ? '【TEST安全破棄可能】' : '【破棄不可】 理由: ' + (r.discardBlockReasons || []).join(', ')));
