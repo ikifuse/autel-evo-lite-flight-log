@@ -91,21 +91,23 @@ Pixel 6aなどのスマートフォンから、飛行前点検・各飛行・バ
 
 | パス | 役割 |
 |---|---|
-| `src/` | 開発用GASソースの唯一の正本 |
+| `src/` | 責務分割されたGASサーバー側ソース（正本） |
+| `src/web/` | Web UI側の責務分割ソース |
 | `dist/Code.gs` | GASへ貼り付ける自動生成済み統合版 |
-| `scripts/source-order.json` | `src/` の結合順 |
+| `scripts/source-order.json` | サーバー側ソースの結合順 |
+| `scripts/web-source-order.json` | Web側JavaScriptの結合順 |
 | `scripts/build.mjs` | `dist/Code.gs` の生成・一致検証 |
-| `tests/regression.test.js` | 回帰・障害注入・セキュリティーテスト |
+| `tests/` | 回帰・互換性・Web互換性・境界検証などのテスト群 |
 | `.github/workflows/build-dist.yml` | 自動ビルド・検証・`dist`反映 |
 | `01_ドローン運航記録_設計書.md` | 挙動、保存仕様、復旧設計を含む技術設計 |
 | `docs/index.md` | 目的別の文書ナビゲーション・ドキュメント索引 |
 | `docs/invariants.md` | 変更時も維持すべきシステムの前提条件・不変条件 |
-| `docs/architecture.md` | 全体データフロー・実行構造・ビルド概要 |
+| `docs/architecture.md` | 全体データフロー・実行構造・責務構成・ビルド概要 |
 | `docs/feature-guide.md` | 機能追加・変更時の標準手順と全層チェックリスト |
 | `docs/code-map.md` | 変更目的から担当ファイル・関数を探す索引 |
 | `AGENTS.md` | このリポジトリで作業するエージェント向けの短い規約 |
 
-ルート直下に旧 `Code.gs` はありません。開発時は `src/` を変更し、GASへの反映には必ず `dist/Code.gs` を使用します。
+ルート直下に旧 `Code.gs` はありません。開発時は `src/` を変更し、GASへの反映には必ず `dist/Code.gs` を使用します。各ファイルの詳細な責務構成や結合順は、[`docs/architecture.md`](./docs/architecture.md) および [`docs/code-map.md`](./docs/code-map.md) を参照してください。
 
 ## GASへの反映手順
 
