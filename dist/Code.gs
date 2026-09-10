@@ -2328,7 +2328,9 @@ function applyAircraftTotals_(commitPlan) {
 // ============================================================================
 function doGet() {
   // HtmlServiceの外側ページへ設定する。root icon.pngはbuild生成・別途公開が必要。
-  const iconUrl = APP_ICON_URL + '?v=80452b105a504553';
+  // faviconは画像拡張子で形式を示すため、クエリを付けない。
+  const faviconUrl = APP_ICON_URL;
+  const appIconUrl = APP_ICON_URL + '?v=80452b105a504553';
   const initialState = JSON.stringify(getAppState())
     .replace(/</g, '\\u003c')
     .replace(/\u2028/g, '\\u2028')
@@ -2337,10 +2339,10 @@ function doGet() {
     APP_HTML
       .replace('__INITIAL_STATE__', initialState)
       .replace('__APP_VERSION__', APP_VERSION)
-      .replace(/__APP_ICON__/g, iconUrl)
+      .replace(/__APP_ICON__/g, appIconUrl)
   )
     .setTitle('ドローン運航記録')
-    .setFaviconUrl(iconUrl)
+    .setFaviconUrl(faviconUrl)
     .addMetaTag('mobile-web-app-capable', 'yes')
     .addMetaTag('apple-mobile-web-app-capable', 'yes')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');

@@ -13,13 +13,13 @@ for(let y=0;y<512;y++){const filter=raw[y*(stride+1)];assert(filter<=4);for(let 
 let maxRadius=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++){const i=(y*512+x)*3;if(pixels[i]!==17||pixels[i+1]!==42||pixels[i+2]!==67)maxRadius=Math.max(maxRadius,Math.hypot(x-255.5,y-255.5));}
 assert(maxRadius<512*.4,'artwork leaves Android safe circle');
 const source=fs.readFileSync('dist/Code.gs','utf8'),calls=[];
-const output={content:'',title:'',icon:'',meta:[],setTitle(v){this.title=v;return this;},setFaviconUrl(v){this.icon=v;calls.push('favicon');return this;},addMetaTag(k,v){assert(['viewport','mobile-web-app-capable','apple-mobile-web-app-capable'].includes(k));this.meta.push([k,v]);return this;}};
+const output={content:'',title:'',icon:'',meta:[],setTitle(v){this.title=v;return this;},setFaviconUrl(v){assert(/\.png$/.test(v),'favicon must end in .png without query or fragment');this.icon=v;calls.push('favicon');return this;},addMetaTag(k,v){assert(['viewport','mobile-web-app-capable','apple-mobile-web-app-capable'].includes(k));this.meta.push([k,v]);return this;}};
 const context={HtmlService:{createHtmlOutput(html){output.content=html;return output;}}};vm.createContext(context);vm.runInContext(source,context);context.getAppState=()=>({active:false,today:'2026.9.10',session:null});context.doGet();
 const revision=crypto.createHash('sha256').update(png).digest('hex').slice(0,16);
-assert.equal(output.icon,'https://raw.githubusercontent.com/ikifuse/autel-evo-lite-flight-log/main/icon.png?v='+revision);
+assert.equal(output.icon,'https://raw.githubusercontent.com/ikifuse/autel-evo-lite-flight-log/main/icon.png');
 assert.equal(output.title,'ドローン運航記録');assert.equal(calls.length,1);assert.equal(new Set(output.meta.map(x=>x[0])).size,3);
 assert.deepEqual(output.meta,[['mobile-web-app-capable','yes'],['apple-mobile-web-app-capable','yes'],['viewport','width=device-width, initial-scale=1, viewport-fit=cover']]);
-assert.equal((output.content.match(/rel="apple-touch-icon"/g)||[]).length,1);assert(output.content.includes('sizes="512x512" href="'+output.icon+'"'));
+assert.equal((output.content.match(/rel="apple-touch-icon"/g)||[]).length,1);assert(output.content.includes('sizes="512x512" href="'+output.icon+'?v='+revision+'"'));
 assert(!/rel="(?:icon|manifest)"/.test(output.content));assert(!/<meta name=/.test(output.content));assert(!/__APP_ICON__|__ICON_REVISION__|__INITIAL_STATE__/.test(output.content));
 assert(!/navigator\.serviceWorker|serviceWorker\.register/.test(output.content));
 // Optional phase snapshot confirms no saving logic or Web JS changed during the icon task.
