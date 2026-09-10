@@ -1,29 +1,7 @@
 /**
- * ============================================================================
- * ドローン運航記録システム（Google Apps Script 現場運用版）
- * ============================================================================
- * 
- * 【全体構成マップ（目次）】
- * ----------------------------------------------------------------------------
- * 1. バックエンド（Google Apps Script ソース: src/*.gs）
- *    - src/00_config.gs           : 基本設定・定数・検証上限
- *    - src/10_server_core.gs      : Web入口（doGet）、状態取得、ScriptLock
- *    - src/11_server_validation.gs: 構造・業務入力検証、許可リスト
- *    - src/12_commit_engine.gs    : 固定保存計画、冪等書込み、復旧、署名
- *    - src/13_legacy_compat.gs    : 旧保存方式との互換ヘルパー
- *    - src/20_sheet_core.gs       : 日付シート生成、ブロック探索、連番管理
- *    - src/21_sheet_records.gs    : 帳票ヘッダー、点検、飛行行、場所表示
- *    - src/22_battery_totals.gs   : BAT履歴、機体累計、時刻・時間変換
- *
- * 2. クライアント（Web画面部品: src/web/* → build.mjsでアセンブル）
- *    - src/web/30_web_styles.css     : モバイル最適化・レスポンシブ・CSS
- *    - src/web/31_web_shell.html     : HTML外枠・PWA設定・ヘッダー
- *    - src/web/32_web_core.js        : 共有定数・DOM・気象・下書き管理
- *    - src/web/33_web_engine.js      : 状態遷移・通信・エラー・直前引用・GPS
- *    - src/web/34_web_start.js       : 運航開始画面（トップ）
- *    - src/web/35_web_flight.js      : 飛行前点検・BAT交換・待機・飛行・着陸
- *    - src/web/36_web_postflight.js  : 飛行後点検・一括保存・初回起動
- * ----------------------------------------------------------------------------
+ * ドローン運航記録システム — 設定・定数・検証上限。
+ * 責務と依存方向は docs/architecture.md、変更入口は docs/code-map.md を参照。
+ * 結合順は scripts/source-order.json と scripts/web-source-order.json で管理する。
  */
 
 // ============================================================================
@@ -103,7 +81,3 @@ const PRE_CHECK_NAMES = [
 
 const POST_CHECK_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
 const APP_ICON_URL = 'https://raw.githubusercontent.com/ikifuse/autel-evo-lite-flight-log/main/icon.png';
-
-let LOCK_DEPTH = 0;
-let COMMIT_WRITE_CAPTURE = null;
-let COMMIT_FAULT_INJECTOR = null;

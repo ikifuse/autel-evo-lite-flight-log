@@ -44,7 +44,7 @@
 
 ### Step 6: ソースコードの構成確認
 - すべての機能実装が `src/` 配下の各ファイルに正本として存在することを確認する。
-- UIのHTML/CSS/JSは `src/web/` 配下の7ファイルから `APP_HTML` としてアセンブルされることを確認する。
+- UIのCSS・HTMLシェルと `scripts/web-source-order.json` 順のJavaScriptを `APP_HTML` へ組み立てることを確認する。責務と依存方向は [architecture.md](architecture.md) を参照する。
 
 ### Step 7: ローカルビルドの実行
 - `scripts/source-order.json` の結合順に従い、ビルドスクリプトを実行して `dist/Code.gs` を生成する。
@@ -57,7 +57,12 @@
 - 回帰テストおよび障害注入テストを実行し、すべてのテストがパスすることを確認する。
   ```bash
   node tests/regression.test.js
+  node tests/refactor-compat.test.js
+  node tests/web-compat.test.js
+  node scripts/check-boundaries.mjs --self-test
+  node scripts/check-boundaries.mjs
   ```
+- B案互換試験には基準commitを含むGit履歴が必要。ローカル検証の範囲と実GAS・実機での確認事項は [test-spec.md](test-spec.md) を参照する。
 
 ### Step 9: GASプロジェクトへの反映とデプロイ
 - 後述の「第3章 GASへのデプロイ手順」に従い、GASエディタへ `dist/Code.gs` の全文を貼り付け、Webアプリとしてデプロイする。

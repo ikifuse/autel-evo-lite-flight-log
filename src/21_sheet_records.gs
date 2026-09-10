@@ -48,7 +48,7 @@ function writeHeaderFields_(sheet, session, blockNo) {
   setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
   setLocationAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
   setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method);
-  
+
   let pilotDisplay = session.pilot;
   if (session.assistant) {
     pilotDisplay += '（補助者: ' + session.assistant + '）';
@@ -118,4 +118,71 @@ function writeOptionalFields_(sheet, input, blockNo, abnormal) {
     trackedSetUserText_(sheet.getRange(44, 12 + offset), input.actionDetail || '');
     trackedSetUserText_(sheet.getRange(44, 15 + offset), input.confirmer || '');
   }
+}
+
+function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  trackedSetValue_(sheet.getRange(cell.row, targetCol), value == null ? '' : value);
+  return true;
+}
+
+function setUserTextAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  trackedSetUserText_(sheet.getRange(cell.row, targetCol), value);
+  return true;
+}
+
+function captureDateRecords_(capture, ss, session, models, assignments, startingByModel) {
+  captureCommitStage_(capture, 'date', function() {
+    const cumulative = {};
+    models.forEach(function(model) { cumulative[model] = startingByModel[model]; });
+    assignments.forEach(function(assignment, assignmentIndex) {
+      const sheet = ss.getSheetByName(assignment.sheetName);
+      const modelSession = Object.assign({}, session, { model: assignment.model, dateSheet: assignment.sheetName, blockNo: assignment.blockNo });
+      writeHeaderFields_(sheet, modelSession, assignment.blockNo);
+      const ac = session.aircrafts && session.aircrafts[assignment.model];
+      writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', assignment.blockNo);
+      const block = flightBlocks_(sheet).filter(function(item) { return item.blockNo === assignment.blockNo; })[0];
+      assignment.flightIndexes.forEach(function(flightIndex, rowIndex) {
+        const flight = session.flights[flightIndex];
+        const minutes = Number(flight.actualMinutes);
+        cumulative[assignment.model] += minutes;
+        writeFlightFields_(sheet, { blockNo: assignment.blockNo, row: block.startRow + rowIndex }, {
+          '使用バッテリー': 'BAT_' + Number(flight.battery),
+          '離陸場所': flight.takeoffLocation, '着陸場所': flight.landingLocation,
+          '離陸時刻': format_(flight.takeoffAt, 'HH:mm'), '着陸時刻': format_(flight.landingAt, 'HH:mm'),
+          '飛行時間': formatHoursMinutes_(minutes), '総飛行時間': formatHoursMinutes_(cumulative[assignment.model]),
+          '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
+          'バッテリー異常・所感': flight.batteryNote || ''
+        });
+      });
+    });
+  });
+}
+
+function capturePostflightRecords_(capture, ss, session, postflight, assignments) {
+  captureCommitStage_(capture, 'postflight', function() {
+    assignments.forEach(function(assignment) {
+      const sheet = ss.getSheetByName(assignment.sheetName);
+      const acInput = (postflight.aircrafts || {})[assignment.model] || postflight;
+      const checks = acInput.checks || postflight.checks || {};
+      const abnormal = POST_CHECK_NAMES.some(function(name) { return checks[name] !== '正常'; });
+      writeCheckResults_(sheet, checks, '飛行後点検', assignment.blockNo);
+      writeOptionalFields_(sheet, {
+        inspectionLocation: postflight.inspectionLocation || session.inspectionLocation,
+        defectLocation: acInput.defectLocation || '', defectDetail: acInput.defectDetail || '',
+        actionDetail: acInput.actionDetail || '', confirmer: postflight.confirmer || session.pilot
+      }, assignment.blockNo, abnormal);
+    });
+  });
 }

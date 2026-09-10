@@ -4,31 +4,9 @@
 // 生成スクリプト: scripts/build.mjs
 // ============================================================================
 /**
- * ============================================================================
- * ドローン運航記録システム（Google Apps Script 現場運用版）
- * ============================================================================
- * 
- * 【全体構成マップ（目次）】
- * ----------------------------------------------------------------------------
- * 1. バックエンド（Google Apps Script ソース: src/*.gs）
- *    - src/00_config.gs           : 基本設定・定数・検証上限
- *    - src/10_server_core.gs      : Web入口（doGet）、状態取得、ScriptLock
- *    - src/11_server_validation.gs: 構造・業務入力検証、許可リスト
- *    - src/12_commit_engine.gs    : 固定保存計画、冪等書込み、復旧、署名
- *    - src/13_legacy_compat.gs    : 旧保存方式との互換ヘルパー
- *    - src/20_sheet_core.gs       : 日付シート生成、ブロック探索、連番管理
- *    - src/21_sheet_records.gs    : 帳票ヘッダー、点検、飛行行、場所表示
- *    - src/22_battery_totals.gs   : BAT履歴、機体累計、時刻・時間変換
- *
- * 2. クライアント（Web画面部品: src/web/* → build.mjsでアセンブル）
- *    - src/web/30_web_styles.css     : モバイル最適化・レスポンシブ・CSS
- *    - src/web/31_web_shell.html     : HTML外枠・PWA設定・ヘッダー
- *    - src/web/32_web_core.js        : 共有定数・DOM・気象・下書き管理
- *    - src/web/33_web_engine.js      : 状態遷移・通信・エラー・直前引用・GPS
- *    - src/web/34_web_start.js       : 運航開始画面（トップ）
- *    - src/web/35_web_flight.js      : 飛行前点検・BAT交換・待機・飛行・着陸
- *    - src/web/36_web_postflight.js  : 飛行後点検・一括保存・初回起動
- * ----------------------------------------------------------------------------
+ * ドローン運航記録システム — 設定・定数・検証上限。
+ * 責務と依存方向は docs/architecture.md、変更入口は docs/code-map.md を参照。
+ * 結合順は scripts/source-order.json と scripts/web-source-order.json で管理する。
  */
 
 // ============================================================================
@@ -109,33 +87,89 @@ const PRE_CHECK_NAMES = [
 const POST_CHECK_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
 const APP_ICON_URL = 'https://raw.githubusercontent.com/ikifuse/autel-evo-lite-flight-log/main/icon.png';
 
-let LOCK_DEPTH = 0;
-let COMMIT_WRITE_CAPTURE = null;
-let COMMIT_FAULT_INJECTOR = null;
+// 永続値の表現・正規JSON・UTF-8長。純粋処理。hash入力とDate表現を変更しない。
 
-// ============================================================================
-// 2. サーバー側ロジック（全運航終了時のスプレッドシート一括書き込み）
-// ============================================================================
-function doGet() {
-  const initialState = JSON.stringify(getAppState())
-    .replace(/</g, '\\u003c')
-    .replace(/\u2028/g, '\\u2028')
-    .replace(/\u2029/g, '\\u2029');
-  return HtmlService.createHtmlOutput(
-    APP_HTML
-      .replace('__INITIAL_STATE__', initialState)
-      .replace('__APP_VERSION__', APP_VERSION)
-      .replace(/__APP_ICON__/g, APP_ICON_URL)
-  )
-    .setTitle('ドローン運航記録')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+function encodedCellValue_(value) {
+  if (value instanceof Date) return { __commitDate: value.toISOString() };
+  return value == null ? '' : value;
 }
+
+function decodedCellValue_(value) {
+  return value && typeof value === 'object' && value.__commitDate ? new Date(value.__commitDate) : value;
+}
+
+function decodedCommitOperationValue_(value, kind) {
+  if (['format','fontSize','horizontalAlignment','verticalAlignment','wrap'].indexOf(kind) >= 0) return value;
+  return decodedCellValue_(value);
+}
+
+function canonicalValue_(value) {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(canonicalValue_);
+  if (value && typeof value === 'object') {
+    const result = {};
+    Object.keys(value).sort().forEach(function(key) { result[key] = canonicalValue_(value[key]); });
+    return result;
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('保存内容に不正な数値があります。');
+  return value;
+}
+
+function canonicalJson_(value) { return JSON.stringify(canonicalValue_(value)); }
+
+function commitOperationValue_(value, kind) {
+  if (['format','horizontalAlignment','verticalAlignment'].indexOf(kind) >= 0) return String(value);
+  if (kind === 'fontSize') return Number(value);
+  if (kind === 'wrap') return !!value;
+  return encodedCellValue_(value);
+}
+
+function utf8Length_(text) { return unescape(encodeURIComponent(String(text))).length; }
+
+// GAS実行基盤: サービス接続・時刻・hash・Script Lock・障害注入。業務判断を持たない。
 
 function spreadsheet_() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
 
 function now_() { return new Date(); }
 
 function format_(value, pattern) { return Utilities.formatDate(new Date(value), TZ, pattern); }
+
+function locked_(work) {
+  if (LOCK_DEPTH > 0) return work();
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (error) {
+    throw new Error('別の保存処理を実行中です。20秒ほど待ってから、同じ運航記録をもう一度保存してください。');
+  }
+  LOCK_DEPTH++;
+  try {
+    return work();
+  } finally {
+    try { SpreadsheetApp.flush(); } finally { LOCK_DEPTH--; lock.releaseLock(); }
+  }
+}
+
+function sha256Text_(text) {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(text), Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(digest);
+}
+
+function commitFault_(point) {
+  if (typeof COMMIT_FAULT_INJECTOR === 'function') COMMIT_FAULT_INJECTOR(point);
+}
+
+function commitLog_(msg) {
+  if (typeof Logger !== 'undefined' && typeof Logger.log === 'function') {
+    Logger.log(msg);
+  }
+}
+
+let LOCK_DEPTH = 0;
+
+let COMMIT_FAULT_INJECTOR = null;
+
+// 運航日・HH:MM・時間表示の変換。Spreadsheetや保存状態に依存しない。
 
 function dateFromSheetName_(sheetName, allowTestPrefix) {
   const pattern = allowTestPrefix
@@ -156,42 +190,28 @@ function dateFromSheetName_(sheetName, allowTestPrefix) {
   return date;
 }
 
-function locked_(work) {
-  if (LOCK_DEPTH > 0) return work();
-  const lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(20000);
-  } catch (error) {
-    throw new Error('別の保存処理を実行中です。20秒ほど待ってから、同じ運航記録をもう一度保存してください。');
-  }
-  LOCK_DEPTH++;
-  try {
-    return work();
-  } finally {
-    try { SpreadsheetApp.flush(); } finally { LOCK_DEPTH--; lock.releaseLock(); }
-  }
+function parseHoursMinutes_(value, label) {
+  const text = String(value == null ? '' : value).trim();
+  const match = text.match(/^(\d{2,}):([0-5]\d)$/);
+  if (!match) throw new Error((label || '累計時間') + 'はHH:MM形式で入力してください（例：00:00、105:27）。');
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const total = hours * 60 + minutes;
+  if (!Number.isSafeInteger(total)) throw new Error((label || '累計時間') + 'が大きすぎます。');
+  return total;
 }
 
-function getAppState() {
-  const today = format_(now_(), 'yyyy.M.d');
-  const ss = spreadsheet_();
-  const todaySheet = ss.getSheetByName(today);
-  const totalLite = aircraftTotalMinutes_('EVO Lite');
-  const totalLitePlus = aircraftTotalMinutes_('EVO Lite+');
-
-  return {
-    active: false,
-    today: today,
-    hasTodaySheet: !!todaySheet,
-    batteries: Array.from({ length: 7 }, (_, index) => ({ value: index + 1, label: 'BAT_' + (index + 1) })),
-    totals: {
-      'EVO Lite': { minutes: totalLite, label: minutesLabel_(totalLite) },
-      'EVO Lite+': { minutes: totalLitePlus, label: minutesLabel_(totalLitePlus) }
-    },
-    session: null
-  };
+function formatHoursMinutes_(minutes) {
+  const m = Math.max(0, Math.round(Number(minutes) || 0));
+  const hours = Math.floor(m / 60);
+  const mins = m % 60;
+  return String(hours).padStart(2, '0') + ':' + String(mins).padStart(2, '0');
 }
 
+function minutesLabel_(minutes) {
+  const value = Math.max(0, Math.round(Number(minutes) || 0));
+  return Math.floor(value / 60) + '時間' + (value % 60) + '分';
+}
 
 function required_(value, label) {
   if (value == null || String(value).trim() === '') throw new Error(label + 'は必須です。');
@@ -201,43 +221,6 @@ function normalizeList_(value) {
   if (Array.isArray(value)) return value.map(String).map(item => item.trim()).filter(Boolean);
   return value == null || String(value).trim() === '' ? [] : [String(value).trim()];
 }
-
-function validateOperationSelection_(input) {
-  if (FLIGHT_PURPOSES.indexOf(input.purpose) < 0) throw new Error('飛行目的を選択してください。');
-  if (input.purpose === 'その他') required_(input.purposeOther, 'その他の飛行目的');
-
-  const methods = normalizeList_(input.method);
-  if (!methods.length) throw new Error('飛行禁止空域・飛行方法を1つ以上選択してください。');
-  const allowedMethods = ['通常飛行（特定飛行なし）','屋内練習'].concat(SPECIAL_FLIGHT_METHODS);
-  methods.forEach(method => {
-    if (allowedMethods.indexOf(method) < 0) throw new Error('飛行禁止空域・飛行方法の選択を確認してください。');
-  });
-
-  const category = String(input.category || '');
-  if (['カテゴリーⅠ','カテゴリーⅡ','カテゴリーⅢ'].indexOf(category) < 0) {
-    throw new Error('飛行カテゴリーを選択してください。');
-  }
-  const special = methods.filter(method => SPECIAL_FLIGHT_METHODS.indexOf(method) >= 0);
-  if (methods.indexOf('通常飛行（特定飛行なし）') >= 0 && methods.length > 1) {
-    throw new Error('「通常飛行（特定飛行なし）」は他の飛行方法と同時に選択できません。');
-  }
-  if (methods.indexOf('屋内練習') >= 0 && methods.length > 1) {
-    throw new Error('「屋内練習」は他の飛行方法と同時に選択できません。');
-  }
-  if (category === 'カテゴリーⅠ' && special.length) {
-    throw new Error('特定飛行を選択した場合はカテゴリーⅡまたはⅢです。');
-  }
-  if ((category === 'カテゴリーⅡ' || category === 'カテゴリーⅢ') && !special.length) {
-    throw new Error(category + 'には特定飛行の選択が必要です。');
-  }
-  return {
-    purpose: input.purpose === 'その他' ? 'その他：' + String(input.purposeOther).trim() : input.purpose,
-    methods: methods,
-    category: category
-  };
-}
-
-function utf8Length_(text) { return unescape(encodeURIComponent(String(text))).length; }
 
 function assertInputComplexity_(value, limits, label) {
   const seen = [];
@@ -361,6 +344,53 @@ function normalizedCommitInput_(input) {
   });
 }
 
+function validateCheckMap_(checks, allowedNames, label) {
+  if (!checks || typeof checks !== 'object' || Array.isArray(checks)) throw new Error(label + 'の形式を確認してください。');
+  Object.keys(checks).forEach(function(name) {
+    if (allowedNames.indexOf(name) < 0 || ['正常','異常'].indexOf(checks[name]) < 0) {
+      throw new Error(label + 'の値を確認してください。');
+    }
+  });
+}
+
+
+// 運航の業務検証・点検・TEST判定。依存: config/validation/time/runtime。保存処理を呼ばない。
+
+function validateOperationSelection_(input) {
+  if (FLIGHT_PURPOSES.indexOf(input.purpose) < 0) throw new Error('飛行目的を選択してください。');
+  if (input.purpose === 'その他') required_(input.purposeOther, 'その他の飛行目的');
+
+  const methods = normalizeList_(input.method);
+  if (!methods.length) throw new Error('飛行禁止空域・飛行方法を1つ以上選択してください。');
+  const allowedMethods = ['通常飛行（特定飛行なし）','屋内練習'].concat(SPECIAL_FLIGHT_METHODS);
+  methods.forEach(method => {
+    if (allowedMethods.indexOf(method) < 0) throw new Error('飛行禁止空域・飛行方法の選択を確認してください。');
+  });
+
+  const category = String(input.category || '');
+  if (['カテゴリーⅠ','カテゴリーⅡ','カテゴリーⅢ'].indexOf(category) < 0) {
+    throw new Error('飛行カテゴリーを選択してください。');
+  }
+  const special = methods.filter(method => SPECIAL_FLIGHT_METHODS.indexOf(method) >= 0);
+  if (methods.indexOf('通常飛行（特定飛行なし）') >= 0 && methods.length > 1) {
+    throw new Error('「通常飛行（特定飛行なし）」は他の飛行方法と同時に選択できません。');
+  }
+  if (methods.indexOf('屋内練習') >= 0 && methods.length > 1) {
+    throw new Error('「屋内練習」は他の飛行方法と同時に選択できません。');
+  }
+  if (category === 'カテゴリーⅠ' && special.length) {
+    throw new Error('特定飛行を選択した場合はカテゴリーⅡまたはⅢです。');
+  }
+  if ((category === 'カテゴリーⅡ' || category === 'カテゴリーⅢ') && !special.length) {
+    throw new Error(category + 'には特定飛行の選択が必要です。');
+  }
+  return {
+    purpose: input.purpose === 'その他' ? 'その他：' + String(input.purposeOther).trim() : input.purpose,
+    methods: methods,
+    category: category
+  };
+}
+
 function validateCommitBusinessInput_(input) {
   const session = input.session;
   const postflight = input.postflight;
@@ -459,15 +489,6 @@ function validateCommitBusinessInput_(input) {
   return models;
 }
 
-function validateCheckMap_(checks, allowedNames, label) {
-  if (!checks || typeof checks !== 'object' || Array.isArray(checks)) throw new Error(label + 'の形式を確認してください。');
-  Object.keys(checks).forEach(function(name) {
-    if (allowedNames.indexOf(name) < 0 || ['正常','異常'].indexOf(checks[name]) < 0) {
-      throw new Error(label + 'の値を確認してください。');
-    }
-  });
-}
-
 function validateStoredOperationSelection_(session) {
   let purpose = session.purpose;
   const weatherMatch = purpose.match(/ \[気象: ([^\]]+)\]$/);
@@ -503,38 +524,145 @@ function validateStoredOperationSelection_(session) {
   validateOperationSelection_({ purpose: '空撮', method: method.split(' / '), category: session.category });
 }
 
-
-function commitCache_() { return CacheService.getScriptCache(); }
-
-function commitProperties_() { return PropertiesService.getScriptProperties(); }
-
-function encodedCellValue_(value) {
-  if (value instanceof Date) return { __commitDate: value.toISOString() };
-  return value == null ? '' : value;
+function isAppTestPurpose_(purpose) {
+  const text = String(purpose || '');
+  return text === APP_TEST_PURPOSE || text.indexOf(APP_TEST_PURPOSE + ' [気象: ') === 0;
 }
 
-function decodedCellValue_(value) {
-  return value && typeof value === 'object' && value.__commitDate ? new Date(value.__commitDate) : value;
+// commit operationのセル属性I/OとFormula安全出力。比較・予約・業務判断を持たない。
+
+function commitRangeProperty_(range, kind) {
+  if (kind === 'format') return range.getNumberFormat();
+  if (kind === 'fontSize') return range.getFontSize();
+  if (kind === 'horizontalAlignment') return range.getHorizontalAlignment();
+  if (kind === 'verticalAlignment') return range.getVerticalAlignment();
+  if (kind === 'wrap') return range.getWrap();
+  return encodedCellValue_(range.getValue());
 }
 
-function canonicalValue_(value) {
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(canonicalValue_);
-  if (value && typeof value === 'object') {
-    const result = {};
-    Object.keys(value).sort().forEach(function(key) { result[key] = canonicalValue_(value[key]); });
-    return result;
+function isFormulaLikeUserText_(value) {
+  return /^[\u0000-\u0020]*[=+\-@]/.test(String(value == null ? '' : value));
+}
+
+function richTextValue_(value) {
+  return SpreadsheetApp.newRichTextValue().setText(String(value == null ? '' : value)).build();
+}
+
+function writeCommitRangeProperty_(range, value, kind) {
+  if (kind === 'format') return range.setNumberFormat(value);
+  if (kind === 'fontSize') return range.setFontSize(value);
+  if (kind === 'horizontalAlignment') return range.setHorizontalAlignment(value);
+  if (kind === 'verticalAlignment') return range.setVerticalAlignment(value);
+  if (kind === 'wrap') return range.setWrap(value);
+  if (kind === 'text') return range.setRichTextValue(richTextValue_(value));
+  return range.setValue(value);
+}
+
+function writeCommitRangeValues_(range, values) { return range.setValues(values); }
+
+// 帳票writerの操作捕捉。依存: codec/adapter。捕捉中はセルを書かず、操作順と最初のbeforeを保持。
+
+function recordCommitCell_(range, value, kind) {
+  const sheet = range.getSheet();
+  const key = kind + '|' + sheet.getName() + '|' + range.getRow() + '|' + range.getColumn();
+  let operation = COMMIT_WRITE_CAPTURE.byKey[key];
+  if (!operation) {
+    operation = {
+      kind: kind,
+      stage: COMMIT_WRITE_CAPTURE.stage,
+      sheetName: sheet.getName(),
+      row: range.getRow(),
+      col: range.getColumn(),
+      before: commitRangeProperty_(range, kind),
+      value: commitOperationValue_(value, kind)
+    };
+    COMMIT_WRITE_CAPTURE.byKey[key] = operation;
+    COMMIT_WRITE_CAPTURE.operations.push(operation);
+  } else {
+    operation.value = commitOperationValue_(value, kind);
   }
-  if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('保存内容に不正な数値があります。');
-  return value;
 }
 
-function canonicalJson_(value) { return JSON.stringify(canonicalValue_(value)); }
-
-function sha256Text_(text) {
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(text), Utilities.Charset.UTF_8);
-  return Utilities.base64EncodeWebSafe(digest);
+function trackedSetValue_(range, value) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, value, 'value');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, value, 'value');
 }
+
+function trackedSetUserText_(range, value) {
+  const text = String(value == null ? '' : value);
+  if (!isFormulaLikeUserText_(text)) return trackedSetValue_(range, text);
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, text, 'text');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, text, 'text');
+}
+
+function trackedSetValues_(range, values) {
+  if (COMMIT_WRITE_CAPTURE) {
+    values.forEach(function(line, rowOffset) {
+      line.forEach(function(value, colOffset) {
+        recordCommitCell_(range.getSheet().getRange(range.getRow() + rowOffset, range.getColumn() + colOffset), value, 'value');
+      });
+    });
+    return range;
+  }
+  return writeCommitRangeValues_(range, values);
+}
+
+function trackedSetNumberFormat_(range, format) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, format, 'format');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, format, 'format');
+}
+
+function trackedSetFontSize_(range, size) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, size, 'fontSize');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, size, 'fontSize');
+}
+
+function trackedSetHorizontalAlignment_(range, alignment) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, alignment, 'horizontalAlignment');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, alignment, 'horizontalAlignment');
+}
+
+function trackedSetVerticalAlignment_(range, alignment) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, alignment, 'verticalAlignment');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, alignment, 'verticalAlignment');
+}
+
+function trackedSetWrap_(range, wrap) {
+  if (COMMIT_WRITE_CAPTURE) {
+    recordCommitCell_(range, wrap, 'wrap');
+    return range;
+  }
+  return writeCommitRangeProperty_(range, wrap, 'wrap');
+}
+
+function captureCommitStage_(capture, stage, work) {
+  capture.stage = stage;
+  const start = capture.operations.length;
+  work();
+  return capture.operations.slice(start);
+}
+
+let COMMIT_WRITE_CAPTURE = null;
+
+// before/intended/conflictに用いる値・書式の同値比較。純粋処理。依存: codec。
 
 function normalizeCommitFormatValue_(val, kind) {
   const str = (val == null) ? '' : String(val).trim();
@@ -562,120 +690,11 @@ function sameCommitValue_(left, right, kind) {
   return canonicalJson_(left) === canonicalJson_(right);
 }
 
-function recordCommitCell_(range, value, kind) {
-  const sheet = range.getSheet();
-  const key = kind + '|' + sheet.getName() + '|' + range.getRow() + '|' + range.getColumn();
-  let operation = COMMIT_WRITE_CAPTURE.byKey[key];
-  if (!operation) {
-    operation = {
-      kind: kind,
-      stage: COMMIT_WRITE_CAPTURE.stage,
-      sheetName: sheet.getName(),
-      row: range.getRow(),
-      col: range.getColumn(),
-      before: commitRangeProperty_(range, kind),
-      value: commitOperationValue_(value, kind)
-    };
-    COMMIT_WRITE_CAPTURE.byKey[key] = operation;
-    COMMIT_WRITE_CAPTURE.operations.push(operation);
-  } else {
-    operation.value = commitOperationValue_(value, kind);
-  }
-}
+// Script Properties永続化・容量・完了圧縮とcomplete応答cache。DATA→照合→META、complete→DATA削除を維持。
 
-function commitRangeProperty_(range, kind) {
-  if (kind === 'format') return range.getNumberFormat();
-  if (kind === 'fontSize') return range.getFontSize();
-  if (kind === 'horizontalAlignment') return range.getHorizontalAlignment();
-  if (kind === 'verticalAlignment') return range.getVerticalAlignment();
-  if (kind === 'wrap') return range.getWrap();
-  return encodedCellValue_(range.getValue());
-}
+function commitCache_() { return CacheService.getScriptCache(); }
 
-function commitOperationValue_(value, kind) {
-  if (['format','horizontalAlignment','verticalAlignment'].indexOf(kind) >= 0) return String(value);
-  if (kind === 'fontSize') return Number(value);
-  if (kind === 'wrap') return !!value;
-  return encodedCellValue_(value);
-}
-
-function trackedSetValue_(range, value) {
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, value, 'value');
-    return range;
-  }
-  return range.setValue(value);
-}
-
-function isFormulaLikeUserText_(value) {
-  return /^[\u0000-\u0020]*[=+\-@]/.test(String(value == null ? '' : value));
-}
-
-function richTextValue_(value) {
-  return SpreadsheetApp.newRichTextValue().setText(String(value == null ? '' : value)).build();
-}
-
-function trackedSetUserText_(range, value) {
-  const text = String(value == null ? '' : value);
-  if (!isFormulaLikeUserText_(text)) return trackedSetValue_(range, text);
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, text, 'text');
-    return range;
-  }
-  return range.setRichTextValue(richTextValue_(text));
-}
-
-function trackedSetValues_(range, values) {
-  if (COMMIT_WRITE_CAPTURE) {
-    values.forEach(function(line, rowOffset) {
-      line.forEach(function(value, colOffset) {
-        recordCommitCell_(range.getSheet().getRange(range.getRow() + rowOffset, range.getColumn() + colOffset), value, 'value');
-      });
-    });
-    return range;
-  }
-  return range.setValues(values);
-}
-
-function trackedSetNumberFormat_(range, format) {
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, format, 'format');
-    return range;
-  }
-  return range.setNumberFormat(format);
-}
-
-function trackedSetFontSize_(range, size) {
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, size, 'fontSize');
-    return range;
-  }
-  return range.setFontSize(size);
-}
-
-function trackedSetHorizontalAlignment_(range, alignment) {
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, alignment, 'horizontalAlignment');
-    return range;
-  }
-  return range.setHorizontalAlignment(alignment);
-}
-
-function trackedSetVerticalAlignment_(range, alignment) {
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, alignment, 'verticalAlignment');
-    return range;
-  }
-  return range.setVerticalAlignment(alignment);
-}
-
-function trackedSetWrap_(range, wrap) {
-  if (COMMIT_WRITE_CAPTURE) {
-    recordCommitCell_(range, wrap, 'wrap');
-    return range;
-  }
-  return range.setWrap(wrap);
-}
+function commitProperties_() { return PropertiesService.getScriptProperties(); }
 
 function commitMetaKey_(draftId) { return COMMIT_V2_PREFIX + draftId + '_META'; }
 
@@ -686,26 +705,6 @@ function propertyStorageBytes_() {
   return Object.keys(all).reduce(function(total, key) {
     return total + utf8Length_(key) + utf8Length_(all[key]);
   }, 0);
-}
-
-function estimatedCommitPlanBytes_(input) {
-  const flights = (input.session && input.session.flights) || [];
-  const usedModels = Object.keys((input.session && input.session.aircrafts) || {}).filter(function(model) {
-    return input.session.aircrafts[model] && input.session.aircrafts[model].used;
-  });
-  const assignments = usedModels.reduce(function(total, model) {
-    const count = flights.filter(function(flight) { return flight.model === model; }).length;
-    return total + Math.max(1, Math.ceil(count / 7));
-  }, 0);
-  return utf8Length_(canonicalJson_(input)) * 4 + flights.length * 4000 + assignments * 12000 + 20000;
-}
-
-function ensureCommitPlanCapacity_(input) {
-  const estimated = estimatedCommitPlanBytes_(input);
-  if (estimated > SECURITY_MAX_COMMIT_PLAN_BYTES) throw new Error('保存計画の容量が上限を超えています。');
-  if (propertyStorageBytes_() + estimated > SECURITY_MAX_PROPERTY_STORE_BYTES) {
-    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
-  }
 }
 
 function splitCommitChunks_(text) {
@@ -817,66 +816,64 @@ function safeCommitCachePut_(key, value) {
   try { if (key) commitCache_().put(key, value, 21600); } catch (error) {}
 }
 
+function getCommitStorageStats_() {
+  const all = commitProperties_().getProperties();
+  const result = { propertyCount: 0, approximateBytes: 0, states: {} };
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(COMMIT_V2_PREFIX) !== 0) return;
+    result.propertyCount++;
+    result.approximateBytes += utf8Length_(key) + utf8Length_(all[key]);
+    if (/_META$/.test(key)) {
+      try {
+        const state = JSON.parse(all[key]).state || 'unknown';
+        result.states[state] = Number(result.states[state] || 0) + 1;
+      } catch (error) { result.states.corrupt = Number(result.states.corrupt || 0) + 1; }
+    }
+  });
+  return result;
+}
+
+function discardPendingTestPlanInternal_(draftId, meta, properties) {
+  const props = properties || commitProperties_();
+  const chunkCount = Number(meta.chunkCount || 0);
+  for (let index = 0; index < chunkCount; index++) {
+    props.deleteProperty(commitDataKey_(draftId, index));
+  }
+  props.deleteProperty(commitMetaKey_(draftId));
+}
+
+// 同draft内容署名・再送判定・active reservation。依存: codec/runtime/store。新規割当は行わない。
+
 function commitSignatureV2_(normalizedInput) { return sha256Text_(canonicalJson_(normalizedInput)); }
 
-function commitFault_(point) {
-  if (typeof COMMIT_FAULT_INJECTOR === 'function') COMMIT_FAULT_INJECTOR(point);
-}
-
-function setCommitProgress_(record, state, stage) {
-  record.meta.state = state;
-  record.meta.stage = stage;
-  record.meta.lastErrorStage = '';
-  writeCommitMeta_(record.meta);
-}
-
-function failCommitProgress_(record, stage, error) {
-  if (!record || !record.meta || record.meta.state === 'complete') return;
-  try {
-    record.meta.state = 'failed';
-    record.meta.stage = stage;
-    record.meta.lastErrorStage = stage;
-    writeCommitMeta_(record.meta);
-  } catch (ignored) {}
-}
-
-function operationCurrentValue_(operation) {
-  const sheet = spreadsheet_().getSheetByName(operation.sheetName);
-  if (!sheet) return { missingSheet: true };
-  const range = sheet.getRange(operation.row, operation.col);
-  return commitRangeProperty_(range, operation.kind);
-}
-
-function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
-  const ss = spreadsheet || spreadsheet_();
-  (operations || []).forEach(function(operation, operationIndex) {
-    const sheet = ss.getSheetByName(operation.sheetName);
-    if (!sheet) throw new Error('固定保存先シートが見つかりません：' + operation.sheetName);
-    const range = sheet.getRange(operation.row, operation.col);
-    const current = commitRangeProperty_(range, operation.kind);
-    if (sameCommitValue_(current, operation.value, operation.kind)) return;
-    if (verifyOnly) throw new Error('保存後の読取確認に失敗しました：' + operation.sheetName + '!' + range.getA1Notation());
-    if (!sameCommitValue_(current, operation.before, operation.kind)) {
-      throw new Error('保存対象セルが保存開始後に変更されています：' + operation.sheetName + '!' + range.getA1Notation());
-    }
-    if (operation.kind === 'format') range.setNumberFormat(operation.value);
-    else if (operation.kind === 'fontSize') range.setFontSize(operation.value);
-    else if (operation.kind === 'horizontalAlignment') range.setHorizontalAlignment(operation.value);
-    else if (operation.kind === 'verticalAlignment') range.setVerticalAlignment(operation.value);
-    else if (operation.kind === 'wrap') range.setWrap(operation.value);
-    else if (operation.kind === 'text') range.setRichTextValue(richTextValue_(decodedCellValue_(operation.value)));
-    else range.setValue(decodedCellValue_(operation.value));
-    if (!verifyOnly) commitFault_('AFTER_' + String(operation.stage || 'WRITE').toUpperCase() + '_OP_' + operationIndex);
+function activeCommitReservations_(excludeDraftId) {
+  const result = { blocks: {}, batteryRows: {}, activeDrafts: [] };
+  const all = commitProperties_().getProperties();
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
+    let meta;
+    try { meta = JSON.parse(all[key]); } catch (error) { return; }
+    if (!meta.draftId || meta.draftId === excludeDraftId || meta.state === 'complete') return;
+    result.activeDrafts.push(meta.draftId);
+    const record = loadCommitPlan_(meta.draftId, meta);
+    (record.plan.assignments || []).forEach(function(item) {
+      result.blocks[item.sheetName + '|' + item.blockNo] = meta.draftId;
+    });
+    (record.plan.batteryTargets || []).forEach(function(item) {
+      result.batteryRows[item.sheetName + '|' + item.row] = meta.draftId;
+    });
   });
+  return result;
 }
 
-function verifyCommitPlanResult_(plan, spreadsheet) {
-  const ss = spreadsheet || spreadsheet_();
-  ['date','battery','postflight','totals'].forEach(function(stage) {
-    applyCommitOperations_(plan.operations[stage] || [], true, ss);
-  });
-  return sha256Text_(canonicalJson_({ operations: plan.operations, batteryTargets: plan.batteryTargets, assignments: plan.assignments }));
+function isCompleteCommit_(meta, signature) {
+  if (meta.signature !== signature) {
+    throw new Error('同じ運航下書きIDで送信内容が変更されています。元の内容を保持したまま管理者へ連絡してください。');
+  }
+  return meta.state === 'complete';
 }
+
+// 保存計画の保持期限・整理判断。既存30日complete保持と未完了の日数非削除を維持。
 
 function cleanupCommitPlans_() {
   const properties = commitProperties_();
@@ -907,174 +904,106 @@ function cleanupCommitPlans_() {
   });
 }
 
-function getCommitStorageStats_() {
-  const all = commitProperties_().getProperties();
-  const result = { propertyCount: 0, approximateBytes: 0, states: {} };
-  Object.keys(all).forEach(function(key) {
-    if (key.indexOf(COMMIT_V2_PREFIX) !== 0) return;
-    result.propertyCount++;
-    result.approximateBytes += utf8Length_(key) + utf8Length_(all[key]);
-    if (/_META$/.test(key)) {
-      try {
-        const state = JSON.parse(all[key]).state || 'unknown';
-        result.states[state] = Number(result.states[state] || 0) + 1;
-      } catch (error) { result.states.corrupt = Number(result.states.corrupt || 0) + 1; }
+function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence, appTest) {
+  const baseName = (appTest ? 'TEST_' : '') + format_(date, 'yyyy.M.d');
+  let index = Math.max(1, Number(startSequence) || 1);
+  let name = index === 1 ? baseName : baseName + '_' + index;
+  while (true) {
+    let sheet = spreadsheet.getSheetByName(name);
+    if (!sheet) {
+      const template = spreadsheet.getSheetByName(TEMPLATE_NAME);
+      if (!template) throw new Error('日常点検シートが見つかりません。');
+      sheet = template.copyTo(spreadsheet).setName(name);
+      return sheet;
     }
-  });
-  return result;
-}
-
-function finishAircraft(input) {
-  assertInputComplexity_(input, {
-    maxBytes: SECURITY_MAX_RAW_INPUT_BYTES,
-    maxProperties: SECURITY_MAX_RAW_PROPERTIES,
-    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
-    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
-  }, '送信データ');
-  const normalizedInput = normalizedCommitInput_(input);
-  assertInputComplexity_(normalizedInput, {
-    maxBytes: SECURITY_MAX_NORMALIZED_INPUT_BYTES,
-    maxProperties: SECURITY_MAX_NORMALIZED_PROPERTIES,
-    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
-    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
-  }, '保存データ');
-  validateCommitBusinessInput_(normalizedInput);
-  const session = normalizedInput.session;
-  const signature = commitSignatureV2_(normalizedInput);
-
-  return locked_(function() {
-    let record = null;
-    let currentStage = 'PLAN_READY';
-    try {
-      cleanupCommitPlans_();
-      let existingMeta = readCommitMeta_(session.draftId);
-      if (!existingMeta) ensureCommitPlanCapacity_(normalizedInput);
-      if (existingMeta) {
-        if (existingMeta.signature !== signature) {
-          throw new Error('同じ運航下書きIDで送信内容が変更されています。元の内容を保持したまま管理者へ連絡してください。');
-        }
-        if (existingMeta.state === 'complete') {
-          const cacheKey = COMMIT_RESULT_PREFIX + session.draftId;
-          const cached = safeCommitCacheGet_(cacheKey);
-          if (cached) {
-            try { return JSON.parse(cached); } catch (ignored) {}
-          }
-          return getAppState();
-        }
-        record = loadCommitPlan_(session.draftId, existingMeta);
-      } else {
-        const legacyRaw = commitProperties_().getProperty(COMMIT_PLAN_PREFIX + session.draftId);
-        if (legacyRaw) {
-          let legacyPlan;
-          try { legacyPlan = JSON.parse(legacyRaw); } catch (error) {
-            throw new Error('旧方式の保存計画を読み込めません。入力内容を保持したまま管理者へ連絡してください。');
-          }
-          if (legacyPlan.status === 'complete') return getAppState();
-          throw new Error('旧方式で途中保存された運航記録があります。重複防止のため自動保存を停止しました。入力内容を保持したまま管理者へ連絡してください。');
-        }
-        // 新規保存の前に、過去の未完了draftを時系列順に直前再診断しながら自動解決（TEST安全残骸の自動整理 / 本番の安全自動復旧）
-        resolvePendingCommitPlansBeforeSave_(session.draftId, spreadsheet_(), commitProperties_());
-
-        const plan = buildFixedCommitPlan_(normalizedInput);
-        record = storeCommitPlan_(plan, signature);
-        commitFault_('AFTER_PLAN_PERSISTED');
-      }
-
-      return executeCommitPlanRollForward_(record, spreadsheet_());
-    } catch (error) {
-      if (record && record.meta.state !== 'complete') {
-        failCommitProgress_(record, record.meta.stage || 'PLAN_READY', error);
-      }
-      throw error;
+    if (appTest && !dateSheetStructureUsable_(sheet)) {
+      index++;
+      name = baseName + '_' + index;
+      continue;
     }
-  });
-}
-
-function executeCommitPlanRollForward_(record, commitSpreadsheet) {
-  let currentStage = record.meta.stage || 'PLAN_READY';
-  try {
-    setCommitProgress_(record, 'writing', currentStage);
-    const ss = commitSpreadsheet || spreadsheet_();
-
-    currentStage = 'DATE_RECORDS_WRITTEN';
-    applyCommitOperations_(record.plan.operations.date, false, ss);
-    commitFault_('AFTER_DATE_RECORDS');
-    SpreadsheetApp.flush();
-    applyCommitOperations_(record.plan.operations.date, true, ss);
-    setCommitProgress_(record, 'writing', currentStage);
-
-    currentStage = 'BAT_HISTORY_WRITTEN';
-    record.plan.batteryTargets.forEach(function(target, index) {
-      applyCommitOperations_(record.plan.operations.battery.filter(function(operation) {
-        return operation.targetIndex === index;
-      }), false, ss);
-      commitFault_('AFTER_BAT_' + target.battery);
-      commitFault_('AFTER_BAT_WRITE_BEFORE_PROGRESS');
-    });
-    SpreadsheetApp.flush();
-    applyCommitOperations_(record.plan.operations.battery, true, ss);
-    setCommitProgress_(record, 'writing', currentStage);
-
-    currentStage = 'POSTFLIGHT_WRITTEN';
-    applyCommitOperations_(record.plan.operations.postflight, false, ss);
-    commitFault_('AFTER_POSTFLIGHT');
-    SpreadsheetApp.flush();
-    applyCommitOperations_(record.plan.operations.postflight, true, ss);
-    setCommitProgress_(record, 'writing', currentStage);
-
-    currentStage = 'AIRCRAFT_TOTALS_WRITTEN';
-    record.plan.totalTargets.forEach(function(target, index) {
-      applyCommitOperations_(record.plan.operations.totals.filter(function(operation) {
-        return operation.model === target.model;
-      }), false, ss);
-      if (index === 0 && record.plan.totalTargets.length > 1) commitFault_('BETWEEN_AIRCRAFT_TOTALS');
-    });
-    SpreadsheetApp.flush();
-    applyCommitOperations_(record.plan.operations.totals, true, ss);
-    setCommitProgress_(record, 'writing', currentStage);
-
-    currentStage = 'FINAL_FLUSH';
-    commitFault_('BEFORE_FINAL_FLUSH');
-    SpreadsheetApp.flush();
-    const resultHash = verifyCommitPlanResult_(record.plan, ss);
-    record.meta.stage = 'VERIFIED';
-    writeCommitMeta_(record.meta);
-    commitFault_('BEFORE_COMPLETE');
-    compactCompletePlan_(record, resultHash);
-
-    const appState = getAppState();
-    safeCommitCachePut_(COMMIT_RESULT_PREFIX + record.meta.draftId, JSON.stringify(appState));
-    commitFault_('AFTER_COMPLETE_BEFORE_RESPONSE');
-    return appState;
-  } catch (error) {
-    failCommitProgress_(record, currentStage, error);
-    throw error;
+    // forceNewが指定されていない場合、かつ空きブロック（No.1またはNo.2）があればこのシートを使用
+    if (!forceNew && (!blockUsed_(sheet, 1) || !blockUsed_(sheet, 2))) {
+      return sheet;
+    }
+    // 両ブロック使用済み、または別現場（forceNew）の場合は自動で次の連番シート（例: 2026.9.4_2）を探す
+    index++;
+    name = baseName + '_' + index;
   }
 }
 
-function isAppTestPurpose_(purpose) {
-  const text = String(purpose || '');
-  return text === APP_TEST_PURPOSE || text.indexOf(APP_TEST_PURPOSE + ' [気象: ') === 0;
+function sheetValues_(sheet) { return sheet.getDataRange().getDisplayValues(); }
+
+function dateSheetStructureUsable_(sheet) {
+  const values = sheetValues_(sheet);
+  return [1, 2].every(function(blockNo) {
+    const block = block_(blockNo);
+    let aircraftRows = 0;
+    for (let row = 0; row < Math.min(10, values.length); row++) {
+      for (let col = block.startCol - 1; col < block.endCol; col++) {
+        if (String((values[row] || [])[col] || '').indexOf('Autel Robotics Co., Ltd.') >= 0) aircraftRows++;
+      }
+    }
+    return aircraftRows >= 2 &&
+      !!findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true) &&
+      !!findInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], false) &&
+      !!findInBlock_(sheet, blockNo, ['使用バッテリー'], false) &&
+      PRE_CHECK_NAMES.every(function(name) {
+        const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
+        return !!findInBlock_(sheet, blockNo, labels, false);
+      }) &&
+      POST_CHECK_NAMES.every(function(name) { return !!findInBlock_(sheet, blockNo, [name], false); });
+  });
 }
 
-function activeCommitReservations_(excludeDraftId) {
-  const result = { blocks: {}, batteryRows: {}, activeDrafts: [] };
-  const all = commitProperties_().getProperties();
-  Object.keys(all).forEach(function(key) {
-    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
-    let meta;
-    try { meta = JSON.parse(all[key]); } catch (error) { return; }
-    if (!meta.draftId || meta.draftId === excludeDraftId || meta.state === 'complete') return;
-    result.activeDrafts.push(meta.draftId);
-    const record = loadCommitPlan_(meta.draftId, meta);
-    (record.plan.assignments || []).forEach(function(item) {
-      result.blocks[item.sheetName + '|' + item.blockNo] = meta.draftId;
-    });
-    (record.plan.batteryTargets || []).forEach(function(item) {
-      result.batteryRows[item.sheetName + '|' + item.row] = meta.draftId;
-    });
+function findInBlock_(sheet, blockNo, labels, contains) {
+  const block = block_(blockNo);
+  const values = sheetValues_(sheet);
+  for (let row = 0; row < values.length; row++) {
+    for (let col = block.startCol - 1; col < block.endCol; col++) {
+      const value = String((values[row] || [])[col] || '').trim();
+      if (labels.some(label => contains ? value.indexOf(label) >= 0 : value === label)) {
+        return { row: row + 1, col: col + 1 };
+      }
+    }
+  }
+  return null;
+}
+
+function block_(blockNo) {
+  const block = BLOCKS[blockNo];
+  if (!block) throw new Error('No.' + blockNo + ' の帳票範囲を確認できません。');
+  return block;
+}
+
+function blockUsed_(sheet, blockNo) {
+  const block = block_(blockNo);
+  const values = sheet.getRange(6, block.startCol, 35, block.endCol - block.startCol + 1).getDisplayValues();
+  return values.some(row => row.some(value => {
+    const text = String(value || '').trim();
+    return /^[☑✓]/.test(text) || /^BAT_[1-7]$/.test(text);
+  }));
+}
+
+function labelColumn_(sheet, row, startCol, endCol, labels) {
+  const values = sheetValues_(sheet)[row - 1] || [];
+  for (let col = startCol; col <= endCol; col++) {
+    if (labels.indexOf(String(values[col - 1] || '').trim()) >= 0) return col;
+  }
+  return 0;
+}
+
+function flightBlocks_(sheet) {
+  return [1, 2].map(blockNo => {
+    const header = findInBlock_(sheet, blockNo, ['使用バッテリー'], false);
+    if (!header) throw new Error('No.' + blockNo + ' の飛行記録欄を確認できません。');
+    const block = block_(blockNo);
+    return { blockNo: blockNo, headerRow: header.row, startCol: block.startCol,
+      endCol: block.endCol, startRow: header.row + 1, endRow: header.row + 7 };
   });
-  return result;
+}
+
+function flightColumn_(sheet, block, labels) {
+  return labelColumn_(sheet, block.headerRow, block.startCol, block.endCol, labels);
 }
 
 function chooseFixedBlock_(sheet, reserved) {
@@ -1103,59 +1032,273 @@ function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, rese
   }
 }
 
-function captureCommitStage_(capture, stage, work) {
-  capture.stage = stage;
-  const start = capture.operations.length;
-  work();
-  return capture.operations.slice(start);
+function locationCellDisplay_(value) {
+  const raw = String(value == null ? '' : value);
+  const text = raw.trim();
+  const match = text.match(/^(.*?)\s*[（(]\s*((?:北緯|南緯)?\s*\d{1,3}(?:\.\d+)?)\s*[,，]\s*((?:東経|西経)?\s*\d{1,3}(?:\.\d+)?)\s*[）)]$/);
+  if (!match) return { text: raw, twoLine: false };
+  const coordinates = '(' + match[2].trim() + ', ' + match[3].trim() + ')';
+  const name = match[1].trim();
+  return { text: name ? name + '\n' + coordinates : coordinates, twoLine: !!name };
 }
 
-function buildFixedCommitPlan_(input) {
-  const session = input.session;
-  const postflight = input.postflight;
-  const models = validateCommitBusinessInput_(input);
-  const operationDate = dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
-  const appTest = isAppTestPurpose_(session.purpose);
-  const ss = spreadsheet_();
-  const reservations = activeCommitReservations_(session.draftId);
-  if (reservations.activeDrafts.length) {
-    throw new Error('別の運航記録が保存途中です。先に元の端末から同じ運航記録を再保存してください。');
-  }
-  const assignments = [];
-  let currentSheet = null;
-  let firstAssignment = true;
+function writeLocationCell_(cell, value) {
+  const display = locationCellDisplay_(value);
+  trackedSetUserText_(cell, display.text);
+  trackedSetHorizontalAlignment_(cell, 'center');
+  trackedSetVerticalAlignment_(cell, 'middle');
+  trackedSetWrap_(cell, display.twoLine);
+  if (display.twoLine) trackedSetFontSize_(cell, Math.max(1, Number(cell.getFontSize()) - 1));
+}
 
-  models.forEach(function(model) {
-    const modelFlights = (session.flights || []).filter(function(flight) { return flight.model === model; });
-    const chunks = [];
-    for (let index = 0; index < modelFlights.length; index += 7) chunks.push(modelFlights.slice(index, index + 7));
-    if (!chunks.length) chunks.push([]);
-    chunks.forEach(function(flights) {
-      const allocated = nextFixedSheetAndBlock_(ss, operationDate, currentSheet, firstAssignment && !!session.forceNewLocation, reservations, appTest);
-      currentSheet = allocated.sheet;
-      firstAssignment = false;
-      reservations.blocks[currentSheet.getName() + '|' + allocated.blockNo] = session.draftId;
-      assignments.push({
-        model: model,
-        sheetName: currentSheet.getName(),
-        blockNo: allocated.blockNo,
-        flightIndexes: flights.map(function(flight) { return session.flights.indexOf(flight); })
+function setLocationAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  writeLocationCell_(sheet.getRange(cell.row, targetCol), value);
+  return true;
+}
+
+function writeHeaderFields_(sheet, session, blockNo) {
+  const block = block_(blockNo);
+  for (let row = 1; row <= Math.min(10, sheet.getLastRow()); row++) {
+    const cell = sheet.getRange(row, block.startCol);
+    const current = String(cell.getDisplayValue() || '').replace(/^[□☑✓]\s*/, '').trim();
+    if (current.indexOf('Autel Robotics Co., Ltd.') >= 0) {
+      const normalized = current.replace(/\s+/g, ' ');
+      const selected = normalized.indexOf('/ ' + session.model + ' /') >= 0;
+      trackedSetValue_(cell, (selected ? '☑ ' : '□ ') + current);
+    }
+  }
+
+  const dateCell = findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true);
+  if (dateCell) {
+    const date = dateFromSheetName_(session.dateSheet, true);
+    trackedSetValue_(sheet.getRange(dateCell.row, dateCell.col), '飛行・点検実施年月日：' + format_(date, 'yyyy年M月d日'));
+  }
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
+  setLocationAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method);
+
+  let pilotDisplay = session.pilot;
+  if (session.assistant) {
+    pilotDisplay += '（補助者: ' + session.assistant + '）';
+  }
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['操縦者・点検実施者','操縦者'], pilotDisplay);
+
+  const certLabel = findInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], false);
+  if (certLabel && String(sheet.getRange(certLabel.row, certLabel.col).getDisplayValue()).trim() === '技能証明番号') {
+    trackedSetValue_(sheet.getRange(certLabel.row, certLabel.col), '技能証明書番号');
+  }
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
+}
+
+function writeCheckResults_(sheet, checks, section, blockNo) {
+  const names = section === '飛行前点検' ? PRE_CHECK_NAMES : POST_CHECK_NAMES;
+  const checkCol = block_(blockNo).startCol + (section === '飛行前点検' ? 6 : 12);
+  names.forEach(name => {
+    const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
+    const label = findInBlock_(sheet, blockNo, labels, false);
+    if (label) trackedSetValue_(sheet.getRange(label.row, checkCol), checks[name] === '正常' ? '☑' : '□');
+  });
+}
+
+function writeFlightFields_(sheet, slot, fields) {
+  const block = flightBlocks_(sheet).filter(item => item.blockNo === slot.blockNo)[0];
+  if (!block) throw new Error('飛行記録ブロックを確認できません。');
+  const aliases = {
+    '使用バッテリー':['使用バッテリー'], '離陸場所':['離陸場所'], '着陸場所':['着陸場所'],
+    '離陸時刻':['離陸時刻'], '着陸時刻':['着陸時刻'], '飛行時間':['飛行時間'],
+    '総飛行時間':['総飛行時間','総飛行時間（累計時間）'],
+    '安全に影響した事項':['安全に影響した事項','飛行の安全に影響した事項'],
+    'バッテリー異常・所感':['バッテリー異常・所感']
+  };
+  Object.keys(fields).forEach(key => {
+    const col = flightColumn_(sheet, block, aliases[key] || [key]);
+    if (col) {
+      const cell = sheet.getRange(slot.row, col);
+      if (['離陸時刻', '着陸時刻', '飛行時間', '総飛行時間'].indexOf(key) >= 0) {
+        trackedSetNumberFormat_(cell, '@');
+        trackedSetValue_(cell, String(fields[key]));
+      } else if (['離陸場所','着陸場所'].indexOf(key) >= 0) {
+        writeLocationCell_(cell, fields[key]);
+      } else if (['安全に影響した事項','バッテリー異常・所感'].indexOf(key) >= 0) {
+        trackedSetUserText_(cell, fields[key]);
+      } else {
+        trackedSetValue_(cell, fields[key]);
+      }
+    }
+  });
+}
+
+function writeOptionalFields_(sheet, input, blockNo, abnormal) {
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['点検実施場所','点検場所'], input.inspectionLocation || '');
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['不具合箇所：','不具合箇所'], input.defectLocation || '');
+  setUserTextAfterLabelInBlock_(sheet, blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.defectDetail || '');
+
+  const normalCell = findInBlock_(sheet, blockNo, ['□ 異常なし','☑ 異常なし'], false);
+  const defectCell = findInBlock_(sheet, blockNo, ['□ 不具合あり','☑ 不具合あり'], false);
+  if (normalCell) trackedSetValue_(sheet.getRange(normalCell.row, normalCell.col), abnormal ? '□ 異常なし' : '☑ 異常なし');
+  if (defectCell) trackedSetValue_(sheet.getRange(defectCell.row, defectCell.col), abnormal ? '☑ 不具合あり' : '□ 不具合あり');
+
+  if (abnormal || String(input.actionDetail || '').trim()) {
+    const offset = block_(blockNo).startCol - 3;
+    trackedSetValue_(sheet.getRange(44, 4 + offset), new Date());
+    trackedSetUserText_(sheet.getRange(44, 6 + offset), input.defectDetail || input.defectLocation || '');
+    if (String(input.actionDetail || '').trim()) trackedSetValue_(sheet.getRange(44, 10 + offset), new Date());
+    trackedSetUserText_(sheet.getRange(44, 12 + offset), input.actionDetail || '');
+    trackedSetUserText_(sheet.getRange(44, 15 + offset), input.confirmer || '');
+  }
+}
+
+function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  trackedSetValue_(sheet.getRange(cell.row, targetCol), value == null ? '' : value);
+  return true;
+}
+
+function setUserTextAfterLabelInBlock_(sheet, blockNo, labels, value) {
+  const cell = findInBlock_(sheet, blockNo, labels, false);
+  if (!cell) return false;
+  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
+  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
+  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (targetCol > block_(blockNo).endCol) return false;
+  trackedSetUserText_(sheet.getRange(cell.row, targetCol), value);
+  return true;
+}
+
+function captureDateRecords_(capture, ss, session, models, assignments, startingByModel) {
+  captureCommitStage_(capture, 'date', function() {
+    const cumulative = {};
+    models.forEach(function(model) { cumulative[model] = startingByModel[model]; });
+    assignments.forEach(function(assignment, assignmentIndex) {
+      const sheet = ss.getSheetByName(assignment.sheetName);
+      const modelSession = Object.assign({}, session, { model: assignment.model, dateSheet: assignment.sheetName, blockNo: assignment.blockNo });
+      writeHeaderFields_(sheet, modelSession, assignment.blockNo);
+      const ac = session.aircrafts && session.aircrafts[assignment.model];
+      writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', assignment.blockNo);
+      const block = flightBlocks_(sheet).filter(function(item) { return item.blockNo === assignment.blockNo; })[0];
+      assignment.flightIndexes.forEach(function(flightIndex, rowIndex) {
+        const flight = session.flights[flightIndex];
+        const minutes = Number(flight.actualMinutes);
+        cumulative[assignment.model] += minutes;
+        writeFlightFields_(sheet, { blockNo: assignment.blockNo, row: block.startRow + rowIndex }, {
+          '使用バッテリー': 'BAT_' + Number(flight.battery),
+          '離陸場所': flight.takeoffLocation, '着陸場所': flight.landingLocation,
+          '離陸時刻': format_(flight.takeoffAt, 'HH:mm'), '着陸時刻': format_(flight.landingAt, 'HH:mm'),
+          '飛行時間': formatHoursMinutes_(minutes), '総飛行時間': formatHoursMinutes_(cumulative[assignment.model]),
+          '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
+          'バッテリー異常・所感': flight.batteryNote || ''
+        });
       });
     });
   });
+}
 
-  const batteryTargets = [];
-  (session.flights || []).forEach(function(flight, flightIndex) {
-    const sheet = ss.getSheetByName(BATTERY_SHEET_PREFIX + Number(flight.battery));
-    if (!sheet) throw new Error('BAT_' + flight.battery + ' シートが見つかりません。');
-    const row = fixedBatteryRow_(sheet, reservations.batteryRows);
-    reservations.batteryRows[sheet.getName() + '|' + row] = session.draftId;
-    batteryTargets.push({
-      battery: Number(flight.battery), sheetName: sheet.getName(), row: row,
-      flightIndex: flightIndex, commitId: session.draftId + ':' + flightIndex
+function capturePostflightRecords_(capture, ss, session, postflight, assignments) {
+  captureCommitStage_(capture, 'postflight', function() {
+    assignments.forEach(function(assignment) {
+      const sheet = ss.getSheetByName(assignment.sheetName);
+      const acInput = (postflight.aircrafts || {})[assignment.model] || postflight;
+      const checks = acInput.checks || postflight.checks || {};
+      const abnormal = POST_CHECK_NAMES.some(function(name) { return checks[name] !== '正常'; });
+      writeCheckResults_(sheet, checks, '飛行後点検', assignment.blockNo);
+      writeOptionalFields_(sheet, {
+        inspectionLocation: postflight.inspectionLocation || session.inspectionLocation,
+        defectLocation: acInput.defectLocation || '', defectDetail: acInput.defectDetail || '',
+        actionDetail: acInput.actionDetail || '', confirmer: postflight.confirmer || session.pilot
+      }, assignment.blockNo, abnormal);
     });
   });
+}
 
+// BAT履歴の空き行選択と固定行への写像。再試行の行再選択は禁止。
+
+function fixedBatteryRow_(sheet, reservedRows) {
+  const values = sheetValues_(sheet);
+  for (let row = BATTERY_FIRST_ROW; row <= BATTERY_LAST_ROW; row++) {
+    if (!String((values[row - 1] || [])[0] || '').trim() && !reservedRows[sheet.getName() + '|' + row]) return row;
+  }
+  throw new Error(sheet.getName() + ' の履歴入力欄が上限に達しています。');
+}
+
+function writeBatteryHistoryAt_(sheet, row, session, minutes, input) {
+  trackedSetValue_(sheet.getRange(row, 1), dateFromSheetName_(session.dateSheet, true));
+  trackedSetValue_(sheet.getRange(row, 2), session.model);
+  trackedSetUserText_(sheet.getRange(row, 3), session.purpose);
+  trackedSetValue_(sheet.getRange(row, 4), minutes);
+  trackedSetUserText_(sheet.getRange(row, 5), input.cycle || '');
+  trackedSetUserText_(sheet.getRange(row, 6), input.batteryNote || '');
+  trackedSetUserText_(sheet.getRange(row, 7), session.route);
+  trackedSetValue_(sheet.getRange(row, 8), '');
+}
+
+function captureBatteryHistory_(capture, ss, session, batteryTargets, assignments) {
+  batteryTargets.forEach(function(target, targetIndex) {
+    const start = capture.operations.length;
+    const flight = session.flights[target.flightIndex];
+    const assignment = assignments.filter(function(item) { return item.flightIndexes.indexOf(target.flightIndex) >= 0; })[0];
+    writeBatteryHistoryAt_(ss.getSheetByName(target.sheetName), target.row, {
+      dateSheet: assignment.sheetName, model: flight.model, purpose: session.purpose, route: session.route
+    }, Number(flight.actualMinutes), { cycle: flight.cycle || '', batteryNote: flight.batteryNote || '' });
+    capture.operations.slice(start).forEach(function(operation) { operation.stage = 'battery'; operation.targetIndex = targetIndex; });
+  });
+}
+
+// 機体正式累計の原本探索・読取り・固定更新計画。日付帳票の飛行時累計とは独立。
+
+function aircraftTotalMinutes_(model) {
+  return parseHoursMinutes_(aircraftTotalCell_(model).getDisplayValue(), model + 'の点検時の総飛行時間');
+}
+
+function aircraftTotalCell_(model) {
+  const sheetName = AIRCRAFT_MAINTENANCE_SHEETS[model];
+  if (!sheetName) throw new Error('機体別点検整備原本の対応を確認してください：' + model);
+  const sheet = spreadsheet_().getSheetByName(sheetName);
+  if (!sheet) throw new Error(sheetName + ' シートが見つかりません。');
+  const values = sheet.getDataRange().getDisplayValues();
+  const matches = [];
+  values.forEach(function(row, rowIndex) {
+    row.forEach(function(value, colIndex) {
+      if (String(value || '').trim() === '点検時の総飛行時間') {
+        matches.push({ row: rowIndex + 1, col: colIndex + 1 });
+      }
+    });
+  });
+  if (matches.length !== 1) {
+    throw new Error(sheetName + ' の「点検時の総飛行時間」欄を一意に確認できません。');
+  }
+  const labelCell = sheet.getRange(matches[0].row, matches[0].col);
+  const merged = labelCell.getMergedRanges();
+  const labelRange = merged.length ? merged[0] : labelCell;
+  const valueCol = labelRange.getColumn() + labelRange.getNumColumns();
+  if (valueCol > sheet.getMaxColumns()) {
+    throw new Error(sheetName + ' の「点検時の総飛行時間」の入力欄を確認できません。');
+  }
+  return sheet.getRange(matches[0].row, valueCol);
+}
+
+function captureAircraftTotals_(capture, ss, totalTargets, finalByModel) {
+  totalTargets.forEach(function(target) {
+    capture.stage = 'totals';
+    const cell = ss.getSheetByName(target.sheetName).getRange(target.row, target.col);
+    const start = capture.operations.length;
+    trackedSetNumberFormat_(cell, '@');
+    trackedSetValue_(cell, formatHoursMinutes_(finalByModel[target.model]));
+    capture.operations.slice(start).forEach(function(operation) { operation.model = target.model; });
+  });
+}
+
+function planAircraftTotals_(models, flights, appTest) {
   const startingByModel = {};
   const finalByModel = {};
   const totalTargets = [];
@@ -1165,100 +1308,68 @@ function buildFixedCommitPlan_(input) {
     finalByModel[model] = startingByModel[model];
     if (!appTest) totalTargets.push({ model: model, sheetName: cell.getSheet().getName(), row: cell.getRow(), col: cell.getColumn() });
   });
-  (session.flights || []).forEach(function(flight) { finalByModel[flight.model] += Number(flight.actualMinutes); });
+  (flights || []).forEach(function(flight) { finalByModel[flight.model] += Number(flight.actualMinutes); });
+  return { startingByModel: startingByModel, finalByModel: finalByModel, totalTargets: totalTargets };
+}
 
-  const capture = { stage: '', operations: [], byKey: {} };
-  COMMIT_WRITE_CAPTURE = capture;
-  try {
-    captureCommitStage_(capture, 'date', function() {
-      const cumulative = {};
-      models.forEach(function(model) { cumulative[model] = startingByModel[model]; });
-      assignments.forEach(function(assignment, assignmentIndex) {
-        const sheet = ss.getSheetByName(assignment.sheetName);
-        const modelSession = Object.assign({}, session, { model: assignment.model, dateSheet: assignment.sheetName, blockNo: assignment.blockNo });
-        writeHeaderFields_(sheet, modelSession, assignment.blockNo);
-        const ac = session.aircrafts && session.aircrafts[assignment.model];
-        writeCheckResults_(sheet, (ac && ac.preflightChecks) || {}, '飛行前点検', assignment.blockNo);
-        const block = flightBlocks_(sheet).filter(function(item) { return item.blockNo === assignment.blockNo; })[0];
-        assignment.flightIndexes.forEach(function(flightIndex, rowIndex) {
-          const flight = session.flights[flightIndex];
-          const minutes = Number(flight.actualMinutes);
-          cumulative[assignment.model] += minutes;
-          writeFlightFields_(sheet, { blockNo: assignment.blockNo, row: block.startRow + rowIndex }, {
-            '使用バッテリー': 'BAT_' + Number(flight.battery),
-            '離陸場所': flight.takeoffLocation, '着陸場所': flight.landingLocation,
-            '離陸時刻': format_(flight.takeoffAt, 'HH:mm'), '着陸時刻': format_(flight.landingAt, 'HH:mm'),
-            '飛行時間': formatHoursMinutes_(minutes), '総飛行時間': formatHoursMinutes_(cumulative[assignment.model]),
-            '安全に影響した事項': flight.safetyIssue ? (flight.safetyDetail || 'あり') : 'なし',
-            'バッテリー異常・所感': flight.batteryNote || ''
-          });
-        });
-      });
-    });
+// 画面用状態の読取りと組立。依存: runtime/time/aircraft totals。保存判定を持たない。
 
-    batteryTargets.forEach(function(target, targetIndex) {
-      const start = capture.operations.length;
-      const flight = session.flights[target.flightIndex];
-      const assignment = assignments.filter(function(item) { return item.flightIndexes.indexOf(target.flightIndex) >= 0; })[0];
-      writeBatteryHistoryAt_(ss.getSheetByName(target.sheetName), target.row, {
-        dateSheet: assignment.sheetName, model: flight.model, purpose: session.purpose, route: session.route
-      }, Number(flight.actualMinutes), { cycle: flight.cycle || '', batteryNote: flight.batteryNote || '' });
-      capture.operations.slice(start).forEach(function(operation) { operation.stage = 'battery'; operation.targetIndex = targetIndex; });
-    });
+function getAppState() {
+  const today = format_(now_(), 'yyyy.M.d');
+  const ss = spreadsheet_();
+  const todaySheet = ss.getSheetByName(today);
+  const totalLite = aircraftTotalMinutes_('EVO Lite');
+  const totalLitePlus = aircraftTotalMinutes_('EVO Lite+');
 
-    captureCommitStage_(capture, 'postflight', function() {
-      assignments.forEach(function(assignment) {
-        const sheet = ss.getSheetByName(assignment.sheetName);
-        const acInput = (postflight.aircrafts || {})[assignment.model] || postflight;
-        const checks = acInput.checks || postflight.checks || {};
-        const abnormal = POST_CHECK_NAMES.some(function(name) { return checks[name] !== '正常'; });
-        writeCheckResults_(sheet, checks, '飛行後点検', assignment.blockNo);
-        writeOptionalFields_(sheet, {
-          inspectionLocation: postflight.inspectionLocation || session.inspectionLocation,
-          defectLocation: acInput.defectLocation || '', defectDetail: acInput.defectDetail || '',
-          actionDetail: acInput.actionDetail || '', confirmer: postflight.confirmer || session.pilot
-        }, assignment.blockNo, abnormal);
-      });
-    });
-
-    totalTargets.forEach(function(target) {
-      capture.stage = 'totals';
-      const cell = ss.getSheetByName(target.sheetName).getRange(target.row, target.col);
-      const start = capture.operations.length;
-      trackedSetNumberFormat_(cell, '@');
-      trackedSetValue_(cell, formatHoursMinutes_(finalByModel[target.model]));
-      capture.operations.slice(start).forEach(function(operation) { operation.model = target.model; });
-    });
-  } finally {
-    COMMIT_WRITE_CAPTURE = null;
-  }
-
-  const operations = { date: [], battery: [], postflight: [], totals: [] };
-  capture.operations.forEach(function(operation) { operations[operation.stage].push(operation); });
   return {
-    version: COMMIT_PLAN_VERSION,
-    draftId: session.draftId,
-    normalizedInput: input,
-    operationDate: format_(operationDate, 'yyyy.M.d'),
-    assignments: assignments,
-    batteryTargets: batteryTargets,
-    totalTargets: totalTargets,
-    startingByModel: startingByModel,
-    finalByModel: finalByModel,
-    operations: operations
+    active: false,
+    today: today,
+    hasTodaySheet: !!todaySheet,
+    batteries: Array.from({ length: 7 }, (_, index) => ({ value: index + 1, label: 'BAT_' + (index + 1) })),
+    totals: {
+      'EVO Lite': { minutes: totalLite, label: minutesLabel_(totalLite) },
+      'EVO Lite+': { minutes: totalLitePlus, label: minutesLabel_(totalLitePlus) }
+    },
+    session: null
   };
 }
 
-function commitLog_(msg) {
-  if (typeof Logger !== 'undefined' && typeof Logger.log === 'function') {
-    Logger.log(msg);
-  }
+// 固定operationの適用・readbackと診断用読取。依存: adapter/compare/codec/runtime。complete再送から呼ばない。
+
+function operationCurrentValue_(operation) {
+  const sheet = spreadsheet_().getSheetByName(operation.sheetName);
+  if (!sheet) return { missingSheet: true };
+  const range = sheet.getRange(operation.row, operation.col);
+  return commitRangeProperty_(range, operation.kind);
 }
 
-/**
- * 1件の未完了draftについて最新のSpreadsheet実状態から詳細診断を行う関数
- * ※完全な読み取り専用であり、SpreadsheetやProperties、Cacheを1バイトも変更しません。
- */
+function applyCommitOperations_(operations, verifyOnly, spreadsheet) {
+  const ss = spreadsheet || spreadsheet_();
+  (operations || []).forEach(function(operation, operationIndex) {
+    const sheet = ss.getSheetByName(operation.sheetName);
+    if (!sheet) throw new Error('固定保存先シートが見つかりません：' + operation.sheetName);
+    const range = sheet.getRange(operation.row, operation.col);
+    const current = commitRangeProperty_(range, operation.kind);
+    if (sameCommitValue_(current, operation.value, operation.kind)) return;
+    if (verifyOnly) throw new Error('保存後の読取確認に失敗しました：' + operation.sheetName + '!' + range.getA1Notation());
+    if (!sameCommitValue_(current, operation.before, operation.kind)) {
+      throw new Error('保存対象セルが保存開始後に変更されています：' + operation.sheetName + '!' + range.getA1Notation());
+    }
+    writeCommitRangeProperty_(range, decodedCommitOperationValue_(operation.value, operation.kind), operation.kind);
+    if (!verifyOnly) commitFault_('AFTER_' + String(operation.stage || 'WRITE').toUpperCase() + '_OP_' + operationIndex);
+  });
+}
+
+function verifyCommitPlanResult_(plan, spreadsheet) {
+  const ss = spreadsheet || spreadsheet_();
+  ['date','battery','postflight','totals'].forEach(function(stage) {
+    applyCommitOperations_(plan.operations[stage] || [], true, ss);
+  });
+  return sha256Text_(canonicalJson_({ operations: plan.operations, batteryTargets: plan.batteryTargets, assignments: plan.assignments }));
+}
+
+// 未完了planの読取り専用診断・説明・復旧/TEST破棄可否。書込み・削除・復旧の実行をしない。
+
 function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
   const ss = spreadsheet || spreadsheet_();
   const props = properties || commitProperties_();
@@ -1497,92 +1608,7 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
   return report;
 }
 
-/**
- * TEST保存計画の内部安全破棄ヘルパー
- */
-function discardPendingTestPlanInternal_(draftId, meta, properties) {
-  const props = properties || commitProperties_();
-  const chunkCount = Number(meta.chunkCount || 0);
-  for (let index = 0; index < chunkCount; index++) {
-    props.deleteProperty(commitDataKey_(draftId, index));
-  }
-  props.deleteProperty(commitMetaKey_(draftId));
-}
-
-/**
- * 新規保存前に、過去の未完了draftを時系列順に直前再診断しながら自動解決するパイプライン
- * 1. createdAt の昇順（古い順）に整列
- * 2. 各draftの実行直前に最新のSpreadsheet実状態で再診断（前回の結果使い回し禁止）
- * 3. TEST安全残骸 → 自動整理して次へ
- * 4. 本番（または実データありTEST）で100%安全復旧可能 → executeCommitPlanRollForward_ で確定復旧 → Spreadsheet.flush() で実状態同期
- * 5. 1件でも安全条件を満たせない場合（conflict、破損、先行完了状態との矛盾等） → 即座に例外で新規保存を安全停止
- */
-function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, properties) {
-  const ss = spreadsheet || spreadsheet_();
-  const props = properties || commitProperties_();
-  const all = props.getProperties();
-  const pendingMetas = [];
-
-  Object.keys(all).forEach(function(key) {
-    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
-    try {
-      const meta = JSON.parse(all[key]);
-      if (meta && meta.draftId && meta.draftId !== currentDraftId && meta.state !== 'complete') {
-        pendingMetas.push(meta);
-      }
-    } catch (ignored) {}
-  });
-
-  if (!pendingMetas.length) return [];
-
-  // createdAt の昇順（古い順）にソート
-  pendingMetas.sort(function(a, b) {
-    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-    return timeA - timeB;
-  });
-
-  const resolved = [];
-
-  for (let i = 0; i < pendingMetas.length; i++) {
-    const targetMeta = pendingMetas[i];
-
-    // ★重要：各draftの実行直前に必ず最新のSpreadsheet実状態で再診断（診断結果の使い回し禁止）
-    const report = diagnoseSingleCommitPlan_(targetMeta, ss, props);
-
-    if (report.safeToDiscardTest) {
-      discardPendingTestPlanInternal_(targetMeta.draftId, targetMeta, props);
-      commitLog_('保留中のTEST安全残骸を自動整理しました: ' + targetMeta.draftId);
-      resolved.push({ draftId: targetMeta.draftId, action: 'DISCARDED_TEST' });
-      continue;
-    }
-
-    if (report.safeToRecover) {
-      const record = loadCommitPlan_(targetMeta.draftId, targetMeta);
-      executeCommitPlanRollForward_(record, ss);
-      SpreadsheetApp.flush(); // ★確定直後にflushし、次draftの再診断に実状態を確実に反映
-      commitLog_('未完了の保存計画を自動復旧しました: ' + targetMeta.draftId);
-      resolved.push({ draftId: targetMeta.draftId, action: 'RECOVERED' });
-      continue;
-    }
-
-    // 1件でも安全条件を満たせない場合（conflict、破損、先行完了状態との矛盾等）：
-    // fixed commit planの勝手な書き換え・再計算は禁止。即座に新規保存を安全停止！
-    const reasons = (report.resumeBlockReasons || []).concat(report.discardBlockReasons || []);
-    const errMsg = '未完了の運航記録（' + targetMeta.draftId + '）に競合または不整合が検出されたため、安全のため保存を停止しました：' + reasons.join(' / ');
-    commitLog_('自動解決停止: ' + errMsg);
-    throw new Error(errMsg);
-  }
-
-  return resolved;
-}
-
-/**
- * 管理者用：未完了保存計画の読み取り専用診断関数
- * Apps Scriptエディタから手動実行して、現在の未完了draftの状態を診断・表示する。
- * ※完全な読み取り専用であり、SpreadsheetやProperties、Cacheを1バイトも変更しません。
- */
-function diagnosePendingCommitPlans() {
+function diagnosePendingCommitPlans_() {
   const ss = spreadsheet_();
   const properties = commitProperties_();
   const all = properties.getProperties();
@@ -1646,13 +1672,252 @@ function diagnosePendingCommitPlans() {
   return reports;
 }
 
-/**
- * 画面から実行する未完了保存計画の安全な復旧関数（ロールフォワード完了）
- * 利用者がWebアプリ上の「前回の保存を安全に復旧する」ボタンを押したときに呼び出される。
- * 安全条件をすべて満たす場合のみ、同じdraftId・同じfixed commit plan・同じUUIDを維持したまま
- * roll-forwardしてcompleteまで進める。
- */
-function recoverPendingCommitPlan(draftId) {
+// 固定計画の割当・組立・容量見積。帳票写像は21/22/23、捕捉は04へ。再試行では再構築しない。
+
+function estimatedCommitPlanBytes_(input) {
+  const flights = (input.session && input.session.flights) || [];
+  const usedModels = Object.keys((input.session && input.session.aircrafts) || {}).filter(function(model) {
+    return input.session.aircrafts[model] && input.session.aircrafts[model].used;
+  });
+  const assignments = usedModels.reduce(function(total, model) {
+    const count = flights.filter(function(flight) { return flight.model === model; }).length;
+    return total + Math.max(1, Math.ceil(count / 7));
+  }, 0);
+  return utf8Length_(canonicalJson_(input)) * 4 + flights.length * 4000 + assignments * 12000 + 20000;
+}
+
+function ensureCommitPlanCapacity_(input) {
+  const estimated = estimatedCommitPlanBytes_(input);
+  if (estimated > SECURITY_MAX_COMMIT_PLAN_BYTES) throw new Error('保存計画の容量が上限を超えています。');
+  if (propertyStorageBytes_() + estimated > SECURITY_MAX_PROPERTY_STORE_BYTES) {
+    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+  }
+}
+
+function buildFixedCommitPlan_(input) {
+  const session = input.session;
+  const postflight = input.postflight;
+  const models = validateCommitBusinessInput_(input);
+  const operationDate = dateFromSheetName_(session.operationDate || format_(now_(), 'yyyy.M.d'));
+  const appTest = isAppTestPurpose_(session.purpose);
+  const ss = spreadsheet_();
+  const reservations = activeCommitReservations_(session.draftId);
+  if (reservations.activeDrafts.length) {
+    throw new Error('別の運航記録が保存途中です。先に元の端末から同じ運航記録を再保存してください。');
+  }
+  const assignments = [];
+  let currentSheet = null;
+  let firstAssignment = true;
+
+  models.forEach(function(model) {
+    const modelFlights = (session.flights || []).filter(function(flight) { return flight.model === model; });
+    const chunks = [];
+    for (let index = 0; index < modelFlights.length; index += 7) chunks.push(modelFlights.slice(index, index + 7));
+    if (!chunks.length) chunks.push([]);
+    chunks.forEach(function(flights) {
+      const allocated = nextFixedSheetAndBlock_(ss, operationDate, currentSheet, firstAssignment && !!session.forceNewLocation, reservations, appTest);
+      currentSheet = allocated.sheet;
+      firstAssignment = false;
+      reservations.blocks[currentSheet.getName() + '|' + allocated.blockNo] = session.draftId;
+      assignments.push({
+        model: model,
+        sheetName: currentSheet.getName(),
+        blockNo: allocated.blockNo,
+        flightIndexes: flights.map(function(flight) { return session.flights.indexOf(flight); })
+      });
+    });
+  });
+
+  const batteryTargets = [];
+  (session.flights || []).forEach(function(flight, flightIndex) {
+    const sheet = ss.getSheetByName(BATTERY_SHEET_PREFIX + Number(flight.battery));
+    if (!sheet) throw new Error('BAT_' + flight.battery + ' シートが見つかりません。');
+    const row = fixedBatteryRow_(sheet, reservations.batteryRows);
+    reservations.batteryRows[sheet.getName() + '|' + row] = session.draftId;
+    batteryTargets.push({
+      battery: Number(flight.battery), sheetName: sheet.getName(), row: row,
+      flightIndex: flightIndex, commitId: session.draftId + ':' + flightIndex
+    });
+  });
+
+  const totals = planAircraftTotals_(models, session.flights, appTest);
+  const startingByModel = totals.startingByModel;
+  const finalByModel = totals.finalByModel;
+  const totalTargets = totals.totalTargets;
+
+  const capture = { stage: '', operations: [], byKey: {} };
+  COMMIT_WRITE_CAPTURE = capture;
+  try {
+    captureDateRecords_(capture, ss, session, models, assignments, startingByModel);
+
+    captureBatteryHistory_(capture, ss, session, batteryTargets, assignments);
+
+    capturePostflightRecords_(capture, ss, session, postflight, assignments);
+
+    captureAircraftTotals_(capture, ss, totalTargets, finalByModel);
+
+  } finally {
+    COMMIT_WRITE_CAPTURE = null;
+  }
+
+  const operations = { date: [], battery: [], postflight: [], totals: [] };
+  capture.operations.forEach(function(operation) { operations[operation.stage].push(operation); });
+  return {
+    version: COMMIT_PLAN_VERSION,
+    draftId: session.draftId,
+    normalizedInput: input,
+    operationDate: format_(operationDate, 'yyyy.M.d'),
+    assignments: assignments,
+    batteryTargets: batteryTargets,
+    totalTargets: totalTargets,
+    startingByModel: startingByModel,
+    finalByModel: finalByModel,
+    operations: operations
+  };
+}
+
+// 既存固定計画のroll-forward・進捗管理・先行pendingの順次解決。flush/readback/Lock境界を維持。
+
+function setCommitProgress_(record, state, stage) {
+  record.meta.state = state;
+  record.meta.stage = stage;
+  record.meta.lastErrorStage = '';
+  writeCommitMeta_(record.meta);
+}
+
+function failCommitProgress_(record, stage, error) {
+  if (!record || !record.meta || record.meta.state === 'complete') return;
+  try {
+    record.meta.state = 'failed';
+    record.meta.stage = stage;
+    record.meta.lastErrorStage = stage;
+    writeCommitMeta_(record.meta);
+  } catch (ignored) {}
+}
+
+function executeCommitPlanRollForward_(record, commitSpreadsheet) {
+  let currentStage = record.meta.stage || 'PLAN_READY';
+  try {
+    setCommitProgress_(record, 'writing', currentStage);
+    const ss = commitSpreadsheet || spreadsheet_();
+
+    currentStage = 'DATE_RECORDS_WRITTEN';
+    applyCommitOperations_(record.plan.operations.date, false, ss);
+    commitFault_('AFTER_DATE_RECORDS');
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.date, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'BAT_HISTORY_WRITTEN';
+    record.plan.batteryTargets.forEach(function(target, index) {
+      applyCommitOperations_(record.plan.operations.battery.filter(function(operation) {
+        return operation.targetIndex === index;
+      }), false, ss);
+      commitFault_('AFTER_BAT_' + target.battery);
+      commitFault_('AFTER_BAT_WRITE_BEFORE_PROGRESS');
+    });
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.battery, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'POSTFLIGHT_WRITTEN';
+    applyCommitOperations_(record.plan.operations.postflight, false, ss);
+    commitFault_('AFTER_POSTFLIGHT');
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.postflight, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'AIRCRAFT_TOTALS_WRITTEN';
+    record.plan.totalTargets.forEach(function(target, index) {
+      applyCommitOperations_(record.plan.operations.totals.filter(function(operation) {
+        return operation.model === target.model;
+      }), false, ss);
+      if (index === 0 && record.plan.totalTargets.length > 1) commitFault_('BETWEEN_AIRCRAFT_TOTALS');
+    });
+    SpreadsheetApp.flush();
+    applyCommitOperations_(record.plan.operations.totals, true, ss);
+    setCommitProgress_(record, 'writing', currentStage);
+
+    currentStage = 'FINAL_FLUSH';
+    commitFault_('BEFORE_FINAL_FLUSH');
+    SpreadsheetApp.flush();
+    const resultHash = verifyCommitPlanResult_(record.plan, ss);
+    record.meta.stage = 'VERIFIED';
+    writeCommitMeta_(record.meta);
+    commitFault_('BEFORE_COMPLETE');
+    compactCompletePlan_(record, resultHash);
+
+    const appState = getAppState();
+    safeCommitCachePut_(COMMIT_RESULT_PREFIX + record.meta.draftId, JSON.stringify(appState));
+    commitFault_('AFTER_COMPLETE_BEFORE_RESPONSE');
+    return appState;
+  } catch (error) {
+    failCommitProgress_(record, currentStage, error);
+    throw error;
+  }
+}
+
+function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, properties) {
+  const ss = spreadsheet || spreadsheet_();
+  const props = properties || commitProperties_();
+  const all = props.getProperties();
+  const pendingMetas = [];
+
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
+    try {
+      const meta = JSON.parse(all[key]);
+      if (meta && meta.draftId && meta.draftId !== currentDraftId && meta.state !== 'complete') {
+        pendingMetas.push(meta);
+      }
+    } catch (ignored) {}
+  });
+
+  if (!pendingMetas.length) return [];
+
+  // createdAt の昇順（古い順）にソート
+  pendingMetas.sort(function(a, b) {
+    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return timeA - timeB;
+  });
+
+  const resolved = [];
+
+  for (let i = 0; i < pendingMetas.length; i++) {
+    const targetMeta = pendingMetas[i];
+
+    // ★重要：各draftの実行直前に必ず最新のSpreadsheet実状態で再診断（診断結果の使い回し禁止）
+    const report = diagnoseSingleCommitPlan_(targetMeta, ss, props);
+
+    if (report.safeToDiscardTest) {
+      discardPendingTestPlanInternal_(targetMeta.draftId, targetMeta, props);
+      commitLog_('保留中のTEST安全残骸を自動整理しました: ' + targetMeta.draftId);
+      resolved.push({ draftId: targetMeta.draftId, action: 'DISCARDED_TEST' });
+      continue;
+    }
+
+    if (report.safeToRecover) {
+      const record = loadCommitPlan_(targetMeta.draftId, targetMeta);
+      executeCommitPlanRollForward_(record, ss);
+      SpreadsheetApp.flush(); // ★確定直後にflushし、次draftの再診断に実状態を確実に反映
+      commitLog_('未完了の保存計画を自動復旧しました: ' + targetMeta.draftId);
+      resolved.push({ draftId: targetMeta.draftId, action: 'RECOVERED' });
+      continue;
+    }
+
+    // 1件でも安全条件を満たせない場合（conflict、破損、先行完了状態との矛盾等）：
+    // fixed commit planの勝手な書き換え・再計算は禁止。即座に新規保存を安全停止！
+    const reasons = (report.resumeBlockReasons || []).concat(report.discardBlockReasons || []);
+    const errMsg = '未完了の運航記録（' + targetMeta.draftId + '）に競合または不整合が検出されたため、安全のため保存を停止しました：' + reasons.join(' / ');
+    commitLog_('自動解決停止: ' + errMsg);
+    throw new Error(errMsg);
+  }
+
+  return resolved;
+}
+
+function recoverPendingCommitPlan_(draftId) {
   if (!draftId) throw new Error('復旧対象のdraftIdが指定されていません。');
   return locked_(function() {
     cleanupCommitPlans_();
@@ -1678,13 +1943,7 @@ function recoverPendingCommitPlan(draftId) {
   });
 }
 
-/**
- * 画面から実行する未完了TEST保存計画の安全破棄関数
- * 利用者がWebアプリ上の「このTEST保存を破棄して解除」ボタンを押したときに呼び出される。
- * 厳格な安全条件（TEST運航、シート削除済み、BAT未書込み、累計未更新）を
- * すべて満たす場合のみ、METAとDATA chunkを削除して保留ロックを解除する。
- */
-function discardPendingTestCommitPlan(draftId) {
+function discardPendingTestCommitPlan_(draftId) {
   if (!draftId) throw new Error('破棄対象のdraftIdが指定されていません。');
   return locked_(function() {
     const meta = readCommitMeta_(draftId);
@@ -1708,6 +1967,78 @@ function discardPendingTestCommitPlan(draftId) {
     };
   });
 }
+
+// 保存系公開入口。入力・新規/再送の分岐・Lock内の処理順を統括する。
+// 依存: validation/policy/plan/store/identity/retention/recovery/diagnostics。永続化済みplanは再構築しない。
+
+function finishAircraft(input) {
+  assertInputComplexity_(input, {
+    maxBytes: SECURITY_MAX_RAW_INPUT_BYTES,
+    maxProperties: SECURITY_MAX_RAW_PROPERTIES,
+    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
+    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
+  }, '送信データ');
+  const normalizedInput = normalizedCommitInput_(input);
+  assertInputComplexity_(normalizedInput, {
+    maxBytes: SECURITY_MAX_NORMALIZED_INPUT_BYTES,
+    maxProperties: SECURITY_MAX_NORMALIZED_PROPERTIES,
+    maxDepth: SECURITY_MAX_OBJECT_DEPTH,
+    maxArrayItems: SECURITY_MAX_ARRAY_ITEMS
+  }, '保存データ');
+  validateCommitBusinessInput_(normalizedInput);
+  const session = normalizedInput.session;
+  const signature = commitSignatureV2_(normalizedInput);
+
+  return locked_(function() {
+    let record = null;
+    let currentStage = 'PLAN_READY';
+    try {
+      cleanupCommitPlans_();
+      let existingMeta = readCommitMeta_(session.draftId);
+      if (!existingMeta) ensureCommitPlanCapacity_(normalizedInput);
+      if (existingMeta) {
+        if (isCompleteCommit_(existingMeta, signature)) {
+          const cacheKey = COMMIT_RESULT_PREFIX + session.draftId;
+          const cached = safeCommitCacheGet_(cacheKey);
+          if (cached) {
+            try { return JSON.parse(cached); } catch (ignored) {}
+          }
+          return getAppState();
+        }
+        record = loadCommitPlan_(session.draftId, existingMeta);
+      } else {
+        const legacyRaw = commitProperties_().getProperty(COMMIT_PLAN_PREFIX + session.draftId);
+        if (legacyRaw) {
+          let legacyPlan;
+          try { legacyPlan = JSON.parse(legacyRaw); } catch (error) {
+            throw new Error('旧方式の保存計画を読み込めません。入力内容を保持したまま管理者へ連絡してください。');
+          }
+          if (legacyPlan.status === 'complete') return getAppState();
+          throw new Error('旧方式で途中保存された運航記録があります。重複防止のため自動保存を停止しました。入力内容を保持したまま管理者へ連絡してください。');
+        }
+        // 新規保存の前に、過去の未完了draftを時系列順に直前再診断しながら自動解決（TEST安全残骸の自動整理 / 本番の安全自動復旧）
+        resolvePendingCommitPlansBeforeSave_(session.draftId, spreadsheet_(), commitProperties_());
+
+        const plan = buildFixedCommitPlan_(normalizedInput);
+        record = storeCommitPlan_(plan, signature);
+        commitFault_('AFTER_PLAN_PERSISTED');
+      }
+
+      return executeCommitPlanRollForward_(record, spreadsheet_());
+    } catch (error) {
+      if (record && record.meta.state !== 'complete') {
+        failCommitProgress_(record, record.meta.stage || 'PLAN_READY', error);
+      }
+      throw error;
+    }
+  });
+}
+
+function diagnosePendingCommitPlans() { return diagnosePendingCommitPlans_(); }
+
+function recoverPendingCommitPlan(draftId) { return recoverPendingCommitPlan_(draftId); }
+
+function discardPendingTestCommitPlan(draftId) { return discardPendingTestCommitPlan_(draftId); }
 
 function finishAircraftLegacy_(input) {
   return locked_(function() {
@@ -1935,324 +2266,22 @@ function applyAircraftTotals_(commitPlan) {
 }
 
 
-function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence, appTest) {
-  const baseName = (appTest ? 'TEST_' : '') + format_(date, 'yyyy.M.d');
-  let index = Math.max(1, Number(startSequence) || 1);
-  let name = index === 1 ? baseName : baseName + '_' + index;
-  while (true) {
-    let sheet = spreadsheet.getSheetByName(name);
-    if (!sheet) {
-      const template = spreadsheet.getSheetByName(TEMPLATE_NAME);
-      if (!template) throw new Error('日常点検シートが見つかりません。');
-      sheet = template.copyTo(spreadsheet).setName(name);
-      return sheet;
-    }
-    if (appTest && !dateSheetStructureUsable_(sheet)) {
-      index++;
-      name = baseName + '_' + index;
-      continue;
-    }
-    // forceNewが指定されていない場合、かつ空きブロック（No.1またはNo.2）があればこのシートを使用
-    if (!forceNew && (!blockUsed_(sheet, 1) || !blockUsed_(sheet, 2))) {
-      return sheet;
-    }
-    // 両ブロック使用済み、または別現場（forceNew）の場合は自動で次の連番シート（例: 2026.9.4_2）を探す
-    index++;
-    name = baseName + '_' + index;
-  }
-}
-
-function sheetValues_(sheet) { return sheet.getDataRange().getDisplayValues(); }
-
-function dateSheetStructureUsable_(sheet) {
-  const values = sheetValues_(sheet);
-  return [1, 2].every(function(blockNo) {
-    const block = block_(blockNo);
-    let aircraftRows = 0;
-    for (let row = 0; row < Math.min(10, values.length); row++) {
-      for (let col = block.startCol - 1; col < block.endCol; col++) {
-        if (String((values[row] || [])[col] || '').indexOf('Autel Robotics Co., Ltd.') >= 0) aircraftRows++;
-      }
-    }
-    return aircraftRows >= 2 &&
-      !!findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true) &&
-      !!findInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], false) &&
-      !!findInBlock_(sheet, blockNo, ['使用バッテリー'], false) &&
-      PRE_CHECK_NAMES.every(function(name) {
-        const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
-        return !!findInBlock_(sheet, blockNo, labels, false);
-      }) &&
-      POST_CHECK_NAMES.every(function(name) { return !!findInBlock_(sheet, blockNo, [name], false); });
-  });
-}
-
-function findInBlock_(sheet, blockNo, labels, contains) {
-  const block = block_(blockNo);
-  const values = sheetValues_(sheet);
-  for (let row = 0; row < values.length; row++) {
-    for (let col = block.startCol - 1; col < block.endCol; col++) {
-      const value = String((values[row] || [])[col] || '').trim();
-      if (labels.some(label => contains ? value.indexOf(label) >= 0 : value === label)) {
-        return { row: row + 1, col: col + 1 };
-      }
-    }
-  }
-  return null;
-}
-
-function block_(blockNo) {
-  const block = BLOCKS[blockNo];
-  if (!block) throw new Error('No.' + blockNo + ' の帳票範囲を確認できません。');
-  return block;
-}
-
-function blockUsed_(sheet, blockNo) {
-  const block = block_(blockNo);
-  const values = sheet.getRange(6, block.startCol, 35, block.endCol - block.startCol + 1).getDisplayValues();
-  return values.some(row => row.some(value => {
-    const text = String(value || '').trim();
-    return /^[☑✓]/.test(text) || /^BAT_[1-7]$/.test(text);
-  }));
-}
-
-function labelColumn_(sheet, row, startCol, endCol, labels) {
-  const values = sheetValues_(sheet)[row - 1] || [];
-  for (let col = startCol; col <= endCol; col++) {
-    if (labels.indexOf(String(values[col - 1] || '').trim()) >= 0) return col;
-  }
-  return 0;
-}
-
-function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
-  const cell = findInBlock_(sheet, blockNo, labels, false);
-  if (!cell) return false;
-  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
-  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
-  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
-  if (targetCol > block_(blockNo).endCol) return false;
-  trackedSetValue_(sheet.getRange(cell.row, targetCol), value == null ? '' : value);
-  return true;
-}
-
-function setUserTextAfterLabelInBlock_(sheet, blockNo, labels, value) {
-  const cell = findInBlock_(sheet, blockNo, labels, false);
-  if (!cell) return false;
-  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
-  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
-  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
-  if (targetCol > block_(blockNo).endCol) return false;
-  trackedSetUserText_(sheet.getRange(cell.row, targetCol), value);
-  return true;
-}
-
-function flightBlocks_(sheet) {
-  return [1, 2].map(blockNo => {
-    const header = findInBlock_(sheet, blockNo, ['使用バッテリー'], false);
-    if (!header) throw new Error('No.' + blockNo + ' の飛行記録欄を確認できません。');
-    const block = block_(blockNo);
-    return { blockNo: blockNo, headerRow: header.row, startCol: block.startCol,
-      endCol: block.endCol, startRow: header.row + 1, endRow: header.row + 7 };
-  });
-}
-
-function flightColumn_(sheet, block, labels) {
-  return labelColumn_(sheet, block.headerRow, block.startCol, block.endCol, labels);
-}
-
-
-function locationCellDisplay_(value) {
-  const raw = String(value == null ? '' : value);
-  const text = raw.trim();
-  const match = text.match(/^(.*?)\s*[（(]\s*((?:北緯|南緯)?\s*\d{1,3}(?:\.\d+)?)\s*[,，]\s*((?:東経|西経)?\s*\d{1,3}(?:\.\d+)?)\s*[）)]$/);
-  if (!match) return { text: raw, twoLine: false };
-  const coordinates = '(' + match[2].trim() + ', ' + match[3].trim() + ')';
-  const name = match[1].trim();
-  return { text: name ? name + '\n' + coordinates : coordinates, twoLine: !!name };
-}
-
-function writeLocationCell_(cell, value) {
-  const display = locationCellDisplay_(value);
-  trackedSetUserText_(cell, display.text);
-  trackedSetHorizontalAlignment_(cell, 'center');
-  trackedSetVerticalAlignment_(cell, 'middle');
-  trackedSetWrap_(cell, display.twoLine);
-  if (display.twoLine) trackedSetFontSize_(cell, Math.max(1, Number(cell.getFontSize()) - 1));
-}
-
-function setLocationAfterLabelInBlock_(sheet, blockNo, labels, value) {
-  const cell = findInBlock_(sheet, blockNo, labels, false);
-  if (!cell) return false;
-  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
-  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
-  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
-  if (targetCol > block_(blockNo).endCol) return false;
-  writeLocationCell_(sheet.getRange(cell.row, targetCol), value);
-  return true;
-}
-
-function writeHeaderFields_(sheet, session, blockNo) {
-  const block = block_(blockNo);
-  for (let row = 1; row <= Math.min(10, sheet.getLastRow()); row++) {
-    const cell = sheet.getRange(row, block.startCol);
-    const current = String(cell.getDisplayValue() || '').replace(/^[□☑✓]\s*/, '').trim();
-    if (current.indexOf('Autel Robotics Co., Ltd.') >= 0) {
-      const normalized = current.replace(/\s+/g, ' ');
-      const selected = normalized.indexOf('/ ' + session.model + ' /') >= 0;
-      trackedSetValue_(cell, (selected ? '☑ ' : '□ ') + current);
-    }
-  }
-
-  const dateCell = findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true);
-  if (dateCell) {
-    const date = dateFromSheetName_(session.dateSheet, true);
-    trackedSetValue_(sheet.getRange(dateCell.row, dateCell.col), '飛行・点検実施年月日：' + format_(date, 'yyyy年M月d日'));
-  }
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
-  setLocationAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method);
-  
-  let pilotDisplay = session.pilot;
-  if (session.assistant) {
-    pilotDisplay += '（補助者: ' + session.assistant + '）';
-  }
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['操縦者・点検実施者','操縦者'], pilotDisplay);
-
-  const certLabel = findInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], false);
-  if (certLabel && String(sheet.getRange(certLabel.row, certLabel.col).getDisplayValue()).trim() === '技能証明番号') {
-    trackedSetValue_(sheet.getRange(certLabel.row, certLabel.col), '技能証明書番号');
-  }
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
-}
-
-function writeCheckResults_(sheet, checks, section, blockNo) {
-  const names = section === '飛行前点検' ? PRE_CHECK_NAMES : POST_CHECK_NAMES;
-  const checkCol = block_(blockNo).startCol + (section === '飛行前点検' ? 6 : 12);
-  names.forEach(name => {
-    const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
-    const label = findInBlock_(sheet, blockNo, labels, false);
-    if (label) trackedSetValue_(sheet.getRange(label.row, checkCol), checks[name] === '正常' ? '☑' : '□');
-  });
-}
-
-function writeFlightFields_(sheet, slot, fields) {
-  const block = flightBlocks_(sheet).filter(item => item.blockNo === slot.blockNo)[0];
-  if (!block) throw new Error('飛行記録ブロックを確認できません。');
-  const aliases = {
-    '使用バッテリー':['使用バッテリー'], '離陸場所':['離陸場所'], '着陸場所':['着陸場所'],
-    '離陸時刻':['離陸時刻'], '着陸時刻':['着陸時刻'], '飛行時間':['飛行時間'],
-    '総飛行時間':['総飛行時間','総飛行時間（累計時間）'],
-    '安全に影響した事項':['安全に影響した事項','飛行の安全に影響した事項'],
-    'バッテリー異常・所感':['バッテリー異常・所感']
-  };
-  Object.keys(fields).forEach(key => {
-    const col = flightColumn_(sheet, block, aliases[key] || [key]);
-    if (col) {
-      const cell = sheet.getRange(slot.row, col);
-      if (['離陸時刻', '着陸時刻', '飛行時間', '総飛行時間'].indexOf(key) >= 0) {
-        trackedSetNumberFormat_(cell, '@');
-        trackedSetValue_(cell, String(fields[key]));
-      } else if (['離陸場所','着陸場所'].indexOf(key) >= 0) {
-        writeLocationCell_(cell, fields[key]);
-      } else if (['安全に影響した事項','バッテリー異常・所感'].indexOf(key) >= 0) {
-        trackedSetUserText_(cell, fields[key]);
-      } else {
-        trackedSetValue_(cell, fields[key]);
-      }
-    }
-  });
-}
-
-function writeOptionalFields_(sheet, input, blockNo, abnormal) {
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['点検実施場所','点検場所'], input.inspectionLocation || '');
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['不具合箇所：','不具合箇所'], input.defectLocation || '');
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.defectDetail || '');
-
-  const normalCell = findInBlock_(sheet, blockNo, ['□ 異常なし','☑ 異常なし'], false);
-  const defectCell = findInBlock_(sheet, blockNo, ['□ 不具合あり','☑ 不具合あり'], false);
-  if (normalCell) trackedSetValue_(sheet.getRange(normalCell.row, normalCell.col), abnormal ? '□ 異常なし' : '☑ 異常なし');
-  if (defectCell) trackedSetValue_(sheet.getRange(defectCell.row, defectCell.col), abnormal ? '☑ 不具合あり' : '□ 不具合あり');
-
-  if (abnormal || String(input.actionDetail || '').trim()) {
-    const offset = block_(blockNo).startCol - 3;
-    trackedSetValue_(sheet.getRange(44, 4 + offset), new Date());
-    trackedSetUserText_(sheet.getRange(44, 6 + offset), input.defectDetail || input.defectLocation || '');
-    if (String(input.actionDetail || '').trim()) trackedSetValue_(sheet.getRange(44, 10 + offset), new Date());
-    trackedSetUserText_(sheet.getRange(44, 12 + offset), input.actionDetail || '');
-    trackedSetUserText_(sheet.getRange(44, 15 + offset), input.confirmer || '');
-  }
-}
-
-function fixedBatteryRow_(sheet, reservedRows) {
-  const values = sheetValues_(sheet);
-  for (let row = BATTERY_FIRST_ROW; row <= BATTERY_LAST_ROW; row++) {
-    if (!String((values[row - 1] || [])[0] || '').trim() && !reservedRows[sheet.getName() + '|' + row]) return row;
-  }
-  throw new Error(sheet.getName() + ' の履歴入力欄が上限に達しています。');
-}
-
-function writeBatteryHistoryAt_(sheet, row, session, minutes, input) {
-  trackedSetValue_(sheet.getRange(row, 1), dateFromSheetName_(session.dateSheet, true));
-  trackedSetValue_(sheet.getRange(row, 2), session.model);
-  trackedSetUserText_(sheet.getRange(row, 3), session.purpose);
-  trackedSetValue_(sheet.getRange(row, 4), minutes);
-  trackedSetUserText_(sheet.getRange(row, 5), input.cycle || '');
-  trackedSetUserText_(sheet.getRange(row, 6), input.batteryNote || '');
-  trackedSetUserText_(sheet.getRange(row, 7), session.route);
-  trackedSetValue_(sheet.getRange(row, 8), '');
-}
-
-function aircraftTotalMinutes_(model) {
-  return parseHoursMinutes_(aircraftTotalCell_(model).getDisplayValue(), model + 'の点検時の総飛行時間');
-}
-
-function aircraftTotalCell_(model) {
-  const sheetName = AIRCRAFT_MAINTENANCE_SHEETS[model];
-  if (!sheetName) throw new Error('機体別点検整備原本の対応を確認してください：' + model);
-  const sheet = spreadsheet_().getSheetByName(sheetName);
-  if (!sheet) throw new Error(sheetName + ' シートが見つかりません。');
-  const values = sheet.getDataRange().getDisplayValues();
-  const matches = [];
-  values.forEach(function(row, rowIndex) {
-    row.forEach(function(value, colIndex) {
-      if (String(value || '').trim() === '点検時の総飛行時間') {
-        matches.push({ row: rowIndex + 1, col: colIndex + 1 });
-      }
-    });
-  });
-  if (matches.length !== 1) {
-    throw new Error(sheetName + ' の「点検時の総飛行時間」欄を一意に確認できません。');
-  }
-  const labelCell = sheet.getRange(matches[0].row, matches[0].col);
-  const merged = labelCell.getMergedRanges();
-  const labelRange = merged.length ? merged[0] : labelCell;
-  const valueCol = labelRange.getColumn() + labelRange.getNumColumns();
-  if (valueCol > sheet.getMaxColumns()) {
-    throw new Error(sheetName + ' の「点検時の総飛行時間」の入力欄を確認できません。');
-  }
-  return sheet.getRange(matches[0].row, valueCol);
-}
-
-function parseHoursMinutes_(value, label) {
-  const text = String(value == null ? '' : value).trim();
-  const match = text.match(/^(\d{2,}):([0-5]\d)$/);
-  if (!match) throw new Error((label || '累計時間') + 'はHH:MM形式で入力してください（例：00:00、105:27）。');
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const total = hours * 60 + minutes;
-  if (!Number.isSafeInteger(total)) throw new Error((label || '累計時間') + 'が大きすぎます。');
-  return total;
-}
-
-function formatHoursMinutes_(minutes) {
-  const m = Math.max(0, Math.round(Number(minutes) || 0));
-  const hours = Math.floor(m / 60);
-  const mins = m % 60;
-  return String(hours).padStart(2, '0') + ':' + String(mins).padStart(2, '0');
-}
-
-function minutesLabel_(minutes) {
-  const value = Math.max(0, Math.round(Number(minutes) || 0));
-  return Math.floor(value / 60) + '時間' + (value % 60) + '分';
+// ============================================================================
+// 2. サーバー側ロジック（全運航終了時のスプレッドシート一括書き込み）
+// ============================================================================
+function doGet() {
+  const initialState = JSON.stringify(getAppState())
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return HtmlService.createHtmlOutput(
+    APP_HTML
+      .replace('__INITIAL_STATE__', initialState)
+      .replace('__APP_VERSION__', APP_VERSION)
+      .replace(/__APP_ICON__/g, APP_ICON_URL)
+  )
+    .setTitle('ドローン運航記録')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
 }
 
 
@@ -2867,10 +2896,7 @@ const APP_HTML = String.raw`<!doctype html>
   <div id="loading">処理中...</div>
 
 <script>
-// ============================================================================
-// 4. 画面操作スクリプト（Vanilla JavaScript）
-// ============================================================================
-var STATE = __INITIAL_STATE__;
+// 画面の点検項目・選択肢・説明文。
 
 var PRE_NAMES = ['機体全般','プロペラ・フレーム','通信系統','推進系統','電源系統','自動制御系統','バッテリー','操縦装置','灯火','カメラ','リモートID'];
 var POST_NAMES = ['機体全般','プロペラ・フレーム','発熱','その他'];
@@ -2919,52 +2945,250 @@ var SAFETY_TAGS = [
   '周辺草木の巻き込み注意'
 ];
 
-var TIMER_INTERVAL = null;
-var CATEGORY_NOTICE_TIMER = null;
 
-// ----------------------------------------------------
-// 共通ユーティリティ
-// ----------------------------------------------------
+var STAGE_HUMAN_NAMES = {
+  'PLAN_PERSISTED': '保存準備完了',
+  'PREFLIGHT_WRITTEN': '点検記録保存後',
+  'FLIGHTS_WRITTEN': '飛行記録保存後',
+  'BATTERY_WRITTEN': 'BAT履歴保存後',
+  'POSTFLIGHT_WRITTEN': '飛行後点検保存後',
+  'AIRCRAFT_TOTALS_WRITTEN': '機体累計更新後',
+  'FINAL_FLUSH': 'シート反映後（検証前）',
+  'VERIFIED': '検証完了（完了前）'
+};
+
+// 共通DOM・フォーム表示と画面port。具体的なcontroller/画面実装へ依存しない。
+
+var SCREEN_PORTS = null;
+
+function configureScreenPorts(ports){ SCREEN_PORTS = ports; }
+
+function screenState(){ return SCREEN_PORTS.state(); }
+
+function screenAction(name, arg, onSuccess){ return SCREEN_PORTS.action(name, arg, onSuccess); }
+
+function screenRender(state){ return SCREEN_PORTS.render(state); }
+
+function screenGps(targetId, targetRouteId){ return SCREEN_PORTS.gps(targetId, targetRouteId); }
+
+function screenDiagnosis(){ return SCREEN_PORTS.diagnosis(); }
+
+function screenReset(){ return SCREEN_PORTS.reset(); }
+
+function screenCancel(){ return SCREEN_PORTS.cancel(); }
+
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+
 function el(id){return document.getElementById(id)}
+
 function val(id){var x=el(id);return x?String(x.value).trim():''}
+
 function isChecked(id){var x=el(id);return !!(x&&x.checked)}
+
 function busy(b){el('loading').style.display=b?'flex':'none'}
 
-// ----------------------------------------------------
-// 気象情報（天候・風速・風向）ワンタップ選択ロジック
-// ----------------------------------------------------
-function selectWeather(btn, val){
-  var parent = el('weatherChips');
-  if(parent){
-    var btns = parent.getElementsByClassName('chip-btn');
-    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
-  }
-  btn.classList.add('active');
-  if(el('weatherVal')) el('weatherVal').value = val;
+function updateNetworkStatus(){
+  var online = navigator.onLine;
+  var badge = el('networkBadge');
+  if(!badge) return;
+  badge.className = 'network-badge ' + (online ? 'online' : 'offline');
+  badge.innerText = online ? '● オンライン' : '● 圏外（入力は端末に保持）';
 }
 
-function selectWindSpeed(btn, val){
-  var parent = el('windSpeedChips');
-  if(parent){
-    var btns = parent.getElementsByClassName('chip-btn');
-    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
-  }
-  btn.classList.add('active');
-  if(el('windSpeedVal')) el('windSpeedVal').value = val;
+function formatTimeStr(iso){
+  if(!iso) return '';
+  var d = new Date(iso);
+  var h = ('0' + d.getHours()).slice(-2);
+  var m = ('0' + d.getMinutes()).slice(-2);
+  return h + ':' + m;
 }
 
-function selectWindDir(btn, val){
-  var parent = el('windDirChips');
-  if(parent){
-    var btns = parent.getElementsByClassName('chip-btn');
-    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+function clearFormErrors(containerId){
+  var banner = el(containerId + '_errorBanner');
+  if(banner) banner.remove();
+  var errInputs = document.querySelectorAll('.input-error');
+  for(var i=0; i<errInputs.length; i++){
+    errInputs[i].classList.remove('input-error');
   }
-  btn.classList.add('active');
-  if(el('windDirVal')) el('windDirVal').value = val;
 }
+
+function showFormErrors(containerId, errorItems){
+  clearFormErrors(containerId);
+  if(!errorItems || errorItems.length === 0) return true;
+
+  var container = el(containerId);
+  var banner = document.createElement('div');
+  banner.id = containerId + '_errorBanner';
+  banner.className = 'error-banner';
+
+  var html = '<strong>⚠️ 未入力または確認が必要な項目があります</strong><ul>';
+  for(var i=0; i<errorItems.length; i++){
+    var item = errorItems[i];
+    html += '<li>【' + esc(item.label) + '】 ' + esc(item.message || '入力してください。') + '</li>';
+    if(item.id){
+      var elem = el(item.id);
+      if(elem){
+        elem.classList.add('input-error');
+        (function(targetElem){
+          var removeErr = function(){
+            targetElem.classList.remove('input-error');
+            targetElem.removeEventListener('input', removeErr);
+            targetElem.removeEventListener('change', removeErr);
+          };
+          targetElem.addEventListener('input', removeErr);
+          targetElem.addEventListener('change', removeErr);
+        })(elem);
+      }
+    }
+  }
+  html += '</ul>';
+  banner.innerHTML = html;
+
+  if(container){
+    container.insertBefore(banner, container.firstChild);
+  }
+
+  var firstElem = errorItems[0].id ? el(errorItems[0].id) : null;
+  if(firstElem){
+    firstElem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    try{ firstElem.focus(); }catch(e){}
+  } else if(banner) {
+    banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  return false;
+}
+
+function sessionHeaderHtml(){
+  var s = screenState().session;
+  var recordLabel = s.blockNo
+    ? s.dateSheet + ' No.' + s.blockNo
+    : s.operationDate + '（全運航終了時に一括保存）';
+  return '<div class="card status-box" style="margin-bottom:8px;">' +
+    '<div class="flex-between">' +
+      '<div><strong>' + esc(recordLabel) + '</strong> ｜ ' + esc(s.model) + '</div>' +
+      '<div class="flex-row" style="gap:6px;align-items:center;">' +
+        '<span class="badge active">' + esc(s.category) + '</span>' +
+        '<button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="screenCancel()">↩ 運航中止</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="text-sm" style="margin-top:4px;">' + esc(s.route) + ' / ' + esc(s.purpose) + '</div>' +
+  '</div>';
+}
+
+// LocalStorageの下書き・直前履歴。運航状態の取得先だけを注入する。
+
+var DRAFT_STORAGE_PORTS = null;
+function configureDraftStorage(ports){ DRAFT_STORAGE_PORTS = ports; }
 
 var ACTIVE_OPERATION_DRAFT_KEY = 'EVO_LITE_ACTIVE_OPERATION_V2';
+var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
+var STORAGE_KEY_ASSISTANTS = 'EVO_LITE_ASSISTANT_HISTORY_V1';
+
+function persistOperationDraft(){
+  var state = DRAFT_STORAGE_PORTS.getState();
+  try{
+    if(state && state.active && state.session){
+      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, JSON.stringify(state.session));
+    }else{
+      localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY);
+    }
+  }catch(e){}
+}
+
+function restoreOperationDraft(){
+  var state = DRAFT_STORAGE_PORTS.getState();
+  try{
+    var raw = localStorage.getItem(ACTIVE_OPERATION_DRAFT_KEY);
+    if(!raw) return;
+    var session = JSON.parse(raw);
+    if(session && session.phase){
+      // v2026.09.05.2 より前の途中データも、その場で捨てずに再開できるよう補完する。
+      // 旧 READY 画面では使用 BAT が pendingFlightInput に入っていたため、
+      // 新しい「飛行前点検時に BAT を確定する」項目へ引き継ぐ。
+      if(!session.selectedBattery && session.pendingFlightInput && session.pendingFlightInput.battery){
+        session.selectedBattery = Number(session.pendingFlightInput.battery) || 0;
+      }
+      if(typeof session.selectedBatteryCycle === 'undefined'){
+        session.selectedBatteryCycle = session.pendingFlightInput && session.pendingFlightInput.cycle
+          ? session.pendingFlightInput.cycle : '';
+      }
+      // BAT を特定できない旧 READY データは、入力を失わず飛行前点検へ戻して選び直す。
+      if(session.phase === 'READY' && !session.selectedBattery){
+        session.phase = 'PRE';
+      }
+      state.active = true;
+      state.session = session;
+      persistOperationDraft();
+    }
+  }catch(e){}
+}
+
+function clearOperationDraft(){
+  try{ localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY); }catch(e){}
+}
+
+function saveLastOperation(data){
+  try{ localStorage.setItem(STORAGE_KEY_LAST, JSON.stringify(data)); }catch(e){}
+}
+
+function loadLastOperation(){
+  try{ var d = localStorage.getItem(STORAGE_KEY_LAST); return d ? JSON.parse(d) : null; }catch(e){ return null; }
+}
+
+function loadAssistantHistory(){
+  try{
+    var raw = localStorage.getItem(STORAGE_KEY_ASSISTANTS);
+    var parsed = raw ? JSON.parse(raw) : [];
+    if(!Array.isArray(parsed)) return [];
+    var names = [];
+    parsed.forEach(function(item){
+      var name = typeof item === 'string' ? item.trim() : '';
+      if(name && names.indexOf(name) < 0) names.push(name);
+    });
+    return names;
+  }catch(e){ return []; }
+}
+
+function saveAssistantHistory(names){
+  try{ localStorage.setItem(STORAGE_KEY_ASSISTANTS, JSON.stringify(names)); }catch(e){}
+}
+
+function rememberAssistantName(name){
+  name = String(name == null ? '' : name).trim();
+  if(!name) return;
+  var names = loadAssistantHistory();
+  if(names.indexOf(name) < 0){
+    names.push(name);
+    saveAssistantHistory(names);
+  }
+}
+
+function assistantCandidates(lastAssistant, currentAssistant){
+  var names = loadAssistantHistory();
+  [lastAssistant, currentAssistant].forEach(function(item){
+    var name = String(item == null ? '' : item).trim();
+    if(name && names.indexOf(name) < 0) names.push(name);
+  });
+  return names;
+}
+
+// google.script.runの通信だけを担当。STATE・DOM・下書きは変更しない。
+
+function runServerRequest(name, arg, onSuccess, onFailure){
+  var request = google.script.run
+    .withSuccessHandler(onSuccess)
+    .withFailureHandler(onFailure);
+  if(arg === undefined) request[name]();
+  else request[name](arg);
+}
+
+// 運航下書きの状態遷移。表示の通知先はbootstrapから注入する。
+
+var STATE = __INITIAL_STATE__;
+var WORKFLOW_PORTS = null;
+function configureWorkflowPorts(ports){ WORKFLOW_PORTS = ports; }
+
 var LOCAL_FLIGHT_ACTIONS = [
   'startAircraft','savePreflight','confirmBatteryChange','startFlight','completeLanding','landFlight','continueFlight',
   'switchAircraft','startPostflight','goBack','cancelCurrentSession'
@@ -2986,58 +3210,6 @@ function createOperationDraftId(){
   }
   throw new Error('安全な運航下書きIDを生成できません。ブラウザを更新してください。');
 }
-
-function persistOperationDraft(){
-  try{
-    if(STATE && STATE.active && STATE.session){
-      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, JSON.stringify(STATE.session));
-    }else{
-      localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY);
-    }
-  }catch(e){}
-}
-
-function restoreOperationDraft(){
-  try{
-    var raw = localStorage.getItem(ACTIVE_OPERATION_DRAFT_KEY);
-    if(!raw) return;
-    var session = JSON.parse(raw);
-    if(session && session.phase){
-      // v2026.09.05.2 より前の途中データも、その場で捨てずに再開できるよう補完する。
-      // 旧 READY 画面では使用 BAT が pendingFlightInput に入っていたため、
-      // 新しい「飛行前点検時に BAT を確定する」項目へ引き継ぐ。
-      if(!session.selectedBattery && session.pendingFlightInput && session.pendingFlightInput.battery){
-        session.selectedBattery = Number(session.pendingFlightInput.battery) || 0;
-      }
-      if(typeof session.selectedBatteryCycle === 'undefined'){
-        session.selectedBatteryCycle = session.pendingFlightInput && session.pendingFlightInput.cycle
-          ? session.pendingFlightInput.cycle : '';
-      }
-      // BAT を特定できない旧 READY データは、入力を失わず飛行前点検へ戻して選び直す。
-      if(session.phase === 'READY' && !session.selectedBattery){
-        session.phase = 'PRE';
-      }
-      STATE.active = true;
-      STATE.session = session;
-      persistOperationDraft();
-    }
-  }catch(e){}
-}
-
-function clearOperationDraft(){
-  try{ localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY); }catch(e){}
-}
-
-function updateNetworkStatus(){
-  var online = navigator.onLine;
-  var badge = el('networkBadge');
-  if(!badge) return;
-  badge.className = 'network-badge ' + (online ? 'online' : 'offline');
-  badge.innerText = online ? '● オンライン' : '● 圏外（入力は端末に保持）';
-}
-
-window.addEventListener('online', updateNetworkStatus);
-window.addEventListener('offline', updateNetworkStatus);
 
 function pushDraftHistory(session){
   var history = Array.isArray(session.navigationHistory) ? session.navigationHistory.slice() : [];
@@ -3078,7 +3250,7 @@ function localFlightAction(name, payload, onSuccess){
     STATE.active = true;
     STATE.session = session;
   }else if(!session){
-    alert('進行中の運航がありません。');
+    WORKFLOW_PORTS.notify('進行中の運航がありません。');
     return;
   }else if(name === 'savePreflight'){
     session.preflightChecks = cloneData(payload.checks || {});
@@ -3164,7 +3336,7 @@ function localFlightAction(name, payload, onSuccess){
     session.phase = 'POST_ALL';
   }else if(name === 'goBack'){
     var history = Array.isArray(session.navigationHistory) ? session.navigationHistory.slice() : [];
-    if(!history.length){ alert('これより前の画面はありません。'); return; }
+    if(!history.length){ WORKFLOW_PORTS.notify('これより前の画面はありません。'); return; }
     var previous = history.pop();
     if(previous){
       previous.preflightChecks = cloneData(session.preflightChecks || previous.preflightChecks || {});
@@ -3188,266 +3360,11 @@ function localFlightAction(name, payload, onSuccess){
 
   persistOperationDraft();
   if(onSuccess) onSuccess(STATE);
-  else render();
+  else WORKFLOW_PORTS.render();
 }
 
-function callServer(name, arg, onSuccess){
-  if(LOCAL_FLIGHT_ACTIONS.indexOf(name) >= 0){
-    localFlightAction(name, arg, onSuccess);
-    return;
-  }
+// GPS取得と国土地理院の逆ジオコーディング。
 
-  if(name === 'finishAircraft'){
-    if(!navigator.onLine){
-      alert('現在は圏外です。入力内容は端末に残っています。電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
-      return;
-    }
-    STATE.session.pendingPostflightInput = cloneData(arg || {});
-    persistOperationDraft();
-    arg = { session:cloneData(STATE.session), postflight:arg || {} };
-  }
-
-  busy(true);
-  var r = google.script.run
-    .withSuccessHandler(function(res){
-      busy(false);
-      if(name === 'finishAircraft'){
-        STATE = res;
-        render();
-        clearOperationDraft();
-        if(onSuccess) onSuccess(res);
-        return;
-      }
-      if(onSuccess) onSuccess(res);
-      else {
-        STATE = res;
-        render();
-      }
-    })
-    .withFailureHandler(function(err){
-      busy(false);
-      var msg = err && err.message ? err.message : String(err);
-      if(name === 'finishAircraft') alert('保存できませんでした。入力内容は端末に残っています。電波を確認して、もう一度保存してください。\n\n' + msg);
-      else renderError(msg);
-    });
-
-  if(arg===undefined) r[name]();
-  else r[name](arg);
-}
-
-function clearFormErrors(containerId){
-  var banner = el(containerId + '_errorBanner');
-  if(banner) banner.remove();
-  var errInputs = document.querySelectorAll('.input-error');
-  for(var i=0; i<errInputs.length; i++){
-    errInputs[i].classList.remove('input-error');
-  }
-}
-
-function showFormErrors(containerId, errorItems){
-  clearFormErrors(containerId);
-  if(!errorItems || errorItems.length === 0) return true;
-
-  var container = el(containerId);
-  var banner = document.createElement('div');
-  banner.id = containerId + '_errorBanner';
-  banner.className = 'error-banner';
-
-  var html = '<strong>⚠️ 未入力または確認が必要な項目があります</strong><ul>';
-  for(var i=0; i<errorItems.length; i++){
-    var item = errorItems[i];
-    html += '<li>【' + esc(item.label) + '】 ' + esc(item.message || '入力してください。') + '</li>';
-    if(item.id){
-      var elem = el(item.id);
-      if(elem){
-        elem.classList.add('input-error');
-        (function(targetElem){
-          var removeErr = function(){
-            targetElem.classList.remove('input-error');
-            targetElem.removeEventListener('input', removeErr);
-            targetElem.removeEventListener('change', removeErr);
-          };
-          targetElem.addEventListener('input', removeErr);
-          targetElem.addEventListener('change', removeErr);
-        })(elem);
-      }
-    }
-  }
-  html += '</ul>';
-  banner.innerHTML = html;
-
-  if(container){
-    container.insertBefore(banner, container.firstChild);
-  }
-
-  var firstElem = errorItems[0].id ? el(errorItems[0].id) : null;
-  if(firstElem){
-    firstElem.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    try{ firstElem.focus(); }catch(e){}
-  } else if(banner) {
-    banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
-
-  return false;
-}
-
-function renderError(msg){
-  if(typeof msg === 'string' && msg.indexOf('SESSION_EXISTS::') >= 0){
-    var sess = {};
-    try { sess = JSON.parse(msg.split('SESSION_EXISTS::')[1]); }catch(e){}
-    el('app').innerHTML =
-      '<div class="card" style="border-left:5px solid #f59e0b; background:#fffbeb;">' +
-        '<h2 style="color:#b45309; margin-top:0;">⚠️ 前回の運航記録が中断されたまま残っています</h2>' +
-        '<div style="color:#78350f; font-size:14px; line-height:1.7; margin:12px 0; background:rgba(255,255,255,0.7); padding:10px 14px; border-radius:6px; border:1px solid #fde68a;">' +
-          '前回の記録が正常に完了していません。新しく開始する前にどちらかを選択してください。<br>' +
-          '・<strong>対象機体:</strong> ' + esc(sess.model || '未設定') + '<br>' +
-          '・<strong>飛行枠:</strong> ' + esc(sess.dateSheet || '') + ' No.' + esc(sess.blockNo || '') + '<br>' +
-          '・<strong>中断時点の進捗:</strong> <span class="badge active" style="font-size:12px;background:#b45309;">' + esc(sess.phaseName || sess.phase || '進行中') + '</span><br>' +
-          '・<strong>操縦者:</strong> ' + esc(sess.pilot || '未設定') + '<br>' +
-          '・<strong>飛行場所:</strong> ' + esc(sess.route || '未設定') +
-        '</div>' +
-        '<div style="color:#92400e; font-size:13px; margin-bottom:14px;">' +
-          '※続きから日誌を完成させる場合は<strong>「続きから再開する」</strong>を、前回分を取り消して最初から新しく入力し直す場合は<strong>「破棄して新規開始」</strong>を押してください。' +
-        '</div>' +
-        '<div style="display:flex; flex-direction:column; gap:10px;">' +
-          '<button class="btn btn-primary" style="font-size:15px; padding:12px;" onclick="callServer(\'getAppState\')">▶ 前回の続きから再開する</button>' +
-          '<button class="btn btn-danger btn-sm" onclick="confirmResetSession()">🗑 前回の記録を破棄して新しく開始する</button>' +
-        '</div>' +
-      '</div>';
-    return;
-  }
-  el('app').innerHTML =
-    '<div class="card error-box">' +
-      '<h3>エラー</h3>' +
-      '<div style="margin:10px 0; font-size:14px; line-height:1.6;">' + esc(msg) + '</div>' +
-      '<button class="btn btn-secondary" onclick="render()">戻る</button>' +
-    '</div>';
-}
-
-function confirmResetSession(){
-  if(confirm('本当に前回の運航記録を破棄して、新しく開始しますか？\n（中断されていたデータはクリアされます）')){
-    callServer('cancelCurrentSession');
-  }
-}
-
-function goBackFromAnywhere(){
-  var session = STATE && STATE.session;
-  if(session){
-    captureCurrentScreenDraft();
-    callServer('goBack');
-    return;
-  }
-
-  alert('これより前の画面はありません。');
-}
-
-function captureCurrentScreenDraft(){
-  var s = STATE && STATE.session;
-  if(!s) return;
-  if(s.phase === 'PRE'){
-    var checks = {};
-    for(var i=0; i<PRE_NAMES.length; i++) checks[PRE_NAMES[i]] = isChecked('pre' + i) ? '正常' : '異常';
-    s.preflightChecks = checks;
-    s.preflightAbnormalDetail = val('abnormalDetail');
-    s.selectedBattery = Number(val('preflightBattery')) || 0;
-    s.selectedBatteryCycle = val('preflightCycle');
-  }else if(s.phase === 'BATTERY_CHANGE'){
-    s.pendingBatteryChangeInput = {
-      battery:val('changeBattery'), cycle:val('changeBatteryCycle'),
-      installed:isChecked('batteryInstalled'), statusOk:isChecked('batteryStatusOk')
-    };
-  }else if(s.phase === 'READY'){
-    s.pendingFlightInput = { battery:s.selectedBattery, takeoffLocation:val('takeoffLocation') };
-  }else if(s.phase === 'LANDING'){
-    s.pendingLandingInput = {
-      landingLocation:val('landingLocation'), actualMinutes:val('actualMinutes'),
-      safetyIssue:isChecked('safetyIssue'), safetyDetail:val('safetyDetail'),
-      batteryNote:val('batteryNote')
-    };
-  }else if(s.phase === 'POST_ALL'){
-    var aircrafts = {};
-    var usedModels = Object.keys(s.aircrafts || {}).filter(function(model){ return s.aircrafts[model] && s.aircrafts[model].used; });
-    usedModels.forEach(function(model, modelIndex){
-      var prefix = 'post_' + modelIndex + '_';
-      var postChecks = {};
-      for(var j=0; j<POST_NAMES.length; j++) postChecks[POST_NAMES[j]] = isChecked(prefix + j) ? '正常' : '異常';
-      aircrafts[model] = {
-        checks:postChecks,
-        defectLocation:val(prefix + 'defectLocation'),
-        defectDetail:val(prefix + 'defectDetail'),
-        actionDetail:val(prefix + 'actionDetail')
-      };
-    });
-    s.pendingPostflightInput = {
-      inspectionLocation:val('postLocation'), confirmer:val('confirmer'), aircrafts:aircrafts
-    };
-  }
-  persistOperationDraft();
-}
-
-// ----------------------------------------------------
-// LocalStorage 管理（下書き・直前履歴）
-// ----------------------------------------------------
-var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
-var STORAGE_KEY_ASSISTANTS = 'EVO_LITE_ASSISTANT_HISTORY_V1';
-
-function saveLastOperation(data){
-  try{ localStorage.setItem(STORAGE_KEY_LAST, JSON.stringify(data)); }catch(e){}
-}
-function loadLastOperation(){
-  try{ var d = localStorage.getItem(STORAGE_KEY_LAST); return d ? JSON.parse(d) : null; }catch(e){ return null; }
-}
-function loadAssistantHistory(){
-  try{
-    var raw = localStorage.getItem(STORAGE_KEY_ASSISTANTS);
-    var parsed = raw ? JSON.parse(raw) : [];
-    if(!Array.isArray(parsed)) return [];
-    var names = [];
-    parsed.forEach(function(item){
-      var name = typeof item === 'string' ? item.trim() : '';
-      if(name && names.indexOf(name) < 0) names.push(name);
-    });
-    return names;
-  }catch(e){ return []; }
-}
-function saveAssistantHistory(names){
-  try{ localStorage.setItem(STORAGE_KEY_ASSISTANTS, JSON.stringify(names)); }catch(e){}
-}
-function rememberAssistantName(name){
-  name = String(name == null ? '' : name).trim();
-  if(!name) return;
-  var names = loadAssistantHistory();
-  if(names.indexOf(name) < 0){
-    names.push(name);
-    saveAssistantHistory(names);
-  }
-}
-function assistantCandidates(lastAssistant, currentAssistant){
-  var names = loadAssistantHistory();
-  [lastAssistant, currentAssistant].forEach(function(item){
-    var name = String(item == null ? '' : item).trim();
-    if(name && names.indexOf(name) < 0) names.push(name);
-  });
-  return names;
-}
-function assistantOptionsHtml(lastAssistant, currentAssistant){
-  var selectedName = String(currentAssistant == null ? '' : currentAssistant).trim();
-  var html = '<option value=""' + (!selectedName ? ' selected' : '') + '>なし</option>';
-  assistantCandidates(lastAssistant, selectedName).forEach(function(name){
-    html += '<option value="' + esc(name) + '"' + (selectedName === name ? ' selected' : '') + '>' + esc(name) + '</option>';
-  });
-  return html + '<option value="__NEW__">新しい人を入力</option>';
-}
-function onAssistantSelectionChanged(){
-  var box = el('assistantNewBox');
-  if(box) box.style.display = val('assistantSelect') === '__NEW__' ? 'block' : 'none';
-}
-function selectedAssistantName(){
-  return val('assistantSelect') === '__NEW__' ? val('assistantNew') : val('assistantSelect');
-}
-// ----------------------------------------------------
-// GPS自動取得＆逆ジオコーディング（手打ちゼロ）
-// ----------------------------------------------------
 function fetchCurrentGps(targetId, targetRouteId){
   if(!navigator.geolocation){
     alert('お使いのブラウザはGPS位置情報に対応していません。');
@@ -3490,315 +3407,18 @@ function fetchCurrentGps(targetId, targetRouteId){
   }, { enableHighAccuracy: true, timeout: 8000 });
 }
 
-// ----------------------------------------------------
-// メイン描画ディスパッチャ
-// ----------------------------------------------------
-function render(){
-  var appDiv = el('app');
-  var badge = el('appStatusBadge');
-  var backButton = el('globalBackButton');
-  var hasActiveOperation = !!(STATE && STATE.active && STATE.session);
+var CATEGORY_NOTICE_TIMER = null;
 
-  // 運航の初期画面には「一つ前」が存在しないため表示しない。
-  if(backButton){
-    backButton.style.display = hasActiveOperation ? 'block' : 'none';
-  }
-
-  if(TIMER_INTERVAL){ clearInterval(TIMER_INTERVAL); TIMER_INTERVAL = null; }
-  if(!STATE){
-    badge.className = 'badge';
-    badge.innerText = '接続中';
-    appDiv.innerHTML = '<div class="card">接続中...</div>';
-    return;
-  }
-
-  if(!STATE.active){
-    badge.className = 'badge';
-    badge.innerText = '待機中';
-    renderStartView(appDiv);
-  } else {
-    badge.className = 'badge active';
-    badge.innerText = '運航中';
-    var phase = STATE.session.phase;
-    if(phase === 'PRE') renderPreView(appDiv);
-    else if(phase === 'PRE_ABNORMAL') renderPreAbnormalView(appDiv);
-    else if(phase === 'BATTERY_CHANGE') renderBatteryChangeView(appDiv);
-    else if(phase === 'READY') renderReadyView(appDiv);
-    else if(phase === 'FLYING') renderFlyingView(appDiv);
-    else if(phase === 'LANDING') renderLandingView(appDiv);
-    else if(phase === 'POST_ALL') renderPostView(appDiv);
-    else renderAfterLandingView(appDiv);
-  }
-}
-
-// ----------------------------------------------------
-// 保存状態の読み取り専用診断モーダル
-// ----------------------------------------------------
-var STAGE_HUMAN_NAMES = {
-  'PLAN_PERSISTED': '保存準備完了',
-  'PREFLIGHT_WRITTEN': '点検記録保存後',
-  'FLIGHTS_WRITTEN': '飛行記録保存後',
-  'BATTERY_WRITTEN': 'BAT履歴保存後',
-  'POSTFLIGHT_WRITTEN': '飛行後点検保存後',
-  'AIRCRAFT_TOTALS_WRITTEN': '機体累計更新後',
-  'FINAL_FLUSH': 'シート反映後（検証前）',
-  'VERIFIED': '検証完了（完了前）'
-};
-
-function openCommitDiagnosisModal(){
-  var existing = el('commitDiagnosisModal');
-  if(existing) existing.remove();
-
-  var overlay = document.createElement('div');
-  overlay.id = 'commitDiagnosisModal';
-  overlay.className = 'diag-modal-overlay';
-  overlay.onclick = function(e){
-    if(e.target === overlay) closeCommitDiagnosisModal();
-  };
-
-  overlay.innerHTML =
-    '<div class="diag-modal-content" onclick="event.stopPropagation()">' +
-      '<div class="diag-modal-header">' +
-        '<h3>📋 保存状態の診断</h3>' +
-        '<button type="button" class="diag-modal-close" onclick="closeCommitDiagnosisModal()" aria-label="閉じる">✕</button>' +
-      '</div>' +
-      '<div class="diag-modal-body" id="diagModalBody">' +
-        '<div style="text-align:center;padding:24px 8px;">' +
-          '<div style="font-size:15px;font-weight:600;color:#1e40af;margin-bottom:8px;">スプレッドシートの保存状態を確認中...</div>' +
-          '<div style="font-size:12px;color:#64748b;">読み取り専用で安全に確認しています（変更はされません）</div>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
-
-  document.body.appendChild(overlay);
-  runCommitDiagnosis();
-}
-
-function closeCommitDiagnosisModal(){
-  var modal = el('commitDiagnosisModal');
-  if(modal) modal.remove();
-}
-
-function runCommitDiagnosis(){
-  var body = el('diagModalBody');
-  if(!body) return;
-
-  google.script.run
-    .withSuccessHandler(function(reports){
-      renderCommitDiagnosisResult(reports);
-    })
-    .withFailureHandler(function(err){
-      var msg = err && err.message ? err.message : String(err);
-      if(!el('diagModalBody')) return;
-      el('diagModalBody').innerHTML =
-        '<div class="warn-box" style="margin-bottom:12px;">' +
-          '<strong style="color:#b91c1c;">⚠️ 診断処理でエラーが発生しました</strong>' +
-          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
-        '</div>' +
-        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">再試行する</button>' +
-        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
-    })
-    .diagnosePendingCommitPlans();
-}
-
-function renderCommitDiagnosisResult(reports){
-  var body = el('diagModalBody');
-  if(!body) return;
-
-  if(!reports || reports.length === 0){
-    body.innerHTML =
-      '<div class="diag-item-card is-ok">' +
-        '<div style="font-weight:700;font-size:15px;color:#065f46;margin-bottom:6px;">✅ 未完了の保存はありません</div>' +
-        '<div style="font-size:13px;color:#047857;">すべての運航記録は正常に保存・完了しています。<br>スプレッドシートとの競合や保留データはありません。</div>' +
-      '</div>' +
-      '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>';
-    return;
-  }
-
-  var html = '<div style="margin-bottom:10px;font-weight:700;color:#991b1b;font-size:14px;">⚠️ 保留中・未完了の保存が ' + reports.length + ' 件見つかりました</div>';
-
-  reports.forEach(function(r, idx){
-    var stateText = r.state === 'failed' ? '失敗（途中で停止）' : (r.state === 'writing' ? '処理中（または通信切断）' : esc(r.state));
-    var stageText = STAGE_HUMAN_NAMES[r.stage] || r.stage || '(不明)';
-    var lastErrStageText = r.lastErrorStage ? (STAGE_HUMAN_NAMES[r.lastErrorStage] || r.lastErrorStage) : '(なし)';
-    var stoppedAtText = r.lastErrorStage && r.lastErrorStage !== '(なし)' ? lastErrStageText + ' で停止' : stageText;
-
-    var counts = r.operationCounts || { intended: 0, before: 0, conflict: 0, total: 0 };
-    var hasCorruption = !r.chunksComplete || !r.planHashMatches;
-    var corruptionText = hasCorruption ? '⚠️ 異常あり（データ欠落・破損の疑い）' : 'なし（正常）';
-
-    var isSafe = !!r.safeToRecover;
-    var recoveryStatusText = isSafe ? 'あり（安全に復旧可能）' : '不可';
-
-    var detailId = 'diagDetail_' + idx;
-
-    html +=
-      '<div class="diag-item-card has-pending">' +
-        '<div style="font-weight:700;font-size:14px;color:#9f1239;margin-bottom:6px;">' +
-          '【保存計画 ' + (idx + 1) + '】 前回の保存が途中で止まっています' +
-        '</div>' +
-        '<div class="diag-grid">' +
-          '<div class="diag-grid-label">状態</div><div class="diag-grid-value"><strong>' + esc(stateText) + '</strong></div>' +
-          '<div class="diag-grid-label">止まった場所</div><div class="diag-grid-value"><strong>' + esc(stoppedAtText) + '</strong></div>' +
-          '<div class="diag-grid-label">未書込み</div><div class="diag-grid-value">' + counts.before + ' 件</div>' +
-          '<div class="diag-grid-label">書込み済み</div><div class="diag-grid-value">' + counts.intended + ' 件（全' + counts.total + '件中）</div>' +
-          '<div class="diag-grid-label">競合件数</div><div class="diag-grid-value">' + (counts.conflict > 0 ? '<span style="color:#dc2626;font-weight:700;">' + counts.conflict + ' 件</span>' : '0 件') + '</div>' +
-          '<div class="diag-grid-label">データ破損の有無</div><div class="diag-grid-value">' + esc(corruptionText) + '</div>' +
-          '<div class="diag-grid-label">安全に復旧できるか</div><div class="diag-grid-value"><strong style="color:' + (isSafe ? '#15803d' : '#b91c1c') + ';">' + recoveryStatusText + '</strong></div>' +
-        '</div>';
-
-    if(r.statusCategory === 'SAFE_TO_RECOVER'){
-      html +=
-        '<div style="margin-top:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px;text-align:center;">' +
-          '<div style="font-size:13px;font-weight:700;color:#065f46;margin-bottom:4px;">✨ 前回の保存を安全に復旧できます</div>' +
-          '<div style="font-size:12px;color:#047857;margin-bottom:10px;line-height:1.4;">' +
-            '前回の続きの書き込みを安全に完了し、保留状態を解除します。<br>（重複記録や累計の二重加算は発生しません）' +
-          '</div>' +
-          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" onclick="executeCommitRecovery(\'' + esc(r.draftId) + '\')">' +
-            '🚀 前回の保存を安全に復旧する' +
-          '</button>' +
-        '</div>';
-    } else if(r.statusCategory === 'SAFE_TO_DISCARD_TEST'){
-      html +=
-        '<div style="margin-top:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;text-align:center;">' +
-          '<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:4px;">💡 このTEST保存は安全に破棄できます</div>' +
-          '<div style="font-size:12px;color:#b45309;margin-bottom:10px;line-height:1.4;">' +
-            'TEST日付シートは既に削除されており、BAT履歴や機体累計にも書き込まれていません。<br>' +
-            'このテスト保存計画を破棄して保留ロックを解除し、現在の入力内容を保存できるようにします。' +
-          '</div>' +
-          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" onclick="executeTestCommitDiscard(\'' + esc(r.draftId) + '\')">' +
-            '🗑️ このTEST保存を破棄して解除' +
-          '</button>' +
-        '</div>';
-    } else {
-      html +=
-        '<div class="warn-box" style="margin-top:10px;background:#fef2f2;border-left:4px solid #ef4444;padding:10px;">' +
-          '<strong style="color:#b91c1c;">⚠️ 自動処理できません。詳細を確認してください</strong>' +
-          '<div style="font-size:12px;color:#7f1d1d;margin-top:4px;">' +
-            '理由: ' + esc((r.resumeBlockReasons || []).concat(r.discardBlockReasons || []).filter(function(v,i,a){return a.indexOf(v)===i;}).join(' / ') || '競合またはデータ不整合') +
-          '</div>' +
-        '</div>';
-    }
-
-    html +=
-        '<button type="button" class="diag-detail-toggle" onclick="toggleDiagDetail(\'' + detailId + '\')">▶ 詳しい技術情報（draftIdなど）を見る</button>' +
-        '<div id="' + detailId + '" class="diag-detail-box" style="display:none;">' +
-          'draftId: ' + esc(r.draftId) + '\n' +
-          '運航種別: ' + (r.isAppTest ? 'アプリテスト (TEST運航)' : '通常運航') + '\n' +
-          '状態分類: ' + esc(r.statusCategory || '') + '\n' +
-          '目的: ' + esc(r.purpose || '') + '\n' +
-          '作成日時: ' + esc(r.createdAt) + '\n' +
-          '更新日時: ' + esc(r.updatedAt) + '\n' +
-          'DATA chunks: ' + (r.chunksComplete ? '完全' : '一部欠落') + '\n' +
-          'planHash一致: ' + (r.planHashMatches ? '一致' : '不一致') + '\n' +
-          'セル状態: intended ' + r.operationCounts.intended + ' / before ' + r.operationCounts.before + ' / conflict ' + r.operationCounts.conflict + ' 件\n' +
-          '機体累計状況: ' + (r.isAppTest ? r.aircraftTotals.note : (r.aircraftTotals.matched + ' / ' + r.aircraftTotals.targets + ' 件')) + '\n' +
-          (r.conflicts && r.conflicts.length > 0 ? ('\n[競合詳細]:\n' + JSON.stringify(r.conflicts, null, 2)) : '') +
-        '</div>' +
-      '</div>';
-  });
-
-  html +=
-    '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>';
-
-  body.innerHTML = html;
-}
-
-function executeCommitRecovery(draftId){
-  var body = el('diagModalBody');
-  if(!body) return;
-
-  body.innerHTML =
-    '<div style="text-align:center;padding:32px 12px;">' +
-      '<div style="font-size:16px;font-weight:700;color:#1e40af;margin-bottom:8px;">前回の保存を復旧中...</div>' +
-      '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">スプレッドシートの残りの書き込みを安全に完了しています</div>' +
-      '<div class="text-sm" style="color:#0369a1;">（端末に入力中の下書きは保持されています）</div>' +
-    '</div>';
-
-  google.script.run
-    .withSuccessHandler(function(res){
-      if(!el('diagModalBody')) return;
-      el('diagModalBody').innerHTML =
-        '<div class="diag-item-card is-ok" style="padding:16px;text-align:center;">' +
-          '<div style="font-weight:700;font-size:16px;color:#065f46;margin-bottom:8px;">' +
-            '✅ 前回の保存を復旧しました。現在の運航を保存できます' +
-          '</div>' +
-          '<div style="font-size:13px;color:#047857;line-height:1.5;margin-bottom:14px;">' +
-            '前回の保存は正常に完了し、保留状態が解除されました。<br>' +
-            '端末の入力内容はそのまま保持されていますので、このまま「運航日誌を確定する」を押して保存してください。' +
-          '</div>' +
-          '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>' +
-        '</div>';
-    })
-    .withFailureHandler(function(err){
-      var msg = err && err.message ? err.message : String(err);
-      if(!el('diagModalBody')) return;
-      el('diagModalBody').innerHTML =
-        '<div class="warn-box" style="margin-bottom:12px;">' +
-          '<strong style="color:#b91c1c;">⚠️ 復旧処理でエラーが発生しました</strong>' +
-          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
-        '</div>' +
-        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">もう一度確認する</button>' +
-        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
-    })
-    .recoverPendingCommitPlan(draftId);
-}
-
-function executeTestCommitDiscard(draftId){
-  var body = el('diagModalBody');
-  if(!body) return;
-
-  body.innerHTML =
-    '<div style="text-align:center;padding:32px 12px;">' +
-      '<div style="font-size:16px;font-weight:700;color:#991b1b;margin-bottom:8px;">テスト保存計画を破棄中...</div>' +
-      '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">保留ロックを安全に解除しています</div>' +
-      '<div class="text-sm" style="color:#0369a1;">（端末に入力中の下書きは保持されています）</div>' +
-    '</div>';
-
-  google.script.run
-    .withSuccessHandler(function(res){
-      if(!el('diagModalBody')) return;
-      el('diagModalBody').innerHTML =
-        '<div class="diag-item-card is-ok" style="padding:16px;text-align:center;">' +
-          '<div style="font-weight:700;font-size:16px;color:#065f46;margin-bottom:8px;">' +
-            '✅ 保留中のテスト保存を破棄しました' +
-          '</div>' +
-          '<div style="font-size:13px;color:#047857;margin-bottom:16px;line-height:1.5;">' +
-            '保留ロックが解除されました。<br>入力中の下書きは保持されています。<br>「閉じる」を押して、そのまま一括保存を実行できます。' +
-          '</div>' +
-          '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>' +
-        '</div>';
-    })
-    .withFailureHandler(function(err){
-      var msg = err && err.message ? err.message : String(err);
-      if(!el('diagModalBody')) return;
-      el('diagModalBody').innerHTML =
-        '<div class="warn-box" style="margin-bottom:12px;">' +
-          '<strong style="color:#b91c1c;">⚠️ 破棄処理でエラーが発生しました</strong>' +
-          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
-        '</div>' +
-        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">再試行する</button>' +
-        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
-    })
-    .discardPendingTestCommitPlan(draftId);
-}
-
-function toggleDiagDetail(id){
-  var elBox = el(id);
-  if(!elBox) return;
-  var isHidden = elBox.style.display === 'none';
-  elBox.style.display = isHidden ? 'block' : 'none';
-}
 // ----------------------------------------------------
 // 1. 運航開始画面（トップ）
 // ----------------------------------------------------
 function renderStartView(div){
   var last = loadLastOperation() || {};
-  var currentAssistant = STATE && STATE.session ? STATE.session.assistant || '' : '';
+  var currentAssistant = screenState() && screenState().session ? screenState().session.assistant || '' : '';
 
   var sessionNoticeHtml = '';
-  if(STATE && STATE.session){
-    var s = STATE.session;
+  if(screenState() && screenState().session){
+    var s = screenState().session;
     var phaseNames = {
       'PRE': '飛行前点検',
       'BATTERY_CHANGE': 'バッテリー交換後確認',
@@ -3815,8 +3435,8 @@ function renderStartView(div){
           '機体: <strong>' + esc(s.model) + '</strong> ｜ 進捗: <strong>' + esc(phaseNames[s.phase] || s.phase) + '</strong>' +
         '</div>' +
         '<div class="flex-row">' +
-          '<button type="button" class="btn btn-primary btn-sm" onclick="render()">▶ 続きから再開</button>' +
-          '<button type="button" class="btn btn-danger btn-sm" onclick="confirmResetSession()">🗑 破棄して新規開始</button>' +
+          '<button type="button" class="btn btn-primary btn-sm" onclick="screenRender()">▶ 続きから再開</button>' +
+          '<button type="button" class="btn btn-danger btn-sm" onclick="screenReset()">🗑 破棄して新規開始</button>' +
         '</div>' +
       '</div>';
   }
@@ -3843,10 +3463,10 @@ function renderStartView(div){
         '<button type="button" class="btn-outline" onclick="applyLastOperation()">🔄 前回と同じ条件で引用</button>' +
       '</div>' +
       '<div class="status-box">' +
-        '本日：<strong>' + esc(STATE.today) + '</strong> ' +
-        (STATE.hasTodaySheet ? '（日付シート作成済み）' : '（開始時に自動作成）') +
+        '本日：<strong>' + esc(screenState().today) + '</strong> ' +
+        (screenState().hasTodaySheet ? '（日付シート作成済み）' : '（開始時に自動作成）') +
       '</div>' +
-      (STATE.hasTodaySheet ? '<label class="check-item" style="margin:8px 0;background:#eff6ff;padding:6px 10px;border-radius:8px;border:1px solid #bfdbfe;"><input type="checkbox" id="forceNewLocation"><span style="font-size:13px;font-weight:600;color:#1e40af;">🏢 本日別の新しい現場として連番シート（' + esc(STATE.today) + '_2 等）で開始する</span></label>' : '') +
+      (screenState().hasTodaySheet ? '<label class="check-item" style="margin:8px 0;background:#eff6ff;padding:6px 10px;border-radius:8px;border:1px solid #bfdbfe;"><input type="checkbox" id="forceNewLocation"><span style="font-size:13px;font-weight:600;color:#1e40af;">🏢 本日別の新しい現場として連番シート（' + esc(screenState().today) + '_2 等）で開始する</span></label>' : '') +
 
       '<label>機体選択<span class="required">*</span></label>' +
       '<select id="model">' +
@@ -3856,7 +3476,7 @@ function renderStartView(div){
 
       '<div class="flex-between">' +
         '<label>飛行経路・場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'inspectionLocation\', \'route\')">📍 GPSから現在地を取得</button>' +
+        '<button type="button" class="btn-outline" onclick="screenGps(\'inspectionLocation\', \'route\')">📍 GPSから現在地を取得</button>' +
       '</div>' +
       '<input type="text" id="route" placeholder="例：〇〇海岸周辺 半径100m、△△グラウンド等" value="' + esc(last.route || '') + '">' +
 
@@ -3948,7 +3568,7 @@ function renderStartView(div){
       '<button class="btn btn-primary" style="font-size:16px;padding:13px;" onclick="submitStartOperation()">次へ：飛行前点検を開始</button>' +
     '</div>' +
     '<div style="text-align:center;margin-top:16px;margin-bottom:8px;">' +
-      '<button type="button" class="diag-trigger-btn" onclick="openCommitDiagnosisModal()">' +
+      '<button type="button" class="diag-trigger-btn" onclick="screenDiagnosis()">' +
         '🔧 サーバー保存状態を確認（診断）' +
       '</button>' +
     '</div>';
@@ -4097,41 +3717,75 @@ function submitStartOperation(){
     windDir: val('windDirVal')
   };
 
-  callServer('startAircraft', payload, function(res){
+  screenAction('startAircraft', payload, function(res){
     saveLastOperation(payload);
     rememberAssistantName(payload.assistant);
-    STATE = res;
-    render();
+    screenRender(res);
   });
 }
+
+function selectWeather(btn, val){
+  var parent = el('weatherChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('weatherVal')) el('weatherVal').value = val;
+}
+
+function selectWindSpeed(btn, val){
+  var parent = el('windSpeedChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('windSpeedVal')) el('windSpeedVal').value = val;
+}
+
+function selectWindDir(btn, val){
+  var parent = el('windDirChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('windDirVal')) el('windDirVal').value = val;
+}
+
+function assistantOptionsHtml(lastAssistant, currentAssistant){
+  var selectedName = String(currentAssistant == null ? '' : currentAssistant).trim();
+  var html = '<option value=""' + (!selectedName ? ' selected' : '') + '>なし</option>';
+  assistantCandidates(lastAssistant, selectedName).forEach(function(name){
+    html += '<option value="' + esc(name) + '"' + (selectedName === name ? ' selected' : '') + '>' + esc(name) + '</option>';
+  });
+  return html + '<option value="__NEW__">新しい人を入力</option>';
+}
+
+function onAssistantSelectionChanged(){
+  var box = el('assistantNewBox');
+  if(box) box.style.display = val('assistantSelect') === '__NEW__' ? 'block' : 'none';
+}
+
+function selectedAssistantName(){
+  return val('assistantSelect') === '__NEW__' ? val('assistantNew') : val('assistantSelect');
+}
+
+var TIMER_INTERVAL = null;
 
 // ----------------------------------------------------
 // セッションヘッダー
 // ----------------------------------------------------
-function sessionHeaderHtml(){
-  var s = STATE.session;
-  var recordLabel = s.blockNo
-    ? s.dateSheet + ' No.' + s.blockNo
-    : s.operationDate + '（全運航終了時に一括保存）';
-  return '<div class="card status-box" style="margin-bottom:8px;">' +
-    '<div class="flex-between">' +
-      '<div><strong>' + esc(recordLabel) + '</strong> ｜ ' + esc(s.model) + '</div>' +
-      '<div class="flex-row" style="gap:6px;align-items:center;">' +
-        '<span class="badge active">' + esc(s.category) + '</span>' +
-        '<button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelSessionPrompt()">↩ 運航中止</button>' +
-      '</div>' +
-    '</div>' +
-    '<div class="text-sm" style="margin-top:4px;">' + esc(s.route) + ' / ' + esc(s.purpose) + '</div>' +
-  '</div>';
-}
+
 
 // ----------------------------------------------------
 // 2. 飛行前点検画面（様式2）
 // ----------------------------------------------------
 function renderPreView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var savedChecks = (s && s.preflightChecks) || {};
-  var batteryOptions = '<option value="">装着しているBATを選択</option>' + STATE.batteries.map(function(b){
+  var batteryOptions = '<option value="">装着しているBATを選択</option>' + screenState().batteries.map(function(b){
     return '<option value="' + b.value + '"' + (String(s.selectedBattery || '') === String(b.value) ? ' selected' : '') + '>' + esc(b.label) + '</option>';
   }).join('');
   var checksHtml = PRE_NAMES.map(function(name, i){
@@ -4142,7 +3796,7 @@ function renderPreView(div){
       '<span class="check-detail">' + esc(check.detail) + '</span></span></label>';
   }).join('');
   var hasSavedAbnormal = PRE_NAMES.some(function(name){ return savedChecks[name] === '異常'; });
-  var savedAbnormalDetail = (STATE.session && STATE.session.preflightAbnormalDetail) || '';
+  var savedAbnormalDetail = (screenState().session && screenState().session.preflightAbnormalDetail) || '';
 
   div.innerHTML = sessionHeaderHtml() +
     '<div class="card" id="preCard">' +
@@ -4168,7 +3822,7 @@ function renderPreView(div){
       '</div>' +
 
       '<button class="btn btn-primary" onclick="submitPreflight()">飛行前点検を完了して離陸準備へ</button>' +
-      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="cancelSessionPrompt()">この運航入力を中止</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="screenCancel()">この運航入力を中止</button>' +
     '</div>';
 }
 
@@ -4213,7 +3867,7 @@ function submitPreflight(){
     return;
   }
 
-  callServer('savePreflight', {
+  screenAction('savePreflight', {
     checks: checks,
     abnormalDetail: val('abnormalDetail'),
     battery: battery,
@@ -4226,7 +3880,7 @@ function renderPreAbnormalView(div){
     '<div class="card error-box">' +
       '<h2>飛行前点検で異常を記録しました</h2>' +
       '<p>この機体は離陸できません。必要な点検・整備を行い、点検整備記録はスプレッドシートの「点検整備記録_原本」を使用して記録してください。</p>' +
-      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="cancelSessionPrompt()">この運航を終了する</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="screenCancel()">この運航を終了する</button>' +
     '</div>';
 }
 
@@ -4234,9 +3888,9 @@ function renderPreAbnormalView(div){
 // 3. バッテリー交換確認／飛行開始待機画面（離陸前）
 // ----------------------------------------------------
 function renderBatteryChangeView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var previousInput = s.pendingBatteryChangeInput || {};
-  var batteryOptions = '<option value="">交換後のBATを選択</option>' + STATE.batteries.map(function(b){
+  var batteryOptions = '<option value="">交換後のBATを選択</option>' + screenState().batteries.map(function(b){
     return '<option value="' + b.value + '"' + (String(previousInput.battery || '') === String(b.value) ? ' selected' : '') + '>' + esc(b.label) + '</option>';
   }).join('');
 
@@ -4264,13 +3918,13 @@ function submitBatteryChange(){
   if(!isChecked('batteryInstalled')) errors.push({ id:'batteryInstalled', label:'装着・ロック', message:'実機を確認してチェックしてください。' });
   if(!isChecked('batteryStatusOk')) errors.push({ id:'batteryStatusOk', label:'残量・警告表示', message:'Autel Skyの表示を確認してチェックしてください。' });
   if(errors.length){ showFormErrors('batteryChangeCard', errors); return; }
-  callServer('confirmBatteryChange', {
+  screenAction('confirmBatteryChange', {
     battery:battery, cycle:val('changeBatteryCycle'), installed:true, statusOk:true
   });
 }
 
 function renderReadyView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var previousInput = s.pendingFlightInput || {};
 
   div.innerHTML = sessionHeaderHtml() +
@@ -4283,16 +3937,16 @@ function renderReadyView(div){
 
       '<div class="flex-between">' +
         '<label>離陸場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'takeoffLocation\', null)">📍 GPSで現在地更新（任意）</button>' +
+        '<button type="button" class="btn-outline" onclick="screenGps(\'takeoffLocation\', null)">📍 GPSで現在地更新（任意）</button>' +
       '</div>' +
       '<input type="text" id="takeoffLocation" value="' + esc(previousInput.takeoffLocation || s.route) + '">' +
 
       '<button class="btn btn-success" style="font-size:18px;padding:14px;margin-top:14px;" onclick="submitStartFlight()">🛫 離陸開始</button>' +
       '<div class="flex-row" style="margin-top:10px;">' +
         '<button type="button" class="btn btn-secondary btn-sm" onclick="onSwitchAircraftClick(\'' + esc(s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite') + '\')">🔄 機体を交代する（' + esc(s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite') + 'へ）</button>' +
-        '<button type="button" class="btn btn-secondary btn-sm" onclick="callServer(\'startPostflight\')">🏁 飛行せず終了（飛行後点検へ）</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" onclick="screenAction(\'startPostflight\')">🏁 飛行せず終了（飛行後点検へ）</button>' +
       '</div>' +
-      '<button class="btn btn-danger btn-sm" style="margin-top:14px;" onclick="cancelSessionPrompt()">この運航入力を中止</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:14px;" onclick="screenCancel()">この運航入力を中止</button>' +
     '</div>';
 }
 
@@ -4300,7 +3954,7 @@ function submitStartFlight(){
   clearFormErrors('readyCard');
   var errors = [];
 
-  var battery = Number(STATE.session.selectedBattery || 0);
+  var battery = Number(screenState().session.selectedBattery || 0);
   if(!battery) errors.push({ id: '', label: '使用バッテリー', message: '一つ前の画面に戻り、使用バッテリーを確認してください。' });
 
   var takeoffLocation = val('takeoffLocation');
@@ -4311,7 +3965,7 @@ function submitStartFlight(){
     return;
   }
 
-  callServer('startFlight', {
+  screenAction('startFlight', {
     battery: battery,
     takeoffLocation: takeoffLocation
   });
@@ -4321,7 +3975,7 @@ function submitStartFlight(){
 // 4. 飛行中画面（操縦に集中）／着陸後入力画面
 // ----------------------------------------------------
 function renderFlyingView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var startTime = new Date(s.startedAt);
 
   div.innerHTML = sessionHeaderHtml() +
@@ -4334,7 +3988,7 @@ function renderFlyingView(div){
       '<div class="warn-box" style="margin-top:12px;background:#eff6ff;border-left-color:#2563eb;color:#1e3a8a;">' +
         '<strong>飛行中は画面操作をせず、操縦と周囲確認に集中してください。</strong>' +
       '</div>' +
-      '<button class="btn btn-warning" style="font-size:18px;padding:16px;margin-top:16px;" onclick="callServer(\'completeLanding\')">🛬 着陸完了（プロペラ停止後）</button>' +
+      '<button class="btn btn-warning" style="font-size:18px;padding:16px;margin-top:16px;" onclick="screenAction(\'completeLanding\')">🛬 着陸完了（プロペラ停止後）</button>' +
     '</div>';
 
   updateTimerDisplay(startTime);
@@ -4342,7 +3996,7 @@ function renderFlyingView(div){
 }
 
 function renderLandingView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var previousInput = s.pendingLandingInput || {};
   var startTime = new Date(s.startedAt);
   var activeFlight = s.flights && s.flights.length ? s.flights[s.flights.length - 1] : null;
@@ -4364,7 +4018,7 @@ function renderLandingView(div){
 
       '<div class="flex-between">' +
         '<label>着陸場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'landingLocation\', null)">📍 GPSで現在地取得（任意）</button>' +
+        '<button type="button" class="btn-outline" onclick="screenGps(\'landingLocation\', null)">📍 GPSで現在地取得（任意）</button>' +
       '</div>' +
       '<input type="text" id="landingLocation" value="' + esc(previousInput.landingLocation || s.route) + '">' +
 
@@ -4445,7 +4099,7 @@ function submitLandFlight(){
     return;
   }
 
-  callServer('landFlight', {
+  screenAction('landFlight', {
     landingLocation: landingLocation,
     actualMinutes: actualMinutes,
     safetyIssue: isChecked('safetyIssue'),
@@ -4458,7 +4112,7 @@ function submitLandFlight(){
 // 5. 着陸後選択画面
 // ----------------------------------------------------
 function renderAfterLandingView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var otherModel = s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
   var acs = s.aircrafts || {};
   var otherAc = acs[otherModel];
@@ -4472,20 +4126,49 @@ function renderAfterLandingView(div){
       '</div>' +
       '<p class="text-sm">次に行う操作を選んでください。</p>' +
 
-      '<button class="btn btn-primary" style="font-size:18px;padding:15px;" onclick="callServer(\'continueFlight\')">🔋 同じ機体で続ける（バッテリー交換）</button>' +
+      '<button class="btn btn-primary" style="font-size:18px;padding:15px;" onclick="screenAction(\'continueFlight\')">🔋 同じ機体で続ける（バッテリー交換）</button>' +
       '<div class="text-sm" style="margin:5px 0 0;color:#64748b;">' + esc(s.model) + ' の第' + (s.flightIndex + 1) + '飛行へ進みます。</div>' +
-      
+
       '<button class="btn btn-secondary" style="margin-top:14px;font-size:15px;padding:12px;" onclick="onSwitchAircraftClick(\'' + esc(otherModel) + '\')">🔄 機体を交代する（' + esc(otherModel) + '）' + otherBadge + '</button>' +
 
       '<div style="margin-top:20px;padding-top:14px;border-top:1px solid #cbd5e1;">' +
         '<div class="text-sm" style="margin-bottom:6px;color:#475569;">本日の飛行を終える場合</div>' +
-        '<button class="btn btn-secondary" style="font-size:15px;padding:12px;" onclick="callServer(\'startPostflight\')">🏁 全飛行を終了して飛行後点検へ</button>' +
+        '<button class="btn btn-secondary" style="font-size:15px;padding:12px;" onclick="screenAction(\'startPostflight\')">🏁 全飛行を終了して飛行後点検へ</button>' +
       '</div>' +
     '</div>';
 }
 
 function onSwitchAircraftClick(targetModel){
-  callServer('switchAircraft', { targetModel: targetModel });
+  screenAction('switchAircraft', { targetModel: targetModel });
+}
+
+
+function captureFlightScreenDraft(s){
+  if(s.phase === 'PRE'){
+    var checks = {};
+    for(var i=0; i<PRE_NAMES.length; i++) checks[PRE_NAMES[i]] = isChecked('pre' + i) ? '正常' : '異常';
+    s.preflightChecks = checks;
+    s.preflightAbnormalDetail = val('abnormalDetail');
+    s.selectedBattery = Number(val('preflightBattery')) || 0;
+    s.selectedBatteryCycle = val('preflightCycle');
+  }else if(s.phase === 'BATTERY_CHANGE'){
+    s.pendingBatteryChangeInput = {
+      battery:val('changeBattery'), cycle:val('changeBatteryCycle'),
+      installed:isChecked('batteryInstalled'), statusOk:isChecked('batteryStatusOk')
+    };
+  }else if(s.phase === 'READY'){
+    s.pendingFlightInput = { battery:s.selectedBattery, takeoffLocation:val('takeoffLocation') };
+  }else if(s.phase === 'LANDING'){
+    s.pendingLandingInput = {
+      landingLocation:val('landingLocation'), actualMinutes:val('actualMinutes'),
+      safetyIssue:isChecked('safetyIssue'), safetyDetail:val('safetyDetail'),
+      batteryNote:val('batteryNote')
+    };
+  }
+}
+
+function stopFlightTimer(){
+  if(TIMER_INTERVAL){ clearInterval(TIMER_INTERVAL); TIMER_INTERVAL = null; }
 }
 
 // ----------------------------------------------------
@@ -4493,7 +4176,7 @@ function onSwitchAircraftClick(targetModel){
 // ----------------------------------------------------
 function renderPostView(div){
   var appDiv = div || el('app');
-  var s = STATE.session;
+  var s = screenState().session;
   var acs = s.aircrafts || {};
   var previousPost = s.pendingPostflightInput || {};
   var previousAircrafts = previousPost.aircrafts || {};
@@ -4540,7 +4223,7 @@ function renderPostView(div){
     '<div class="card" id="postMainCard">' +
       '<h2>今回の運航の飛行後点検（様式2）</h2>' +
       '<p class="text-sm">今回の同一現場・同一目的の連続飛行で使用した機体を、撤収前に点検します。</p>' +
-      
+
       '<div style="margin-bottom:14px;">' +
         '<button type="button" class="btn btn-success" style="font-size:15px;padding:12px;width:100%;font-weight:700;" onclick="setAllPostChecksAllModels(true)">✨ 今回使用した全機体「全て正常（実機確認済み）」</button>' +
       '</div>' +
@@ -4556,7 +4239,7 @@ function renderPostView(div){
 
       '<button class="btn btn-primary" style="font-size:16px;padding:14px;margin-top:14px;" onclick="submitAllPostflight()">✅ 全記録を一括保存し、今回の運航日誌を確定する</button>' +
       '<div style="text-align:center;margin-top:10px;">' +
-        '<button type="button" class="diag-trigger-link" style="background:none;border:none;font-size:13px;" onclick="openCommitDiagnosisModal()">' +
+        '<button type="button" class="diag-trigger-link" style="background:none;border:none;font-size:13px;" onclick="screenDiagnosis()">' +
           '⚠️ 保存が止まった・エラーが出る場合はこちら：保存状態を確認' +
         '</button>' +
       '</div>' +
@@ -4572,7 +4255,7 @@ function setPostChecksForModel(mIdx, normal){
 }
 
 function setAllPostChecksAllModels(normal){
-  var s = STATE.session || {};
+  var s = screenState().session || {};
   var acs = s.aircrafts || {};
   var count = Object.keys(acs).length || 2;
   for(var m=0; m<count; m++){
@@ -4581,7 +4264,7 @@ function setAllPostChecksAllModels(normal){
 }
 
 function onAnyPostCheckChanged(){
-  var s = STATE.session || {};
+  var s = screenState().session || {};
   var acs = s.aircrafts || {};
   var count = Object.keys(acs).length || 2;
   for(var m=0; m<count; m++){
@@ -4604,7 +4287,7 @@ function submitAllPostflight(){
   var confirmer = val('confirmer');
   if(!confirmer) errors.push({ id: 'confirmer', label: '確認者氏名', message: '点検確認者氏名を入力してください。' });
 
-  var s = STATE.session;
+  var s = screenState().session;
   var acs = s.aircrafts || {};
   var usedModels = Object.keys(acs).filter(function(m){ return acs[m] && acs[m].used; });
   if(usedModels.length === 0 && s.model) usedModels = [s.model];
@@ -4644,7 +4327,7 @@ function submitAllPostflight(){
     return;
   }
 
-  callServer('finishAircraft', {
+  screenAction('finishAircraft', {
     inspectionLocation: postLocation,
     confirmer: confirmer,
     aircrafts: aircraftPayload,
@@ -4654,24 +4337,449 @@ function submitAllPostflight(){
   });
 }
 
+
+
+// ----------------------------------------------------
+// 補助関数
+// ----------------------------------------------------
+
+
+function capturePostflightScreenDraft(s){
+    var aircrafts = {};
+    var usedModels = Object.keys(s.aircrafts || {}).filter(function(model){ return s.aircrafts[model] && s.aircrafts[model].used; });
+    usedModels.forEach(function(model, modelIndex){
+      var prefix = 'post_' + modelIndex + '_';
+      var postChecks = {};
+      for(var j=0; j<POST_NAMES.length; j++) postChecks[POST_NAMES[j]] = isChecked(prefix + j) ? '正常' : '異常';
+      aircrafts[model] = {
+        checks:postChecks,
+        defectLocation:val(prefix + 'defectLocation'),
+        defectDetail:val(prefix + 'defectDetail'),
+        actionDetail:val(prefix + 'actionDetail')
+      };
+    });
+    s.pendingPostflightInput = {
+      inspectionLocation:val('postLocation'), confirmer:val('confirmer'), aircrafts:aircrafts
+    };
+}
+
+// 未完了保存の診断・復旧・TEST破棄モーダル。
+
+function openCommitDiagnosisModal(){
+  var existing = el('commitDiagnosisModal');
+  if(existing) existing.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'commitDiagnosisModal';
+  overlay.className = 'diag-modal-overlay';
+  overlay.onclick = function(e){
+    if(e.target === overlay) closeCommitDiagnosisModal();
+  };
+
+  overlay.innerHTML =
+    '<div class="diag-modal-content" onclick="event.stopPropagation()">' +
+      '<div class="diag-modal-header">' +
+        '<h3>📋 保存状態の診断</h3>' +
+        '<button type="button" class="diag-modal-close" onclick="closeCommitDiagnosisModal()" aria-label="閉じる">✕</button>' +
+      '</div>' +
+      '<div class="diag-modal-body" id="diagModalBody">' +
+        '<div style="text-align:center;padding:24px 8px;">' +
+          '<div style="font-size:15px;font-weight:600;color:#1e40af;margin-bottom:8px;">スプレッドシートの保存状態を確認中...</div>' +
+          '<div style="font-size:12px;color:#64748b;">読み取り専用で安全に確認しています（変更はされません）</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+  runCommitDiagnosis();
+}
+
+function closeCommitDiagnosisModal(){
+  var modal = el('commitDiagnosisModal');
+  if(modal) modal.remove();
+}
+
+function runCommitDiagnosis(){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  runServerRequest('diagnosePendingCommitPlans', undefined, function(reports){
+      renderCommitDiagnosisResult(reports);
+    }, function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="warn-box" style="margin-bottom:12px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 診断処理でエラーが発生しました</strong>' +
+          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
+        '</div>' +
+        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">再試行する</button>' +
+        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    });
+}
+
+function renderCommitDiagnosisResult(reports){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  if(!reports || reports.length === 0){
+    body.innerHTML =
+      '<div class="diag-item-card is-ok">' +
+        '<div style="font-weight:700;font-size:15px;color:#065f46;margin-bottom:6px;">✅ 未完了の保存はありません</div>' +
+        '<div style="font-size:13px;color:#047857;">すべての運航記録は正常に保存・完了しています。<br>スプレッドシートとの競合や保留データはありません。</div>' +
+      '</div>' +
+      '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    return;
+  }
+
+  var html = '<div style="margin-bottom:10px;font-weight:700;color:#991b1b;font-size:14px;">⚠️ 保留中・未完了の保存が ' + reports.length + ' 件見つかりました</div>';
+
+  reports.forEach(function(r, idx){
+    var stateText = r.state === 'failed' ? '失敗（途中で停止）' : (r.state === 'writing' ? '処理中（または通信切断）' : esc(r.state));
+    var stageText = STAGE_HUMAN_NAMES[r.stage] || r.stage || '(不明)';
+    var lastErrStageText = r.lastErrorStage ? (STAGE_HUMAN_NAMES[r.lastErrorStage] || r.lastErrorStage) : '(なし)';
+    var stoppedAtText = r.lastErrorStage && r.lastErrorStage !== '(なし)' ? lastErrStageText + ' で停止' : stageText;
+
+    var counts = r.operationCounts || { intended: 0, before: 0, conflict: 0, total: 0 };
+    var hasCorruption = !r.chunksComplete || !r.planHashMatches;
+    var corruptionText = hasCorruption ? '⚠️ 異常あり（データ欠落・破損の疑い）' : 'なし（正常）';
+
+    var isSafe = !!r.safeToRecover;
+    var recoveryStatusText = isSafe ? 'あり（安全に復旧可能）' : '不可';
+
+    var detailId = 'diagDetail_' + idx;
+
+    html +=
+      '<div class="diag-item-card has-pending">' +
+        '<div style="font-weight:700;font-size:14px;color:#9f1239;margin-bottom:6px;">' +
+          '【保存計画 ' + (idx + 1) + '】 前回の保存が途中で止まっています' +
+        '</div>' +
+        '<div class="diag-grid">' +
+          '<div class="diag-grid-label">状態</div><div class="diag-grid-value"><strong>' + esc(stateText) + '</strong></div>' +
+          '<div class="diag-grid-label">止まった場所</div><div class="diag-grid-value"><strong>' + esc(stoppedAtText) + '</strong></div>' +
+          '<div class="diag-grid-label">未書込み</div><div class="diag-grid-value">' + counts.before + ' 件</div>' +
+          '<div class="diag-grid-label">書込み済み</div><div class="diag-grid-value">' + counts.intended + ' 件（全' + counts.total + '件中）</div>' +
+          '<div class="diag-grid-label">競合件数</div><div class="diag-grid-value">' + (counts.conflict > 0 ? '<span style="color:#dc2626;font-weight:700;">' + counts.conflict + ' 件</span>' : '0 件') + '</div>' +
+          '<div class="diag-grid-label">データ破損の有無</div><div class="diag-grid-value">' + esc(corruptionText) + '</div>' +
+          '<div class="diag-grid-label">安全に復旧できるか</div><div class="diag-grid-value"><strong style="color:' + (isSafe ? '#15803d' : '#b91c1c') + ';">' + recoveryStatusText + '</strong></div>' +
+        '</div>';
+
+    if(r.statusCategory === 'SAFE_TO_RECOVER'){
+      html +=
+        '<div style="margin-top:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px;text-align:center;">' +
+          '<div style="font-size:13px;font-weight:700;color:#065f46;margin-bottom:4px;">✨ 前回の保存を安全に復旧できます</div>' +
+          '<div style="font-size:12px;color:#047857;margin-bottom:10px;line-height:1.4;">' +
+            '前回の続きの書き込みを安全に完了し、保留状態を解除します。<br>（重複記録や累計の二重加算は発生しません）' +
+          '</div>' +
+          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" onclick="executeCommitRecovery(\'' + esc(r.draftId) + '\')">' +
+            '🚀 前回の保存を安全に復旧する' +
+          '</button>' +
+        '</div>';
+    } else if(r.statusCategory === 'SAFE_TO_DISCARD_TEST'){
+      html +=
+        '<div style="margin-top:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;text-align:center;">' +
+          '<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:4px;">💡 このTEST保存は安全に破棄できます</div>' +
+          '<div style="font-size:12px;color:#b45309;margin-bottom:10px;line-height:1.4;">' +
+            'TEST日付シートは既に削除されており、BAT履歴や機体累計にも書き込まれていません。<br>' +
+            'このテスト保存計画を破棄して保留ロックを解除し、現在の入力内容を保存できるようにします。' +
+          '</div>' +
+          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" onclick="executeTestCommitDiscard(\'' + esc(r.draftId) + '\')">' +
+            '🗑️ このTEST保存を破棄して解除' +
+          '</button>' +
+        '</div>';
+    } else {
+      html +=
+        '<div class="warn-box" style="margin-top:10px;background:#fef2f2;border-left:4px solid #ef4444;padding:10px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 自動処理できません。詳細を確認してください</strong>' +
+          '<div style="font-size:12px;color:#7f1d1d;margin-top:4px;">' +
+            '理由: ' + esc((r.resumeBlockReasons || []).concat(r.discardBlockReasons || []).filter(function(v,i,a){return a.indexOf(v)===i;}).join(' / ') || '競合またはデータ不整合') +
+          '</div>' +
+        '</div>';
+    }
+
+    html +=
+        '<button type="button" class="diag-detail-toggle" onclick="toggleDiagDetail(\'' + detailId + '\')">▶ 詳しい技術情報（draftIdなど）を見る</button>' +
+        '<div id="' + detailId + '" class="diag-detail-box" style="display:none;">' +
+          'draftId: ' + esc(r.draftId) + '\n' +
+          '運航種別: ' + (r.isAppTest ? 'アプリテスト (TEST運航)' : '通常運航') + '\n' +
+          '状態分類: ' + esc(r.statusCategory || '') + '\n' +
+          '目的: ' + esc(r.purpose || '') + '\n' +
+          '作成日時: ' + esc(r.createdAt) + '\n' +
+          '更新日時: ' + esc(r.updatedAt) + '\n' +
+          'DATA chunks: ' + (r.chunksComplete ? '完全' : '一部欠落') + '\n' +
+          'planHash一致: ' + (r.planHashMatches ? '一致' : '不一致') + '\n' +
+          'セル状態: intended ' + r.operationCounts.intended + ' / before ' + r.operationCounts.before + ' / conflict ' + r.operationCounts.conflict + ' 件\n' +
+          '機体累計状況: ' + (r.isAppTest ? r.aircraftTotals.note : (r.aircraftTotals.matched + ' / ' + r.aircraftTotals.targets + ' 件')) + '\n' +
+          (r.conflicts && r.conflicts.length > 0 ? ('\n[競合詳細]:\n' + esc(JSON.stringify(r.conflicts, null, 2))) : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  html +=
+    '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+
+  body.innerHTML = html;
+}
+
+function executeCommitRecovery(draftId){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  body.innerHTML =
+    '<div style="text-align:center;padding:32px 12px;">' +
+      '<div style="font-size:16px;font-weight:700;color:#1e40af;margin-bottom:8px;">前回の保存を復旧中...</div>' +
+      '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">スプレッドシートの残りの書き込みを安全に完了しています</div>' +
+      '<div class="text-sm" style="color:#0369a1;">（端末に入力中の下書きは保持されています）</div>' +
+    '</div>';
+
+  runServerRequest('recoverPendingCommitPlan', draftId, function(res){
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="diag-item-card is-ok" style="padding:16px;text-align:center;">' +
+          '<div style="font-weight:700;font-size:16px;color:#065f46;margin-bottom:8px;">' +
+            '✅ 前回の保存を復旧しました。現在の運航を保存できます' +
+          '</div>' +
+          '<div style="font-size:13px;color:#047857;line-height:1.5;margin-bottom:14px;">' +
+            '前回の保存は正常に完了し、保留状態が解除されました。<br>' +
+            '端末の入力内容はそのまま保持されていますので、このまま「運航日誌を確定する」を押して保存してください。' +
+          '</div>' +
+          '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>' +
+        '</div>';
+    }, function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="warn-box" style="margin-bottom:12px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 復旧処理でエラーが発生しました</strong>' +
+          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
+        '</div>' +
+        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">もう一度確認する</button>' +
+        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    });
+}
+
+function executeTestCommitDiscard(draftId){
+  var body = el('diagModalBody');
+  if(!body) return;
+
+  body.innerHTML =
+    '<div style="text-align:center;padding:32px 12px;">' +
+      '<div style="font-size:16px;font-weight:700;color:#991b1b;margin-bottom:8px;">テスト保存計画を破棄中...</div>' +
+      '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">保留ロックを安全に解除しています</div>' +
+      '<div class="text-sm" style="color:#0369a1;">（端末に入力中の下書きは保持されています）</div>' +
+    '</div>';
+
+  runServerRequest('discardPendingTestCommitPlan', draftId, function(res){
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="diag-item-card is-ok" style="padding:16px;text-align:center;">' +
+          '<div style="font-weight:700;font-size:16px;color:#065f46;margin-bottom:8px;">' +
+            '✅ 保留中のテスト保存を破棄しました' +
+          '</div>' +
+          '<div style="font-size:13px;color:#047857;margin-bottom:16px;line-height:1.5;">' +
+            '保留ロックが解除されました。<br>入力中の下書きは保持されています。<br>「閉じる」を押して、そのまま一括保存を実行できます。' +
+          '</div>' +
+          '<button type="button" class="btn btn-primary diag-footer-btn" onclick="closeCommitDiagnosisModal()">閉じる</button>' +
+        '</div>';
+    }, function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(!el('diagModalBody')) return;
+      el('diagModalBody').innerHTML =
+        '<div class="warn-box" style="margin-bottom:12px;">' +
+          '<strong style="color:#b91c1c;">⚠️ 破棄処理でエラーが発生しました</strong>' +
+          '<div style="margin-top:6px;font-size:13px;color:#475569;">' + esc(msg) + '</div>' +
+        '</div>' +
+        '<button type="button" class="btn btn-secondary diag-footer-btn" onclick="runCommitDiagnosis()">再試行する</button>' +
+        '<button type="button" class="btn diag-footer-btn" style="background:#e2e8f0;color:#334155;margin-top:8px;" onclick="closeCommitDiagnosisModal()">閉じる</button>';
+    });
+}
+
+function toggleDiagDetail(id){
+  var elBox = el(id);
+  if(!elBox) return;
+  var isHidden = elBox.style.display === 'none';
+  elBox.style.display = isHidden ? 'block' : 'none';
+}
+
+// 通信・状態遷移・画面の組立を担当するcontroller/router。
+
+var WEB_ROUTES = null;
+
+function configureWebRoutes(routes){ WEB_ROUTES = routes; }
+
+function callServer(name, arg, onSuccess){
+  if(LOCAL_FLIGHT_ACTIONS.indexOf(name) >= 0){
+    localFlightAction(name, arg, onSuccess);
+    return;
+  }
+
+  if(name === 'finishAircraft'){
+    if(!navigator.onLine){
+      alert('現在は圏外です。入力内容は端末に残っています。電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
+      return;
+    }
+    STATE.session.pendingPostflightInput = cloneData(arg || {});
+    persistOperationDraft();
+    arg = { session:cloneData(STATE.session), postflight:arg || {} };
+  }
+
+  busy(true);
+  runServerRequest(name, arg, function(res){
+      busy(false);
+      if(name === 'finishAircraft'){
+        STATE = res;
+        render();
+        clearOperationDraft();
+        if(onSuccess) onSuccess(res);
+        return;
+      }
+      if(onSuccess) onSuccess(res);
+      else {
+        STATE = res;
+        render();
+      }
+    }, function(err){
+      busy(false);
+      var msg = err && err.message ? err.message : String(err);
+      if(name === 'finishAircraft') alert('保存できませんでした。入力内容は端末に残っています。電波を確認して、もう一度保存してください。\n\n' + msg);
+      else renderError(msg);
+    });
+}
+
+function renderError(msg){
+  if(typeof msg === 'string' && msg.indexOf('SESSION_EXISTS::') >= 0){
+    var sess = {};
+    try { sess = JSON.parse(msg.split('SESSION_EXISTS::')[1]); }catch(e){}
+    el('app').innerHTML =
+      '<div class="card" style="border-left:5px solid #f59e0b; background:#fffbeb;">' +
+        '<h2 style="color:#b45309; margin-top:0;">⚠️ 前回の運航記録が中断されたまま残っています</h2>' +
+        '<div style="color:#78350f; font-size:14px; line-height:1.7; margin:12px 0; background:rgba(255,255,255,0.7); padding:10px 14px; border-radius:6px; border:1px solid #fde68a;">' +
+          '前回の記録が正常に完了していません。新しく開始する前にどちらかを選択してください。<br>' +
+          '・<strong>対象機体:</strong> ' + esc(sess.model || '未設定') + '<br>' +
+          '・<strong>飛行枠:</strong> ' + esc(sess.dateSheet || '') + ' No.' + esc(sess.blockNo || '') + '<br>' +
+          '・<strong>中断時点の進捗:</strong> <span class="badge active" style="font-size:12px;background:#b45309;">' + esc(sess.phaseName || sess.phase || '進行中') + '</span><br>' +
+          '・<strong>操縦者:</strong> ' + esc(sess.pilot || '未設定') + '<br>' +
+          '・<strong>飛行場所:</strong> ' + esc(sess.route || '未設定') +
+        '</div>' +
+        '<div style="color:#92400e; font-size:13px; margin-bottom:14px;">' +
+          '※続きから日誌を完成させる場合は<strong>「続きから再開する」</strong>を、前回分を取り消して最初から新しく入力し直す場合は<strong>「破棄して新規開始」</strong>を押してください。' +
+        '</div>' +
+        '<div style="display:flex; flex-direction:column; gap:10px;">' +
+          '<button class="btn btn-primary" style="font-size:15px; padding:12px;" onclick="callServer(\'getAppState\')">▶ 前回の続きから再開する</button>' +
+          '<button class="btn btn-danger btn-sm" onclick="confirmResetSession()">🗑 前回の記録を破棄して新しく開始する</button>' +
+        '</div>' +
+      '</div>';
+    return;
+  }
+  el('app').innerHTML =
+    '<div class="card error-box">' +
+      '<h3>エラー</h3>' +
+      '<div style="margin:10px 0; font-size:14px; line-height:1.6;">' + esc(msg) + '</div>' +
+      '<button class="btn btn-secondary" onclick="render()">戻る</button>' +
+    '</div>';
+}
+
+function confirmResetSession(){
+  if(confirm('本当に前回の運航記録を破棄して、新しく開始しますか？\n（中断されていたデータはクリアされます）')){
+    callServer('cancelCurrentSession');
+  }
+}
+
+function goBackFromAnywhere(){
+  var session = STATE && STATE.session;
+  if(session){
+    captureCurrentScreenDraft();
+    callServer('goBack');
+    return;
+  }
+
+  alert('これより前の画面はありません。');
+}
+
+function captureCurrentScreenDraft(){
+  var s = STATE && STATE.session;
+  if(!s) return;
+  var capture = WEB_ROUTES.capture[s.phase];
+  if(capture) capture(s);
+  persistOperationDraft();
+}
+
+function render(){
+  var appDiv = el('app');
+  var badge = el('appStatusBadge');
+  var backButton = el('globalBackButton');
+  var hasActiveOperation = !!(STATE && STATE.active && STATE.session);
+
+  // 運航の初期画面には「一つ前」が存在しないため表示しない。
+  if(backButton){
+    backButton.style.display = hasActiveOperation ? 'block' : 'none';
+  }
+
+  WEB_ROUTES.beforeRender();
+  if(!STATE){
+    badge.className = 'badge';
+    badge.innerText = '接続中';
+    appDiv.innerHTML = '<div class="card">接続中...</div>';
+    return;
+  }
+
+  if(!STATE.active){
+    badge.className = 'badge';
+    badge.innerText = '待機中';
+    WEB_ROUTES.start(appDiv);
+  } else {
+    badge.className = 'badge active';
+    badge.innerText = '運航中';
+    var phase = STATE.session.phase;
+    var view = WEB_ROUTES.phases[phase] || WEB_ROUTES.fallback;
+    view(appDiv);
+  }
+}
+
 function cancelSessionPrompt(){
   if(confirm('現在の運航入力を取り消しますか？\n（入力中の内容は保存されません）')){
     callServer('cancelCurrentSession');
   }
 }
 
-// ----------------------------------------------------
-// 補助関数
-// ----------------------------------------------------
-function formatTimeStr(iso){
-  if(!iso) return '';
-  var d = new Date(iso);
-  var h = ('0' + d.getHours()).slice(-2);
-  var m = ('0' + d.getMinutes()).slice(-2);
-  return h + ':' + m;
-}
+// 依存の注入と初回起動。必ずWebスクリプトの最後に結合する。
+
+window.addEventListener('online', updateNetworkStatus);
+window.addEventListener('offline', updateNetworkStatus);
 
 // 初回起動：進行中の運航下書き1件だけを端末から復元する。
+configureDraftStorage({ getState:function(){ return STATE; } });
+configureWorkflowPorts({ render:function(){ render(); }, notify:function(message){ alert(message); } });
+configureScreenPorts({
+  state:function(){ return STATE; },
+  action:callServer,
+  render:function(state){ if(state !== undefined) STATE = state; render(); },
+  gps:fetchCurrentGps,
+  diagnosis:openCommitDiagnosisModal,
+  reset:confirmResetSession,
+  cancel:cancelSessionPrompt
+});
+configureWebRoutes({
+  start:renderStartView,
+  phases:{
+    PRE:renderPreView,
+    PRE_ABNORMAL:renderPreAbnormalView,
+    BATTERY_CHANGE:renderBatteryChangeView,
+    READY:renderReadyView,
+    FLYING:renderFlyingView,
+    LANDING:renderLandingView,
+    POST_ALL:renderPostView
+  },
+  fallback:renderAfterLandingView,
+  capture:{
+    PRE:captureFlightScreenDraft,
+    BATTERY_CHANGE:captureFlightScreenDraft,
+    READY:captureFlightScreenDraft,
+    LANDING:captureFlightScreenDraft,
+    POST_ALL:capturePostflightScreenDraft
+  },
+  beforeRender:stopFlightTimer
+});
 restoreOperationDraft();
 updateNetworkStatus();
 render();

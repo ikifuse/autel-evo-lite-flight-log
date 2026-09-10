@@ -1,13 +1,15 @@
+var CATEGORY_NOTICE_TIMER = null;
+
 // ----------------------------------------------------
 // 1. 運航開始画面（トップ）
 // ----------------------------------------------------
 function renderStartView(div){
   var last = loadLastOperation() || {};
-  var currentAssistant = STATE && STATE.session ? STATE.session.assistant || '' : '';
+  var currentAssistant = screenState() && screenState().session ? screenState().session.assistant || '' : '';
 
   var sessionNoticeHtml = '';
-  if(STATE && STATE.session){
-    var s = STATE.session;
+  if(screenState() && screenState().session){
+    var s = screenState().session;
     var phaseNames = {
       'PRE': '飛行前点検',
       'BATTERY_CHANGE': 'バッテリー交換後確認',
@@ -24,8 +26,8 @@ function renderStartView(div){
           '機体: <strong>' + esc(s.model) + '</strong> ｜ 進捗: <strong>' + esc(phaseNames[s.phase] || s.phase) + '</strong>' +
         '</div>' +
         '<div class="flex-row">' +
-          '<button type="button" class="btn btn-primary btn-sm" onclick="render()">▶ 続きから再開</button>' +
-          '<button type="button" class="btn btn-danger btn-sm" onclick="confirmResetSession()">🗑 破棄して新規開始</button>' +
+          '<button type="button" class="btn btn-primary btn-sm" onclick="screenRender()">▶ 続きから再開</button>' +
+          '<button type="button" class="btn btn-danger btn-sm" onclick="screenReset()">🗑 破棄して新規開始</button>' +
         '</div>' +
       '</div>';
   }
@@ -52,10 +54,10 @@ function renderStartView(div){
         '<button type="button" class="btn-outline" onclick="applyLastOperation()">🔄 前回と同じ条件で引用</button>' +
       '</div>' +
       '<div class="status-box">' +
-        '本日：<strong>' + esc(STATE.today) + '</strong> ' +
-        (STATE.hasTodaySheet ? '（日付シート作成済み）' : '（開始時に自動作成）') +
+        '本日：<strong>' + esc(screenState().today) + '</strong> ' +
+        (screenState().hasTodaySheet ? '（日付シート作成済み）' : '（開始時に自動作成）') +
       '</div>' +
-      (STATE.hasTodaySheet ? '<label class="check-item" style="margin:8px 0;background:#eff6ff;padding:6px 10px;border-radius:8px;border:1px solid #bfdbfe;"><input type="checkbox" id="forceNewLocation"><span style="font-size:13px;font-weight:600;color:#1e40af;">🏢 本日別の新しい現場として連番シート（' + esc(STATE.today) + '_2 等）で開始する</span></label>' : '') +
+      (screenState().hasTodaySheet ? '<label class="check-item" style="margin:8px 0;background:#eff6ff;padding:6px 10px;border-radius:8px;border:1px solid #bfdbfe;"><input type="checkbox" id="forceNewLocation"><span style="font-size:13px;font-weight:600;color:#1e40af;">🏢 本日別の新しい現場として連番シート（' + esc(screenState().today) + '_2 等）で開始する</span></label>' : '') +
 
       '<label>機体選択<span class="required">*</span></label>' +
       '<select id="model">' +
@@ -65,7 +67,7 @@ function renderStartView(div){
 
       '<div class="flex-between">' +
         '<label>飛行経路・場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'inspectionLocation\', \'route\')">📍 GPSから現在地を取得</button>' +
+        '<button type="button" class="btn-outline" onclick="screenGps(\'inspectionLocation\', \'route\')">📍 GPSから現在地を取得</button>' +
       '</div>' +
       '<input type="text" id="route" placeholder="例：〇〇海岸周辺 半径100m、△△グラウンド等" value="' + esc(last.route || '') + '">' +
 
@@ -157,7 +159,7 @@ function renderStartView(div){
       '<button class="btn btn-primary" style="font-size:16px;padding:13px;" onclick="submitStartOperation()">次へ：飛行前点検を開始</button>' +
     '</div>' +
     '<div style="text-align:center;margin-top:16px;margin-bottom:8px;">' +
-      '<button type="button" class="diag-trigger-btn" onclick="openCommitDiagnosisModal()">' +
+      '<button type="button" class="diag-trigger-btn" onclick="screenDiagnosis()">' +
         '🔧 サーバー保存状態を確認（診断）' +
       '</button>' +
     '</div>';
@@ -306,11 +308,57 @@ function submitStartOperation(){
     windDir: val('windDirVal')
   };
 
-  callServer('startAircraft', payload, function(res){
+  screenAction('startAircraft', payload, function(res){
     saveLastOperation(payload);
     rememberAssistantName(payload.assistant);
-    STATE = res;
-    render();
+    screenRender(res);
   });
 }
 
+function selectWeather(btn, val){
+  var parent = el('weatherChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('weatherVal')) el('weatherVal').value = val;
+}
+
+function selectWindSpeed(btn, val){
+  var parent = el('windSpeedChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('windSpeedVal')) el('windSpeedVal').value = val;
+}
+
+function selectWindDir(btn, val){
+  var parent = el('windDirChips');
+  if(parent){
+    var btns = parent.getElementsByClassName('chip-btn');
+    for(var i=0; i<btns.length; i++) btns[i].classList.remove('active');
+  }
+  btn.classList.add('active');
+  if(el('windDirVal')) el('windDirVal').value = val;
+}
+
+function assistantOptionsHtml(lastAssistant, currentAssistant){
+  var selectedName = String(currentAssistant == null ? '' : currentAssistant).trim();
+  var html = '<option value=""' + (!selectedName ? ' selected' : '') + '>なし</option>';
+  assistantCandidates(lastAssistant, selectedName).forEach(function(name){
+    html += '<option value="' + esc(name) + '"' + (selectedName === name ? ' selected' : '') + '>' + esc(name) + '</option>';
+  });
+  return html + '<option value="__NEW__">新しい人を入力</option>';
+}
+
+function onAssistantSelectionChanged(){
+  var box = el('assistantNewBox');
+  if(box) box.style.display = val('assistantSelect') === '__NEW__' ? 'block' : 'none';
+}
+
+function selectedAssistantName(){
+  return val('assistantSelect') === '__NEW__' ? val('assistantNew') : val('assistantSelect');
+}

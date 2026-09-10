@@ -3,7 +3,7 @@
 // ----------------------------------------------------
 function renderPostView(div){
   var appDiv = div || el('app');
-  var s = STATE.session;
+  var s = screenState().session;
   var acs = s.aircrafts || {};
   var previousPost = s.pendingPostflightInput || {};
   var previousAircrafts = previousPost.aircrafts || {};
@@ -50,7 +50,7 @@ function renderPostView(div){
     '<div class="card" id="postMainCard">' +
       '<h2>今回の運航の飛行後点検（様式2）</h2>' +
       '<p class="text-sm">今回の同一現場・同一目的の連続飛行で使用した機体を、撤収前に点検します。</p>' +
-      
+
       '<div style="margin-bottom:14px;">' +
         '<button type="button" class="btn btn-success" style="font-size:15px;padding:12px;width:100%;font-weight:700;" onclick="setAllPostChecksAllModels(true)">✨ 今回使用した全機体「全て正常（実機確認済み）」</button>' +
       '</div>' +
@@ -66,7 +66,7 @@ function renderPostView(div){
 
       '<button class="btn btn-primary" style="font-size:16px;padding:14px;margin-top:14px;" onclick="submitAllPostflight()">✅ 全記録を一括保存し、今回の運航日誌を確定する</button>' +
       '<div style="text-align:center;margin-top:10px;">' +
-        '<button type="button" class="diag-trigger-link" style="background:none;border:none;font-size:13px;" onclick="openCommitDiagnosisModal()">' +
+        '<button type="button" class="diag-trigger-link" style="background:none;border:none;font-size:13px;" onclick="screenDiagnosis()">' +
           '⚠️ 保存が止まった・エラーが出る場合はこちら：保存状態を確認' +
         '</button>' +
       '</div>' +
@@ -82,7 +82,7 @@ function setPostChecksForModel(mIdx, normal){
 }
 
 function setAllPostChecksAllModels(normal){
-  var s = STATE.session || {};
+  var s = screenState().session || {};
   var acs = s.aircrafts || {};
   var count = Object.keys(acs).length || 2;
   for(var m=0; m<count; m++){
@@ -91,7 +91,7 @@ function setAllPostChecksAllModels(normal){
 }
 
 function onAnyPostCheckChanged(){
-  var s = STATE.session || {};
+  var s = screenState().session || {};
   var acs = s.aircrafts || {};
   var count = Object.keys(acs).length || 2;
   for(var m=0; m<count; m++){
@@ -114,7 +114,7 @@ function submitAllPostflight(){
   var confirmer = val('confirmer');
   if(!confirmer) errors.push({ id: 'confirmer', label: '確認者氏名', message: '点検確認者氏名を入力してください。' });
 
-  var s = STATE.session;
+  var s = screenState().session;
   var acs = s.aircrafts || {};
   var usedModels = Object.keys(acs).filter(function(m){ return acs[m] && acs[m].used; });
   if(usedModels.length === 0 && s.model) usedModels = [s.model];
@@ -154,7 +154,7 @@ function submitAllPostflight(){
     return;
   }
 
-  callServer('finishAircraft', {
+  screenAction('finishAircraft', {
     inspectionLocation: postLocation,
     confirmer: confirmer,
     aircrafts: aircraftPayload,
@@ -164,24 +164,28 @@ function submitAllPostflight(){
   });
 }
 
-function cancelSessionPrompt(){
-  if(confirm('現在の運航入力を取り消しますか？\n（入力中の内容は保存されません）')){
-    callServer('cancelCurrentSession');
-  }
-}
+
 
 // ----------------------------------------------------
 // 補助関数
 // ----------------------------------------------------
-function formatTimeStr(iso){
-  if(!iso) return '';
-  var d = new Date(iso);
-  var h = ('0' + d.getHours()).slice(-2);
-  var m = ('0' + d.getMinutes()).slice(-2);
-  return h + ':' + m;
-}
 
-// 初回起動：進行中の運航下書き1件だけを端末から復元する。
-restoreOperationDraft();
-updateNetworkStatus();
-render();
+
+function capturePostflightScreenDraft(s){
+    var aircrafts = {};
+    var usedModels = Object.keys(s.aircrafts || {}).filter(function(model){ return s.aircrafts[model] && s.aircrafts[model].used; });
+    usedModels.forEach(function(model, modelIndex){
+      var prefix = 'post_' + modelIndex + '_';
+      var postChecks = {};
+      for(var j=0; j<POST_NAMES.length; j++) postChecks[POST_NAMES[j]] = isChecked(prefix + j) ? '正常' : '異常';
+      aircrafts[model] = {
+        checks:postChecks,
+        defectLocation:val(prefix + 'defectLocation'),
+        defectDetail:val(prefix + 'defectDetail'),
+        actionDetail:val(prefix + 'actionDetail')
+      };
+    });
+    s.pendingPostflightInput = {
+      inspectionLocation:val('postLocation'), confirmer:val('confirmer'), aircrafts:aircrafts
+    };
+}

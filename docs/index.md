@@ -10,15 +10,15 @@
 
 | あなたの目的 | 最初に読むべき文書 | 概要 |
 |---|---|---|
-| **コードの場所を特定したい** | [docs/code-map.md](code-map.md) | 15領域の担当ファイル、主要関数、テスト対応の索引 |
+| **コードの場所を特定したい** | [docs/code-map.md](code-map.md) | 機能別の最短入口、担当関数、テスト対応の索引 |
 | **守るべき絶対ルールを確認したい** | [docs/invariants.md](invariants.md) | 手動編集許容、UUID冪等性、roll-forward等の不変条件 |
 | **全体構造・データフローを知りたい** | [docs/architecture.md](architecture.md) | Web UIからGAS・Spreadsheetへの流れ、ビルド構造 |
-| **新しい項目や機能を追加したい** | [docs/feature-guide.md](feature-guide.md) | 影響全7層のチェックリストと標準開発手順 |
+| **新しい項目や機能を追加したい** | [docs/feature-guide.md](feature-guide.md) | 影響する層を選ぶチェックリストと標準開発手順 |
 | **Spreadsheetのセル配置・原本を知りたい** | [docs/spreadsheet-spec.md](spreadsheet-spec.md) | 日常点検・BAT・原本シートの物理構造と表示書式 |
-| **テスト内容・合否判定を確認したい** | [docs/test-spec.md](test-spec.md) | TEST 1〜15、T16〜T23障害注入試験の検証仕様 |
+| **テスト内容・合否判定を確認したい** | [docs/test-spec.md](test-spec.md) | 回帰・障害注入・B案互換・Web動作互換・依存境界検査 |
 | **GASへのデプロイ・環境再構築をしたい** | [docs/rebuild-guide.md](rebuild-guide.md) | ゼロからの構築手順、デプロイ手順と注意事項 |
 | **アプリの網羅的な設計仕様を調べたい** | [01_ドローン運航記録_設計書.md](../01_ドローン運航記録_設計書.md) | システム全体の総合的な正本設計書（仕様・詳細） |
-| **AIエージェントの基本行動規範** | [AGENTS.md](../AGENTS.md) | ルート直下の最重要行動ルール（30行） |
+| **AIエージェントの基本行動規範** | [AGENTS.md](../AGENTS.md) | ルート直下の短い作業ルール |
 
 ---
 

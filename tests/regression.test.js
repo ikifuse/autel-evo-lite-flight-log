@@ -269,6 +269,16 @@ function assertFaultRetryMatches(point, input, label) {
   assertCommitComplete(retried, input.session.draftId);
 }
 
+function webFunctionSource(app, name) {
+  const marker = 'function ' + name + '(';
+  const start = app.indexOf(marker);
+  assert(start >= 0, 'Web function missing: ' + name);
+  const lineEnd = app.indexOf('\n', start);
+  const end = app.slice(start, lineEnd).endsWith('}') ? lineEnd : app.indexOf('\n}', start) + 2;
+  assert(end > start, 'Web function end missing: ' + name);
+  return app.slice(start, end);
+}
+
 function run() {
   const reports = [];
   {
@@ -331,7 +341,7 @@ function run() {
     const appStart=current.indexOf('const APP_HTML =');
     assert(appStart>=0,'T15 APP_HTML marker missing');
     const currentApp=current.slice(appStart);
-    const expectedHash='420e6ceccbb2a4284701c9145f8f74846f16b6ac3a01d5be0fde5cdd587a2f30';
+    const expectedHash='7a6530cce21a6963f0f0cb2cb376f139035b76b19202af9a0cd92119c43e2e88';
     const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
     assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
     const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');
@@ -415,8 +425,8 @@ function run() {
     reports.push('RESPONSIVE and flight-method/category UI OK');
 
     const assistantStart=app.indexOf('function loadAssistantHistory(){');
-    const assistantEnd=app.indexOf('// GPS自動取得＆逆ジオコーディング',assistantStart);
-    assert(assistantStart>=0 && assistantEnd>assistantStart,'assistant history function markers missing');
+    const assistantNames=['loadAssistantHistory','saveAssistantHistory','rememberAssistantName','assistantCandidates','assistantOptionsHtml','onAssistantSelectionChanged','selectedAssistantName'];
+    assert(assistantStart>=0,'assistant history function markers missing');
     const stored=new Map();
     const elements={
       assistantSelect:{value:''},
@@ -434,7 +444,7 @@ function run() {
       esc:value=>String(value==null?'':value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
     };
     vm.createContext(assistantClient);
-    vm.runInContext(app.slice(assistantStart,assistantEnd),assistantClient);
+    vm.runInContext(assistantNames.map(name=>webFunctionSource(app,name)).join('\n'),assistantClient);
 
     let options=assistantClient.assistantOptionsHtml('山田太郎','');
     assert(options.includes('<option value="" selected>なし</option>'),'assistant initial none option missing');
@@ -453,7 +463,7 @@ function run() {
     const history=assistantClient.loadAssistantHistory();
     assert(history.length===2 && history[0]==='佐藤花子' && history[1]==='山田太郎','assistant history was not deduplicated');
     assert(history.every(item=>typeof item==='string'),'assistant history contains data other than names');
-    const submitStart=app.slice(app.indexOf('function submitStartOperation(){'),app.indexOf('// セッションヘッダー',app.indexOf('function submitStartOperation(){')));
+    const submitStart=webFunctionSource(app,'submitStartOperation');
     assert(submitStart.includes('assistant: assistant') && submitStart.includes('rememberAssistantName(payload.assistant)'),'assistant string or start-time history save changed');
     reports.push('ASSISTANT local history dropdown OK');
   }
@@ -461,8 +471,8 @@ function run() {
   {
     const current=fs.readFileSync(sourcePath,'utf8');
     const app=current.slice(current.indexOf('const APP_HTML ='));
-    const callServerMatch=app.match(/function callServer\(name, arg, onSuccess\)\{[\s\S]*?(?=\n\nfunction clearFormErrors\()/);
-    const submitMatch=app.match(/function submitAllPostflight\(\)\{[\s\S]*?(?=\n\nfunction cancelSessionPrompt\()/);
+    const callServerMatch=[webFunctionSource(app,'runServerRequest') + '\n' + webFunctionSource(app,'callServer')];
+    const submitMatch=[webFunctionSource(app,'submitAllPostflight')];
     assert(callServerMatch && submitMatch,'client transition function markers');
 
     function makeFinishClient(renderImpl){

@@ -63,31 +63,35 @@ sourceFiles.forEach((file, index) => console.log(`${index + 1}. ${file}`));
 
 function assembleWebSource(root) {
   const webDir = resolve(root, 'src/web');
-  const webFiles = [
-    '30_web_styles.css',
-    '31_web_shell.html',
-    '32_web_core.js',
-    '33_web_engine.js',
-    '34_web_start.js',
-    '35_web_flight.js',
-    '36_web_postflight.js'
-  ];
-
-  for (const file of webFiles) {
-    const fullPath = resolve(webDir, file);
-    if (!existsSync(fullPath)) fail(`Web部品ファイルが見つかりません: src/web/${file}`);
+  const webManifestPath = resolve(root, 'scripts/web-source-order.json');
+  if (!existsSync(webManifestPath)) fail('scripts/web-source-order.json が見つかりません。');
+  let webSourceFiles;
+  try {
+    webSourceFiles = JSON.parse(readFileSync(webManifestPath, 'utf8'));
+  } catch (error) {
+    fail(`Web結合順ファイルを読み込めません: ${error.message}`);
   }
-
+  if (!Array.isArray(webSourceFiles) || !webSourceFiles.length ||
+      new Set(webSourceFiles).size !== webSourceFiles.length ||
+      webSourceFiles.some((file) => !/^src\/web\/[A-Za-z0-9_.-]+\.js$/.test(file))) {
+    fail('Web結合順にはsrc/web直下の.jsファイルを重複なく指定してください。');
+  }
+  const actualWebFiles = readdirSync(webDir).filter((file) => file.endsWith('.js'))
+    .map((file) => 'src/web/' + file).sort();
+  if (JSON.stringify(actualWebFiles) !== JSON.stringify([...webSourceFiles].sort())) {
+    fail('src/webの.jsファイル一覧とscripts/web-source-order.jsonが一致しません。');
+  }
+  for (const file of ['src/web/30_web_styles.css', 'src/web/31_web_shell.html'].concat(webSourceFiles)) {
+    if (!existsSync(resolve(root, file))) fail(`Web部品ファイルが見つかりません: ${file}`);
+  }
   const cssContent = readFileSync(resolve(webDir, '30_web_styles.css'), 'utf8');
   const shellContent = readFileSync(resolve(webDir, '31_web_shell.html'), 'utf8').trimEnd();
-  const coreContent = readFileSync(resolve(webDir, '32_web_core.js'), 'utf8');
-  const engineContent = readFileSync(resolve(webDir, '33_web_engine.js'), 'utf8');
-  const startContent = readFileSync(resolve(webDir, '34_web_start.js'), 'utf8');
-  const flightContent = readFileSync(resolve(webDir, '35_web_flight.js'), 'utf8');
-  const postflightContent = readFileSync(resolve(webDir, '36_web_postflight.js'), 'utf8');
-
-  // アセンブル順: styles -> shell -> core -> engine -> start -> flight -> postflight
-  const combinedScripts = coreContent + engineContent + startContent + flightContent + postflightContent;
+  const combinedScripts = webSourceFiles.map((file) => readFileSync(resolve(root, file), 'utf8')).join('\n');
+  try {
+    new Function(combinedScripts);
+  } catch (error) {
+    fail(`Webスクリプトの構文検査に失敗しました: ${error.message}`);
+  }
   const assembledHtml = shellContent
     .replace('/* __APP_STYLES__ */\n', cssContent)
     .replace('/* __APP_SCRIPTS__ */\n', combinedScripts);

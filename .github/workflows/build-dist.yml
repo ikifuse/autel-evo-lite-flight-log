@@ -9,7 +9,11 @@ on:
       - 'dist/Code.gs'
       - 'scripts/build.mjs'
       - 'scripts/source-order.json'
+      - 'scripts/web-source-order.json'
+      - 'scripts/check-boundaries.mjs'
       - 'tests/regression.test.js'
+      - 'tests/refactor-compat.test.js'
+      - 'tests/web-compat.test.js'
       - '.github/workflows/build-dist.yml'
   pull_request:
     paths:
@@ -17,7 +21,11 @@ on:
       - 'dist/Code.gs'
       - 'scripts/build.mjs'
       - 'scripts/source-order.json'
+      - 'scripts/web-source-order.json'
+      - 'scripts/check-boundaries.mjs'
       - 'tests/regression.test.js'
+      - 'tests/refactor-compat.test.js'
+      - 'tests/web-compat.test.js'
       - '.github/workflows/build-dist.yml'
   workflow_dispatch:
 
@@ -52,6 +60,16 @@ jobs:
 
       - name: Run regression tests against dist
         run: node tests/regression.test.js dist/Code.gs
+
+      - name: Verify responsibility boundaries
+        run: |
+          node scripts/check-boundaries.mjs --self-test
+          node scripts/check-boundaries.mjs
+
+      - name: Compare server and Web behavior with the B baseline
+        run: |
+          node tests/refactor-compat.test.js dist/Code.gs
+          node tests/web-compat.test.js dist/Code.gs
 
       - name: Commit generated dist to main
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'

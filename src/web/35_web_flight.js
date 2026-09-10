@@ -1,30 +1,17 @@
+var TIMER_INTERVAL = null;
+
 // ----------------------------------------------------
 // セッションヘッダー
 // ----------------------------------------------------
-function sessionHeaderHtml(){
-  var s = STATE.session;
-  var recordLabel = s.blockNo
-    ? s.dateSheet + ' No.' + s.blockNo
-    : s.operationDate + '（全運航終了時に一括保存）';
-  return '<div class="card status-box" style="margin-bottom:8px;">' +
-    '<div class="flex-between">' +
-      '<div><strong>' + esc(recordLabel) + '</strong> ｜ ' + esc(s.model) + '</div>' +
-      '<div class="flex-row" style="gap:6px;align-items:center;">' +
-        '<span class="badge active">' + esc(s.category) + '</span>' +
-        '<button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelSessionPrompt()">↩ 運航中止</button>' +
-      '</div>' +
-    '</div>' +
-    '<div class="text-sm" style="margin-top:4px;">' + esc(s.route) + ' / ' + esc(s.purpose) + '</div>' +
-  '</div>';
-}
+
 
 // ----------------------------------------------------
 // 2. 飛行前点検画面（様式2）
 // ----------------------------------------------------
 function renderPreView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var savedChecks = (s && s.preflightChecks) || {};
-  var batteryOptions = '<option value="">装着しているBATを選択</option>' + STATE.batteries.map(function(b){
+  var batteryOptions = '<option value="">装着しているBATを選択</option>' + screenState().batteries.map(function(b){
     return '<option value="' + b.value + '"' + (String(s.selectedBattery || '') === String(b.value) ? ' selected' : '') + '>' + esc(b.label) + '</option>';
   }).join('');
   var checksHtml = PRE_NAMES.map(function(name, i){
@@ -35,7 +22,7 @@ function renderPreView(div){
       '<span class="check-detail">' + esc(check.detail) + '</span></span></label>';
   }).join('');
   var hasSavedAbnormal = PRE_NAMES.some(function(name){ return savedChecks[name] === '異常'; });
-  var savedAbnormalDetail = (STATE.session && STATE.session.preflightAbnormalDetail) || '';
+  var savedAbnormalDetail = (screenState().session && screenState().session.preflightAbnormalDetail) || '';
 
   div.innerHTML = sessionHeaderHtml() +
     '<div class="card" id="preCard">' +
@@ -61,7 +48,7 @@ function renderPreView(div){
       '</div>' +
 
       '<button class="btn btn-primary" onclick="submitPreflight()">飛行前点検を完了して離陸準備へ</button>' +
-      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="cancelSessionPrompt()">この運航入力を中止</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="screenCancel()">この運航入力を中止</button>' +
     '</div>';
 }
 
@@ -106,7 +93,7 @@ function submitPreflight(){
     return;
   }
 
-  callServer('savePreflight', {
+  screenAction('savePreflight', {
     checks: checks,
     abnormalDetail: val('abnormalDetail'),
     battery: battery,
@@ -119,7 +106,7 @@ function renderPreAbnormalView(div){
     '<div class="card error-box">' +
       '<h2>飛行前点検で異常を記録しました</h2>' +
       '<p>この機体は離陸できません。必要な点検・整備を行い、点検整備記録はスプレッドシートの「点検整備記録_原本」を使用して記録してください。</p>' +
-      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="cancelSessionPrompt()">この運航を終了する</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:12px;" onclick="screenCancel()">この運航を終了する</button>' +
     '</div>';
 }
 
@@ -127,9 +114,9 @@ function renderPreAbnormalView(div){
 // 3. バッテリー交換確認／飛行開始待機画面（離陸前）
 // ----------------------------------------------------
 function renderBatteryChangeView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var previousInput = s.pendingBatteryChangeInput || {};
-  var batteryOptions = '<option value="">交換後のBATを選択</option>' + STATE.batteries.map(function(b){
+  var batteryOptions = '<option value="">交換後のBATを選択</option>' + screenState().batteries.map(function(b){
     return '<option value="' + b.value + '"' + (String(previousInput.battery || '') === String(b.value) ? ' selected' : '') + '>' + esc(b.label) + '</option>';
   }).join('');
 
@@ -157,13 +144,13 @@ function submitBatteryChange(){
   if(!isChecked('batteryInstalled')) errors.push({ id:'batteryInstalled', label:'装着・ロック', message:'実機を確認してチェックしてください。' });
   if(!isChecked('batteryStatusOk')) errors.push({ id:'batteryStatusOk', label:'残量・警告表示', message:'Autel Skyの表示を確認してチェックしてください。' });
   if(errors.length){ showFormErrors('batteryChangeCard', errors); return; }
-  callServer('confirmBatteryChange', {
+  screenAction('confirmBatteryChange', {
     battery:battery, cycle:val('changeBatteryCycle'), installed:true, statusOk:true
   });
 }
 
 function renderReadyView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var previousInput = s.pendingFlightInput || {};
 
   div.innerHTML = sessionHeaderHtml() +
@@ -176,16 +163,16 @@ function renderReadyView(div){
 
       '<div class="flex-between">' +
         '<label>離陸場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'takeoffLocation\', null)">📍 GPSで現在地更新（任意）</button>' +
+        '<button type="button" class="btn-outline" onclick="screenGps(\'takeoffLocation\', null)">📍 GPSで現在地更新（任意）</button>' +
       '</div>' +
       '<input type="text" id="takeoffLocation" value="' + esc(previousInput.takeoffLocation || s.route) + '">' +
 
       '<button class="btn btn-success" style="font-size:18px;padding:14px;margin-top:14px;" onclick="submitStartFlight()">🛫 離陸開始</button>' +
       '<div class="flex-row" style="margin-top:10px;">' +
         '<button type="button" class="btn btn-secondary btn-sm" onclick="onSwitchAircraftClick(\'' + esc(s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite') + '\')">🔄 機体を交代する（' + esc(s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite') + 'へ）</button>' +
-        '<button type="button" class="btn btn-secondary btn-sm" onclick="callServer(\'startPostflight\')">🏁 飛行せず終了（飛行後点検へ）</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" onclick="screenAction(\'startPostflight\')">🏁 飛行せず終了（飛行後点検へ）</button>' +
       '</div>' +
-      '<button class="btn btn-danger btn-sm" style="margin-top:14px;" onclick="cancelSessionPrompt()">この運航入力を中止</button>' +
+      '<button class="btn btn-danger btn-sm" style="margin-top:14px;" onclick="screenCancel()">この運航入力を中止</button>' +
     '</div>';
 }
 
@@ -193,7 +180,7 @@ function submitStartFlight(){
   clearFormErrors('readyCard');
   var errors = [];
 
-  var battery = Number(STATE.session.selectedBattery || 0);
+  var battery = Number(screenState().session.selectedBattery || 0);
   if(!battery) errors.push({ id: '', label: '使用バッテリー', message: '一つ前の画面に戻り、使用バッテリーを確認してください。' });
 
   var takeoffLocation = val('takeoffLocation');
@@ -204,7 +191,7 @@ function submitStartFlight(){
     return;
   }
 
-  callServer('startFlight', {
+  screenAction('startFlight', {
     battery: battery,
     takeoffLocation: takeoffLocation
   });
@@ -214,7 +201,7 @@ function submitStartFlight(){
 // 4. 飛行中画面（操縦に集中）／着陸後入力画面
 // ----------------------------------------------------
 function renderFlyingView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var startTime = new Date(s.startedAt);
 
   div.innerHTML = sessionHeaderHtml() +
@@ -227,7 +214,7 @@ function renderFlyingView(div){
       '<div class="warn-box" style="margin-top:12px;background:#eff6ff;border-left-color:#2563eb;color:#1e3a8a;">' +
         '<strong>飛行中は画面操作をせず、操縦と周囲確認に集中してください。</strong>' +
       '</div>' +
-      '<button class="btn btn-warning" style="font-size:18px;padding:16px;margin-top:16px;" onclick="callServer(\'completeLanding\')">🛬 着陸完了（プロペラ停止後）</button>' +
+      '<button class="btn btn-warning" style="font-size:18px;padding:16px;margin-top:16px;" onclick="screenAction(\'completeLanding\')">🛬 着陸完了（プロペラ停止後）</button>' +
     '</div>';
 
   updateTimerDisplay(startTime);
@@ -235,7 +222,7 @@ function renderFlyingView(div){
 }
 
 function renderLandingView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var previousInput = s.pendingLandingInput || {};
   var startTime = new Date(s.startedAt);
   var activeFlight = s.flights && s.flights.length ? s.flights[s.flights.length - 1] : null;
@@ -257,7 +244,7 @@ function renderLandingView(div){
 
       '<div class="flex-between">' +
         '<label>着陸場所<span class="required">*</span></label>' +
-        '<button type="button" class="btn-outline" onclick="fetchCurrentGps(\'landingLocation\', null)">📍 GPSで現在地取得（任意）</button>' +
+        '<button type="button" class="btn-outline" onclick="screenGps(\'landingLocation\', null)">📍 GPSで現在地取得（任意）</button>' +
       '</div>' +
       '<input type="text" id="landingLocation" value="' + esc(previousInput.landingLocation || s.route) + '">' +
 
@@ -338,7 +325,7 @@ function submitLandFlight(){
     return;
   }
 
-  callServer('landFlight', {
+  screenAction('landFlight', {
     landingLocation: landingLocation,
     actualMinutes: actualMinutes,
     safetyIssue: isChecked('safetyIssue'),
@@ -351,7 +338,7 @@ function submitLandFlight(){
 // 5. 着陸後選択画面
 // ----------------------------------------------------
 function renderAfterLandingView(div){
-  var s = STATE.session;
+  var s = screenState().session;
   var otherModel = s.model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
   var acs = s.aircrafts || {};
   var otherAc = acs[otherModel];
@@ -365,19 +352,47 @@ function renderAfterLandingView(div){
       '</div>' +
       '<p class="text-sm">次に行う操作を選んでください。</p>' +
 
-      '<button class="btn btn-primary" style="font-size:18px;padding:15px;" onclick="callServer(\'continueFlight\')">🔋 同じ機体で続ける（バッテリー交換）</button>' +
+      '<button class="btn btn-primary" style="font-size:18px;padding:15px;" onclick="screenAction(\'continueFlight\')">🔋 同じ機体で続ける（バッテリー交換）</button>' +
       '<div class="text-sm" style="margin:5px 0 0;color:#64748b;">' + esc(s.model) + ' の第' + (s.flightIndex + 1) + '飛行へ進みます。</div>' +
-      
+
       '<button class="btn btn-secondary" style="margin-top:14px;font-size:15px;padding:12px;" onclick="onSwitchAircraftClick(\'' + esc(otherModel) + '\')">🔄 機体を交代する（' + esc(otherModel) + '）' + otherBadge + '</button>' +
 
       '<div style="margin-top:20px;padding-top:14px;border-top:1px solid #cbd5e1;">' +
         '<div class="text-sm" style="margin-bottom:6px;color:#475569;">本日の飛行を終える場合</div>' +
-        '<button class="btn btn-secondary" style="font-size:15px;padding:12px;" onclick="callServer(\'startPostflight\')">🏁 全飛行を終了して飛行後点検へ</button>' +
+        '<button class="btn btn-secondary" style="font-size:15px;padding:12px;" onclick="screenAction(\'startPostflight\')">🏁 全飛行を終了して飛行後点検へ</button>' +
       '</div>' +
     '</div>';
 }
 
 function onSwitchAircraftClick(targetModel){
-  callServer('switchAircraft', { targetModel: targetModel });
+  screenAction('switchAircraft', { targetModel: targetModel });
 }
 
+
+function captureFlightScreenDraft(s){
+  if(s.phase === 'PRE'){
+    var checks = {};
+    for(var i=0; i<PRE_NAMES.length; i++) checks[PRE_NAMES[i]] = isChecked('pre' + i) ? '正常' : '異常';
+    s.preflightChecks = checks;
+    s.preflightAbnormalDetail = val('abnormalDetail');
+    s.selectedBattery = Number(val('preflightBattery')) || 0;
+    s.selectedBatteryCycle = val('preflightCycle');
+  }else if(s.phase === 'BATTERY_CHANGE'){
+    s.pendingBatteryChangeInput = {
+      battery:val('changeBattery'), cycle:val('changeBatteryCycle'),
+      installed:isChecked('batteryInstalled'), statusOk:isChecked('batteryStatusOk')
+    };
+  }else if(s.phase === 'READY'){
+    s.pendingFlightInput = { battery:s.selectedBattery, takeoffLocation:val('takeoffLocation') };
+  }else if(s.phase === 'LANDING'){
+    s.pendingLandingInput = {
+      landingLocation:val('landingLocation'), actualMinutes:val('actualMinutes'),
+      safetyIssue:isChecked('safetyIssue'), safetyDetail:val('safetyDetail'),
+      batteryNote:val('batteryNote')
+    };
+  }
+}
+
+function stopFlightTimer(){
+  if(TIMER_INTERVAL){ clearInterval(TIMER_INTERVAL); TIMER_INTERVAL = null; }
+}

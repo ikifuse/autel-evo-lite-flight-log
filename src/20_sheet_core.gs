@@ -86,28 +86,6 @@ function labelColumn_(sheet, row, startCol, endCol, labels) {
   return 0;
 }
 
-function setAfterLabelInBlock_(sheet, blockNo, labels, value) {
-  const cell = findInBlock_(sheet, blockNo, labels, false);
-  if (!cell) return false;
-  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
-  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
-  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
-  if (targetCol > block_(blockNo).endCol) return false;
-  trackedSetValue_(sheet.getRange(cell.row, targetCol), value == null ? '' : value);
-  return true;
-}
-
-function setUserTextAfterLabelInBlock_(sheet, blockNo, labels, value) {
-  const cell = findInBlock_(sheet, blockNo, labels, false);
-  if (!cell) return false;
-  const merged = sheet.getRange(cell.row, cell.col).getMergedRanges();
-  const labelRange = merged.length ? merged[0] : sheet.getRange(cell.row, cell.col);
-  const targetCol = labelRange.getColumn() + labelRange.getNumColumns();
-  if (targetCol > block_(blockNo).endCol) return false;
-  trackedSetUserText_(sheet.getRange(cell.row, targetCol), value);
-  return true;
-}
-
 function flightBlocks_(sheet) {
   return [1, 2].map(blockNo => {
     const header = findInBlock_(sheet, blockNo, ['使用バッテリー'], false);
@@ -122,3 +100,28 @@ function flightColumn_(sheet, block, labels) {
   return labelColumn_(sheet, block.headerRow, block.startCol, block.endCol, labels);
 }
 
+function chooseFixedBlock_(sheet, reserved) {
+  if (!blockUsed_(sheet, 1) && !reserved.blocks[sheet.getName() + '|1']) return 1;
+  if (!blockUsed_(sheet, 2) && !reserved.blocks[sheet.getName() + '|2']) return 2;
+  return 0;
+}
+
+function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, reserved, appTest) {
+  let sheet = currentSheet;
+  if (!sheet) {
+    const beforeNames = {};
+    ss.getSheets().forEach(function(item) { beforeNames[item.getName()] = true; });
+    sheet = getOrCreateDateSheet_(ss, operationDate, !!forceNew, 1, appTest);
+    if (!beforeNames[sheet.getName()]) commitFault_('AFTER_SHEET_COPY');
+  }
+  while (true) {
+    const blockNo = chooseFixedBlock_(sheet, reserved);
+    if (blockNo) return { sheet: sheet, blockNo: blockNo };
+    const match = sheet.getName().match(/_(\d+)$/);
+    const nextSequence = (match ? Number(match[1]) : 1) + 1;
+    const name = (appTest ? 'TEST_' : '') + format_(operationDate, 'yyyy.M.d') + '_' + nextSequence;
+    const existed = !!ss.getSheetByName(name);
+    sheet = getOrCreateDateSheet_(ss, operationDate, false, nextSequence, appTest);
+    if (!existed) commitFault_('AFTER_SHEET_COPY');
+  }
+}

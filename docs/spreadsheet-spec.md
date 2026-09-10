@@ -6,7 +6,7 @@
 
 - 関連正本仕様書: [01_ドローン運航記録_設計書.md](../01_ドローン運航記録_設計書.md)
 - コード対応索引: [docs/code-map.md](code-map.md)
-- ソースコード正本: `src/20_sheet_core.gs`, `src/21_sheet_records.gs`, `src/22_battery_totals.gs`
+- ソースコード正本: `src/20_sheet_core.gs`, `src/21_sheet_records.gs`, `src/22_battery_history.gs`, `src/23_aircraft_totals.gs`
 
 ---
 

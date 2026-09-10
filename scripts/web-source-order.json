@@ -1,0 +1,14 @@
+[
+  "src/web/42_web_catalog.js",
+  "src/web/32_web_core.js",
+  "src/web/37_web_storage.js",
+  "src/web/38_web_rpc.js",
+  "src/web/41_web_workflow.js",
+  "src/web/39_web_gps.js",
+  "src/web/34_web_start.js",
+  "src/web/35_web_flight.js",
+  "src/web/36_web_postflight.js",
+  "src/web/40_web_diagnosis.js",
+  "src/web/33_web_engine.js",
+  "src/web/43_web_bootstrap.js"
+]
