@@ -1,4 +1,19 @@
-# Autel EVO Lite / Lite+ ドローン運航記録
+<p align="center">
+  <img src="./icon.png" width="160" height="160" alt="濃紺背景に白いドローンとオレンジのチェックを配した専用アイコン">
+</p>
+
+<h1 align="center">Autel EVO Lite / Lite+ ドローン運航記録</h1>
+
+<p align="center">Autel EVO Lite / Lite+ 向けのドローン運航記録Webアプリ</p>
+
+<!-- Autelロゴ出典: https://manuals.autelrobotics.com/logo.png （公式ドキュメントサイト） -->
+<p align="center">
+  <a href="https://manuals.autelrobotics.com/">
+    <img src="./autel-logo.png" width="40" alt="対象メーカー：Autel Roboticsの赤いAロゴ">
+  </a>
+</p>
+
+<p align="center"><sub>本プロジェクトは非公式であり、Autel Roboticsとは関係ありません。</sub></p>
 
 Pixel 6aなどのスマートフォンから、飛行前点検・各飛行・バッテリー交換・機体交代・飛行後点検までを順番に入力し、Googleスプレッドシートへ運航記録を保存するGoogle Apps Script（GAS）Webアプリです。
 
