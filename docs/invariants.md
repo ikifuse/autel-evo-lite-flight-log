@@ -117,3 +117,7 @@ AIエージェントおよび開発者は、一般的なWeb開発のベストプ
   * 構造整理ではPropertiesキー、plan version、canonical JSON、operation順、公開GAS入口6関数を維持し、`node tests/refactor-compat.test.js`と`node tests/web-compat.test.js`を最終確認で実行する。
 * **背景と理由（Why）**:
   * AIエージェントのコンテキスト浪費を防ぐためのファイル分割と、GAS環境へ単一ファイルとして配布する仕組みの整合性を保つため。
+
+## 11. 新規planの必須帳票欄（RC追加）
+
+新規plan捕捉では必須ヘッダー、前後の点検項目、後点検結果・場所、飛行がある場合の8欄と使用BAT履歴見出しを省略してcompleteしない。技能証明・異常記録・処置欄は入力条件に応じて確認する。実原本の点検位置を前後で区別する。既存pendingはこの検査のために再生成せず、complete後の帳票修正も検査・復元の対象にしない。全結合形状等まで検出できる保証ではない。適用範囲は[RC報告](release-candidate-audit-2026-09-10.md)を参照。

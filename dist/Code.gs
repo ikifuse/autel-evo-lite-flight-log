@@ -1042,6 +1042,11 @@ function nextFixedSheetAndBlock_(ss, operationDate, currentSheet, forceNew, rese
   }
 }
 
+// 新規planの捕捉時だけ必須項目の省略を拒否する。既存pendingはwriterを呼ばず固定操作を復旧する。
+function requireCapturedField_(present, label) {
+  if (COMMIT_WRITE_CAPTURE && !present) throw new Error('必須帳票欄がありません: ' + label);
+}
+
 function locationCellDisplay_(value) {
   const raw = String(value == null ? '' : value);
   const text = raw.trim();
@@ -1074,44 +1079,58 @@ function setLocationAfterLabelInBlock_(sheet, blockNo, labels, value) {
 
 function writeHeaderFields_(sheet, session, blockNo) {
   const block = block_(blockNo);
+  let selectedModelFound = false;
   for (let row = 1; row <= Math.min(10, sheet.getLastRow()); row++) {
     const cell = sheet.getRange(row, block.startCol);
     const current = String(cell.getDisplayValue() || '').replace(/^[□☑✓]\s*/, '').trim();
     if (current.indexOf('Autel Robotics Co., Ltd.') >= 0) {
       const normalized = current.replace(/\s+/g, ' ');
       const selected = normalized.indexOf('/ ' + session.model + ' /') >= 0;
+      if (selected) selectedModelFound = true;
       trackedSetValue_(cell, (selected ? '☑ ' : '□ ') + current);
     }
   }
 
+  requireCapturedField_(selectedModelFound, '使用機体');
   const dateCell = findInBlock_(sheet, blockNo, ['飛行・点検実施年月日'], true);
+  if (COMMIT_WRITE_CAPTURE && !dateCell) throw new Error('必須帳票欄がありません: 飛行・点検実施年月日');
   if (dateCell) {
     const date = dateFromSheetName_(session.dateSheet, true);
     trackedSetValue_(sheet.getRange(dateCell.row, dateCell.col), '飛行・点検実施年月日：' + format_(date, 'yyyy年M月d日'));
   }
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose);
-  setLocationAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route);
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method);
+  requireCapturedField_(setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行目的（飛行概要）','飛行目的'], session.purpose), '飛行目的');
+  requireCapturedField_(setLocationAfterLabelInBlock_(sheet, blockNo, ['飛行経路・場所','飛行経路'], session.route), '飛行経路・場所');
+  requireCapturedField_(setUserTextAfterLabelInBlock_(sheet, blockNo, ['飛行禁止空域・飛行方法','飛行空域・方法'], session.category + ' / ' + session.method), '飛行空域・方法');
 
   let pilotDisplay = session.pilot;
   if (session.assistant) {
     pilotDisplay += '（補助者: ' + session.assistant + '）';
   }
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['操縦者・点検実施者','操縦者'], pilotDisplay);
+  requireCapturedField_(setUserTextAfterLabelInBlock_(sheet, blockNo, ['操縦者・点検実施者','操縦者'], pilotDisplay), '操縦者');
 
   const certLabel = findInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], false);
   if (certLabel && String(sheet.getRange(certLabel.row, certLabel.col).getDisplayValue()).trim() === '技能証明番号') {
     trackedSetValue_(sheet.getRange(certLabel.row, certLabel.col), '技能証明書番号');
   }
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
+  const certWritten = setUserTextAfterLabelInBlock_(sheet, blockNo, ['技能証明書番号','技能証明番号'], session.cert);
+  if (session.cert) requireCapturedField_(certWritten, '技能証明書番号');
 }
 
 function writeCheckResults_(sheet, checks, section, blockNo) {
   const names = section === '飛行前点検' ? PRE_CHECK_NAMES : POST_CHECK_NAMES;
   const checkCol = block_(blockNo).startCol + (section === '飛行前点検' ? 6 : 12);
+  const values = sheetValues_(sheet);
   names.forEach(name => {
     const labels = name === '操縦装置' ? ['操縦装置','操縦装置（プロポ）','操縦装置\n（プロポ）'] : [name];
-    const label = findInBlock_(sheet, blockNo, labels, false);
+    const startCol = block_(blockNo).startCol + (section === '飛行前点検' ? 0 : 7);
+    let label = null;
+    for (let row = 19; row <= (section === '飛行前点検' ? 29 : 22); row++) {
+      if (labels.indexOf(String((values[row - 1] || [])[startCol - 1] || '').trim()) >= 0) {
+        label = { row: row, col: startCol };
+        break;
+      }
+    }
+    requireCapturedField_(!!label, section + ': ' + name);
     if (label) trackedSetValue_(sheet.getRange(label.row, checkCol), checks[name] === '正常' ? '☑' : '□');
   });
 }
@@ -1128,6 +1147,7 @@ function writeFlightFields_(sheet, slot, fields) {
   };
   Object.keys(fields).forEach(key => {
     const col = flightColumn_(sheet, block, aliases[key] || [key]);
+    if (key !== 'バッテリー異常・所感') requireCapturedField_(!!col, key);
     if (col) {
       const cell = sheet.getRange(slot.row, col);
       if (['離陸時刻', '着陸時刻', '飛行時間', '総飛行時間'].indexOf(key) >= 0) {
@@ -1145,17 +1165,23 @@ function writeFlightFields_(sheet, slot, fields) {
 }
 
 function writeOptionalFields_(sheet, input, blockNo, abnormal) {
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['点検実施場所','点検場所'], input.inspectionLocation || '');
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['不具合箇所：','不具合箇所'], input.defectLocation || '');
-  setUserTextAfterLabelInBlock_(sheet, blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.defectDetail || '');
+  requireCapturedField_(setUserTextAfterLabelInBlock_(sheet, blockNo, ['点検実施場所','点検場所'], input.inspectionLocation || ''), '点検実施場所');
+  const defectLocationWritten = setUserTextAfterLabelInBlock_(sheet, blockNo, ['不具合箇所：','不具合箇所'], input.defectLocation || '');
+  if (abnormal || input.defectLocation) requireCapturedField_(defectLocationWritten, '不具合箇所');
+  const defectDetailWritten = setUserTextAfterLabelInBlock_(sheet, blockNo, ['事象等の内容：','事象等の内容','不具合内容'], input.defectDetail || '');
+  if (abnormal || input.defectDetail) requireCapturedField_(defectDetailWritten, '事象等の内容');
 
   const normalCell = findInBlock_(sheet, blockNo, ['□ 異常なし','☑ 異常なし'], false);
   const defectCell = findInBlock_(sheet, blockNo, ['□ 不具合あり','☑ 不具合あり'], false);
+  requireCapturedField_(!!normalCell && !!defectCell, '飛行後点検結果');
   if (normalCell) trackedSetValue_(sheet.getRange(normalCell.row, normalCell.col), abnormal ? '□ 異常なし' : '☑ 異常なし');
   if (defectCell) trackedSetValue_(sheet.getRange(defectCell.row, defectCell.col), abnormal ? '☑ 不具合あり' : '□ 不具合あり');
 
   if (abnormal || String(input.actionDetail || '').trim()) {
     const offset = block_(blockNo).startCol - 3;
+    [[4,'発生年月日'],[6,'不具合事情'],[10,'処置年月日'],[12,'処置その他'],[15,'確認']].forEach(function(item) {
+      requireCapturedField_(String(sheet.getRange(43, item[0] + offset).getDisplayValue()).trim() === item[1], item[1]);
+    });
     trackedSetValue_(sheet.getRange(44, 4 + offset), new Date());
     trackedSetUserText_(sheet.getRange(44, 6 + offset), input.defectDetail || input.defectLocation || '');
     if (String(input.actionDetail || '').trim()) trackedSetValue_(sheet.getRange(44, 10 + offset), new Date());
@@ -1235,6 +1261,10 @@ function capturePostflightRecords_(capture, ss, session, postflight, assignments
 
 function fixedBatteryRow_(sheet, reservedRows) {
   const values = sheetValues_(sheet);
+  const headers = ['日付','使用機体','用途','飛行/稼働時間(分)','使用後サイクル数','異常・所感','場所/備考','その他メモ'];
+  if (!headers.every(function(label, index) { return String((values[11] || [])[index] || '').trim() === label; })) {
+    throw new Error(sheet.getName() + ' の必須帳票欄を確認できません。');
+  }
   for (let row = BATTERY_FIRST_ROW; row <= BATTERY_LAST_ROW; row++) {
     if (!String((values[row - 1] || [])[0] || '').trim() && !reservedRows[sheet.getName() + '|' + row]) return row;
   }
@@ -2297,6 +2327,8 @@ function applyAircraftTotals_(commitPlan) {
 // 2. サーバー側ロジック（全運航終了時のスプレッドシート一括書き込み）
 // ============================================================================
 function doGet() {
+  // HtmlServiceの外側ページへ設定する。root icon.pngはbuild生成・別途公開が必要。
+  const iconUrl = APP_ICON_URL + '?v=80452b105a504553';
   const initialState = JSON.stringify(getAppState())
     .replace(/</g, '\\u003c')
     .replace(/\u2028/g, '\\u2028')
@@ -2305,10 +2337,13 @@ function doGet() {
     APP_HTML
       .replace('__INITIAL_STATE__', initialState)
       .replace('__APP_VERSION__', APP_VERSION)
-      .replace(/__APP_ICON__/g, APP_ICON_URL)
+      .replace(/__APP_ICON__/g, iconUrl)
   )
     .setTitle('ドローン運航記録')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+    .setFaviconUrl(iconUrl)
+    .addMetaTag('mobile-web-app-capable', 'yes')
+    .addMetaTag('apple-mobile-web-app-capable', 'yes')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
 
 
@@ -2320,14 +2355,8 @@ const APP_HTML = String.raw`<!doctype html>
 <head>
   <base target="_top">
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="theme-color" content="#1976d2">
-  <link rel="icon" type="image/png" href="__APP_ICON__">
-  <link rel="apple-touch-icon" href="__APP_ICON__">
-  <link rel="manifest" href="data:application/manifest+json;utf-8,%7B%22name%22%3A%22%E3%83%89%E3%83%AD%E3%83%BC%E3%83%B3%E9%81%8B%E8%88%AA%E8%A8%98%E9%8C%B2%22%2C%22short_name%22%3A%22%E9%81%8B%E8%88%AA%E8%A8%98%E9%8C%B2%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23f4f6f9%22%2C%22theme_color%22%3A%22%231976d2%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22__APP_ICON__%22%2C%22sizes%22%3A%22192x192%22%2C%22type%22%3A%22image%2Fpng%22%7D%5D%7D">
+  <!-- 外側ページのfavicon/metaはdoGetで設定。touch iconの採用は実Safariで確認する。 -->
+  <link rel="apple-touch-icon" sizes="512x512" href="__APP_ICON__">
   <title>ドローン運航記録</title>
   <style>
     :root {
@@ -3019,7 +3048,7 @@ function updateNetworkStatus(){
   var badge = el('networkBadge');
   if(!badge) return;
   badge.className = 'network-badge ' + (online ? 'online' : 'offline');
-  badge.innerText = online ? '● オンライン' : '● 圏外（入力は端末に保持）';
+  badge.innerText = online ? '● オンライン' : '● 圏外（送信できません）';
 }
 
 function formatTimeStr(iso){
@@ -3112,15 +3141,24 @@ var ACTIVE_OPERATION_DRAFT_KEY = 'EVO_LITE_ACTIVE_OPERATION_V2';
 var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
 var STORAGE_KEY_ASSISTANTS = 'EVO_LITE_ASSISTANT_HISTORY_V1';
 
+var DRAFT_STORAGE_FAILED = false;
 function persistOperationDraft(){
   var state = DRAFT_STORAGE_PORTS.getState();
   try{
     if(state && state.active && state.session){
-      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, JSON.stringify(state.session));
+      var serialized = JSON.stringify(state.session);
+      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, serialized);
+      if(localStorage.getItem(ACTIVE_OPERATION_DRAFT_KEY) !== serialized) throw new Error('draft readback failed');
     }else{
       localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY);
     }
-  }catch(e){}
+    DRAFT_STORAGE_FAILED = false;
+    return true;
+  }catch(e){
+    if(!DRAFT_STORAGE_FAILED) alert('端末への下書き保存に失敗しました。この画面を閉じたり再読み込みしたりせず、入力内容を控えてください。');
+    DRAFT_STORAGE_FAILED = true;
+    return false;
+  }
 }
 
 function restoreOperationDraft(){
@@ -3148,7 +3186,9 @@ function restoreOperationDraft(){
       state.session = session;
       persistOperationDraft();
     }
-  }catch(e){}
+  }catch(e){
+    alert('端末の下書きを読み込めませんでした。前回の入力があった場合は、新しい運航を始める前に記録の保存状況を確認してください。');
+  }
 }
 
 function clearOperationDraft(){
@@ -3246,11 +3286,20 @@ function pushDraftHistory(session){
   session.navigationHistory = history;
 }
 
+// 運航開始日は帳票と同じ日本時間。開始済み下書きの日付は変更しない。
+function currentOperationDate(){
+  var date = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return date.getUTCFullYear() + '.' + (date.getUTCMonth() + 1) + '.' + date.getUTCDate();
+}
+
 function localFlightAction(name, payload, onSuccess){
   payload = payload || {};
   var session = STATE && STATE.session;
 
   if(name === 'startAircraft'){
+    var today = currentOperationDate();
+    if(STATE.today !== today) STATE.hasTodaySheet = false;
+    STATE.today = today;
     var model = payload.model;
     var other = model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
     var weather = [];
@@ -4641,12 +4690,13 @@ function callServer(name, arg, onSuccess){
   }
 
   if(name === 'finishAircraft'){
+    STATE.session.pendingPostflightInput = cloneData(arg || {});
+    var draftSaved = persistOperationDraft();
+    var draftNotice = draftSaved ? '入力内容は端末に保存しました。' : '端末への下書き保存に失敗しています。この画面を閉じず、入力内容を控えてください。';
     if(!navigator.onLine){
-      alert('現在は圏外です。入力内容は端末に残っています。電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
+      alert('現在は圏外です。' + draftNotice + '電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
       return;
     }
-    STATE.session.pendingPostflightInput = cloneData(arg || {});
-    persistOperationDraft();
     var commitSession = cloneData(STATE.session);
     // 戻る履歴は端末専用。正常な複数飛行が通信入力の上限に達するのを防ぐ。
     delete commitSession.navigationHistory;
@@ -4671,7 +4721,7 @@ function callServer(name, arg, onSuccess){
     }, function(err){
       busy(false);
       var msg = err && err.message ? err.message : String(err);
-      if(name === 'finishAircraft') alert('保存できませんでした。入力内容は端末に残っています。電波を確認して、もう一度保存してください。\n\n' + msg);
+      if(name === 'finishAircraft') alert('保存できませんでした。' + draftNotice + '電波を確認して、もう一度保存してください。\n\n' + msg);
       else renderError(msg);
     });
 }
@@ -4813,6 +4863,11 @@ configureWebRoutes({
 restoreOperationDraft();
 updateNetworkStatus();
 render();
+
+// 入力途中も同期保存する。debounce待ち中の終了による消失を避ける。
+window.addEventListener('input', captureCurrentScreenDraft);
+window.addEventListener('change', captureCurrentScreenDraft);
+window.addEventListener('pagehide', captureCurrentScreenDraft);
 </script>
 </body>
 </html>`;

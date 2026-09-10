@@ -201,3 +201,13 @@ git diff --check
 - 構造整理ではサーバー/Web互換試験と境界チェックが成功すること。実GAS・実機で実施した確認は、これらのNode試験とは分けて報告する。
 
 既存CIの `.github/workflows/build-dist.yml` にも回帰・両互換・境界チェックと自己試験を接続している。基準Git blob参照のためcheckoutは `fetch-depth: 0` を使用する。今回の変更後の実GitHub Actions実行は未確認であり、ローカルPASSと区別する。
+
+## Release Candidate回帰
+
+`node tests/release-candidate.test.js`：新規必須欄欠損、前後同名点検の区別、条件付き異常欄、0-flightのBAT検査除外、旧pending/completeの新規writer回避、進行中入力のinput/change/pagehide保存と復元、storage書込み読み戻し・例外・破損、JST日付更新、WebフォームからTEST/通常0/1/7/8/14/28/30飛行、2機体・BAT巡回・同一BAT・気象/GPS/日本語/数式風入力・境界文字数、Properties読取り失敗、各flush失敗後再送を検査する。実GAS・端末試験ではない。
+
+Web互換試験では今回意図したイベント追加、保持案内文、圏外capture、下書き読込み失敗警告だけを旧挙動の比較から分離し、RC試験で結果を直接検査する。他の状態・通信・画面比較は保持する。regressionの帳票fixtureには実原本で確認した後点検補足欄・BAT8見出しを追加した。
+
+## ホーム画面アイコン検証
+
+`node tests/pwa-icons.test.js`：PNGのCRC・展開・512px RGB・metadata・Android安全円、rootコピー、画像hash、実doGet→HtmlServiceの許可meta/favicon呼出しとHTML touch link、重複・空参照を検査する。`--rc=/path/to/RC-Code.gs`を付けると、RCから保存コードとWeb JSが変わっていないことも検査する。これはGASの外側ページや実端末のホーム画面をエミュレートするものではない。

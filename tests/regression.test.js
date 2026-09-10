@@ -98,6 +98,12 @@ function makeTemplate() {
     const pre = ['機体全般','プロペラ・フレーム','通信系統','推進系統','電源系統','自動制御系統','バッテリー','操縦装置\n（プロポ）','灯火','カメラ','リモートID'];
     pre.forEach((name, i) => set(sheet, 19 + i, start, name));
     ['機体全般','プロペラ・フレーム','発熱','その他'].forEach((name, i) => set(sheet, 19 + i, start + 7, name));
+    set(sheet,24,start+7,'点検実施場所');
+    set(sheet,25,start+9,'□ 異常なし');
+    set(sheet,26,start+9,'□ 不具合あり');
+    set(sheet,27,start+7,'不具合箇所：');
+    set(sheet,28,start+7,'事象等の内容：');
+    [[1,'発生年月日'],[3,'不具合事情'],[7,'処置年月日'],[9,'処置その他'],[12,'確認']].forEach(([col,label])=>set(sheet,43,start+col,label));
     const headers = ['使用バッテリー','離陸場所','着陸場所','離陸時刻','着陸時刻','飛行時間','総飛行時間','安全に影響した事項','バッテリー異常・所感'];
     headers.forEach((name, i) => set(sheet, 32, start + i, name));
   }
@@ -114,7 +120,7 @@ function makeMaster(name, total) {
 
 function makeBattery(number) {
   const sheet = new MockSheet('BAT_' + number);
-  set(sheet, 12, 1, '日付');
+  ['日付','使用機体','用途','飛行/稼働時間(分)','使用後サイクル数','異常・所感','場所/備考','その他メモ'].forEach((label,i)=>set(sheet,12,i+1,label));
   return sheet;
 }
 
@@ -341,9 +347,9 @@ function run() {
     const appStart=current.indexOf('const APP_HTML =');
     assert(appStart>=0,'T15 APP_HTML marker missing');
     const currentApp=current.slice(appStart);
-    // Audit fixes: local-only navigationHistory and data-only diagnostic action IDs.
+    // Approved RC + icon shell: HtmlService owns meta/favicon; no iframe-only manifest.
     // Behavior is covered separately by audit-safety and B-baseline web compatibility.
-    const expectedHash='99ccdbe6354f11a6028cd21afd367bf01c53e695971abc180a4cf3de6eb247d4';
+    const expectedHash='419469d0c88bca63d00cfb67031e022dae144f9059c0f636afe706ce70a0e9fc';
     const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
     assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
     const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');

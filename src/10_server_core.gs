@@ -2,6 +2,8 @@
 // 2. サーバー側ロジック（全運航終了時のスプレッドシート一括書き込み）
 // ============================================================================
 function doGet() {
+  // HtmlServiceの外側ページへ設定する。root icon.pngはbuild生成・別途公開が必要。
+  const iconUrl = APP_ICON_URL + '?v=__ICON_REVISION__';
   const initialState = JSON.stringify(getAppState())
     .replace(/</g, '\\u003c')
     .replace(/\u2028/g, '\\u2028')
@@ -10,9 +12,12 @@ function doGet() {
     APP_HTML
       .replace('__INITIAL_STATE__', initialState)
       .replace('__APP_VERSION__', APP_VERSION)
-      .replace(/__APP_ICON__/g, APP_ICON_URL)
+      .replace(/__APP_ICON__/g, iconUrl)
   )
     .setTitle('ドローン運航記録')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+    .setFaviconUrl(iconUrl)
+    .addMetaTag('mobile-web-app-capable', 'yes')
+    .addMetaTag('apple-mobile-web-app-capable', 'yes')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
 

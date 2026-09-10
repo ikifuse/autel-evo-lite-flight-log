@@ -58,6 +58,20 @@ if (JSON.stringify(actualSourceFiles) !== JSON.stringify(listedSourceFiles)) {
   fail('src配下の.gsファイル一覧とscripts/source-order.jsonが一致しません。');
 }
 
+// PNG is canonical under src; root icon.png is the existing public delivery path.
+const iconBytes = readFileSync(resolve(rootDir, 'src/web/assets/icon.png'));
+if (iconBytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
+    iconBytes.readUInt32BE(16) !== 512 || iconBytes.readUInt32BE(20) !== 512 || iconBytes[25] !== 2) {
+  fail('専用アイコンは512×512の不透明RGB PNGである必要があります。');
+}
+const iconRevision = createHash('sha256').update(iconBytes).digest('hex').slice(0, 16);
+const publicIconPath = resolve(rootDir, 'icon.png');
+if (checkMode) {
+  if (!existsSync(publicIconPath) || !readFileSync(publicIconPath).equals(iconBytes)) fail('icon.pngがsrcの専用アイコンと一致しません。');
+} else {
+  writeFileSync(publicIconPath, iconBytes);
+}
+
 console.log('使用するsrcファイル一覧と結合順:');
 sourceFiles.forEach((file, index) => console.log(`${index + 1}. ${file}`));
 
@@ -111,7 +125,7 @@ const sourceText = sourceFiles
     return readFileSync(fullPath, 'utf8');
   })
   .concat([assembleWebSource(rootDir)])
-  .join('\n');
+  .join('\n').replaceAll('__ICON_REVISION__', iconRevision);
 
 try {
   new Function(sourceText);

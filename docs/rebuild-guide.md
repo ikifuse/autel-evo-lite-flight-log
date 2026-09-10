@@ -127,3 +127,7 @@ UI、下書き（LocalStorage）、入力検証、署名、固定保存計画、
 - **タップ領域**: ボタン・チェック・チップは最低44px以上の高さを確保すること。
 - **Safe Area**: `env(safe-area-inset-*)` が適用され、ノッチやホームバーと重ならないこと。
 - **補助者履歴**: 前回値を不用意に自動選択せず、「なし」を安全なデフォルトとすること。
+
+## ホーム画面アイコンの更新
+
+画像の正本は`src/web/assets/icon.png`（512×512 RGB PNG）。`icon.svg`は編集用図案。buildはroot `icon.png`へ同一画像をコピーし、画像hashをGASのアイコンURLへ反映する。`--check`は画像コピーも確認する。root画像だけを直接変更しない。GASへdistだけを反映してもGitHub公開画像は更新されないため、別途承認された公開時に既存mainの画像とGASの更新を揃える。[実装報告と端末確認](home-screen-icon-review.md)を参照。

@@ -39,3 +39,8 @@ configureWebRoutes({
 restoreOperationDraft();
 updateNetworkStatus();
 render();
+
+// 入力途中も同期保存する。debounce待ち中の終了による消失を避ける。
+window.addEventListener('input', captureCurrentScreenDraft);
+window.addEventListener('change', captureCurrentScreenDraft);
+window.addEventListener('pagehide', captureCurrentScreenDraft);

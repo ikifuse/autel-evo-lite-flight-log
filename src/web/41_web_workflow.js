@@ -34,11 +34,20 @@ function pushDraftHistory(session){
   session.navigationHistory = history;
 }
 
+// 運航開始日は帳票と同じ日本時間。開始済み下書きの日付は変更しない。
+function currentOperationDate(){
+  var date = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return date.getUTCFullYear() + '.' + (date.getUTCMonth() + 1) + '.' + date.getUTCDate();
+}
+
 function localFlightAction(name, payload, onSuccess){
   payload = payload || {};
   var session = STATE && STATE.session;
 
   if(name === 'startAircraft'){
+    var today = currentOperationDate();
+    if(STATE.today !== today) STATE.hasTodaySheet = false;
+    STATE.today = today;
     var model = payload.model;
     var other = model === 'EVO Lite' ? 'EVO Lite+' : 'EVO Lite';
     var weather = [];

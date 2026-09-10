@@ -7,15 +7,24 @@ var ACTIVE_OPERATION_DRAFT_KEY = 'EVO_LITE_ACTIVE_OPERATION_V2';
 var STORAGE_KEY_LAST = 'EVO_LITE_LAST_OPERATION';
 var STORAGE_KEY_ASSISTANTS = 'EVO_LITE_ASSISTANT_HISTORY_V1';
 
+var DRAFT_STORAGE_FAILED = false;
 function persistOperationDraft(){
   var state = DRAFT_STORAGE_PORTS.getState();
   try{
     if(state && state.active && state.session){
-      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, JSON.stringify(state.session));
+      var serialized = JSON.stringify(state.session);
+      localStorage.setItem(ACTIVE_OPERATION_DRAFT_KEY, serialized);
+      if(localStorage.getItem(ACTIVE_OPERATION_DRAFT_KEY) !== serialized) throw new Error('draft readback failed');
     }else{
       localStorage.removeItem(ACTIVE_OPERATION_DRAFT_KEY);
     }
-  }catch(e){}
+    DRAFT_STORAGE_FAILED = false;
+    return true;
+  }catch(e){
+    if(!DRAFT_STORAGE_FAILED) alert('端末への下書き保存に失敗しました。この画面を閉じたり再読み込みしたりせず、入力内容を控えてください。');
+    DRAFT_STORAGE_FAILED = true;
+    return false;
+  }
 }
 
 function restoreOperationDraft(){
@@ -43,7 +52,9 @@ function restoreOperationDraft(){
       state.session = session;
       persistOperationDraft();
     }
-  }catch(e){}
+  }catch(e){
+    alert('端末の下書きを読み込めませんでした。前回の入力があった場合は、新しい運航を始める前に記録の保存状況を確認してください。');
+  }
 }
 
 function clearOperationDraft(){

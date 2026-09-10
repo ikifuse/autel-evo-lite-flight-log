@@ -33,7 +33,7 @@ function updateNetworkStatus(){
   var badge = el('networkBadge');
   if(!badge) return;
   badge.className = 'network-badge ' + (online ? 'online' : 'offline');
-  badge.innerText = online ? '● オンライン' : '● 圏外（入力は端末に保持）';
+  badge.innerText = online ? '● オンライン' : '● 圏外（送信できません）';
 }
 
 function formatTimeStr(iso){

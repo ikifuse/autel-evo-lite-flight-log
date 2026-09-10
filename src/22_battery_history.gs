@@ -2,6 +2,10 @@
 
 function fixedBatteryRow_(sheet, reservedRows) {
   const values = sheetValues_(sheet);
+  const headers = ['日付','使用機体','用途','飛行/稼働時間(分)','使用後サイクル数','異常・所感','場所/備考','その他メモ'];
+  if (!headers.every(function(label, index) { return String((values[11] || [])[index] || '').trim() === label; })) {
+    throw new Error(sheet.getName() + ' の必須帳票欄を確認できません。');
+  }
   for (let row = BATTERY_FIRST_ROW; row <= BATTERY_LAST_ROW; row++) {
     if (!String((values[row - 1] || [])[0] || '').trim() && !reservedRows[sheet.getName() + '|' + row]) return row;
   }

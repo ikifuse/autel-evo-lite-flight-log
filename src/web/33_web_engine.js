@@ -11,12 +11,13 @@ function callServer(name, arg, onSuccess){
   }
 
   if(name === 'finishAircraft'){
+    STATE.session.pendingPostflightInput = cloneData(arg || {});
+    var draftSaved = persistOperationDraft();
+    var draftNotice = draftSaved ? '入力内容は端末に保存しました。' : '端末への下書き保存に失敗しています。この画面を閉じず、入力内容を控えてください。';
     if(!navigator.onLine){
-      alert('現在は圏外です。入力内容は端末に残っています。電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
+      alert('現在は圏外です。' + draftNotice + '電波が戻ってから、もう一度「運航日誌を確定する」を押してください。');
       return;
     }
-    STATE.session.pendingPostflightInput = cloneData(arg || {});
-    persistOperationDraft();
     var commitSession = cloneData(STATE.session);
     // 戻る履歴は端末専用。正常な複数飛行が通信入力の上限に達するのを防ぐ。
     delete commitSession.navigationHistory;
@@ -41,7 +42,7 @@ function callServer(name, arg, onSuccess){
     }, function(err){
       busy(false);
       var msg = err && err.message ? err.message : String(err);
-      if(name === 'finishAircraft') alert('保存できませんでした。入力内容は端末に残っています。電波を確認して、もう一度保存してください。\n\n' + msg);
+      if(name === 'finishAircraft') alert('保存できませんでした。' + draftNotice + '電波を確認して、もう一度保存してください。\n\n' + msg);
       else renderError(msg);
     });
 }
