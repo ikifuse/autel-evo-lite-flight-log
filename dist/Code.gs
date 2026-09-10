@@ -20,7 +20,7 @@ const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
 const COMMIT_PLAN_VERSION = 2;
 const COMMIT_CHUNK_MAX_BYTES = 7000;
-const COMMIT_COMPLETE_RETENTION_DAYS = 30;
+const COMMIT_COMPLETE_RETENTION_DAYS = 30; // 詳細METAの保持期間。完了証明自体は無期限保持。
 // 未完了保存計画は日数で自動削除せず、整合性と状態（Web画面での復旧/破棄）で管理する。
 const COMMIT_STALE_DAYS = 0; // 0=未完了の日数自動削除・自動failed化は行わない
 const SECURITY_MAX_FLIGHTS = 30;
@@ -744,7 +744,7 @@ function storeCommitPlan_(plan, signature) {
     return total + utf8Length_(commitDataKey_(plan.draftId, index)) + utf8Length_(chunk);
   }, 0) + utf8Length_(commitMetaKey_(plan.draftId)) + 2000;
   if (propertyStorageBytes_() + additionalBytes > SECURITY_MAX_PROPERTY_STORE_BYTES) {
-    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+    throw new Error('保存用領域の空き容量が不足しています。入力内容を保持し、保存領域の保守を依頼してください。重複防止のため過去の完了証明は削除しないでください。');
   }
   chunks.forEach(function(chunk, index) { properties.setProperty(commitDataKey_(plan.draftId, index), chunk); });
   const reread = chunks.map(function(_chunk, index) {
@@ -873,26 +873,34 @@ function isCompleteCommit_(meta, signature) {
   return meta.state === 'complete';
 }
 
-// 保存計画の保持期限・整理判断。既存30日complete保持と未完了の日数非削除を維持。
+// complete証明は期限で削除しない。30日後は同じキーの小さな証明へ縮小する。
 
 function cleanupCommitPlans_() {
   const properties = commitProperties_();
   const all = properties.getProperties();
   const nowMillis = now_().getTime();
   const completeLimit = COMMIT_COMPLETE_RETENTION_DAYS * 86400000;
-  const metaByDraft = {};
   Object.keys(all).forEach(function(key) {
     if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
     try {
       const meta = JSON.parse(all[key]);
-      metaByDraft[meta.draftId] = meta;
+      if (!meta || commitMetaKey_(meta.draftId) !== key || Number(meta.version) !== COMMIT_PLAN_VERSION) return;
+      validateDraftId_(meta.draftId);
       if (meta.state === 'complete' && Number(meta.chunkCount || 0) > 0) {
         for (let index = 0; index < Number(meta.chunkCount); index++) properties.deleteProperty(commitDataKey_(meta.draftId, index));
         meta.chunkCount = 0;
         writeCommitMeta_(meta);
       }
       if (meta.state === 'complete' && meta.completedAt && nowMillis - new Date(meta.completedAt).getTime() > completeLimit) {
-        properties.deleteProperty(key);
+        // 書込み済みの事実と入力同一性だけを永久保持する。先に削除しない。
+        // 置換失敗なら旧METAが残り、置換後の応答消失でも新証明で再送を止める。
+        if (typeof meta.signature !== 'string' || !meta.signature) return;
+        const proof = {
+          version: meta.version, draftId: meta.draftId, signature: meta.signature,
+          state: 'complete', stage: 'COMPLETE', chunkCount: 0, completedAt: meta.completedAt
+        };
+        const text = JSON.stringify(proof);
+        if (JSON.stringify(meta) !== text) properties.setProperty(key, text);
       }
       // 未完了保存計画（meta.state !== 'complete'）は日数で勝手に削除・変更しない。
       // Web画面上の診断（diagnosePendingCommitPlans）と復旧/安全破棄操作で管理する。
@@ -900,7 +908,9 @@ function cleanupCommitPlans_() {
   });
   Object.keys(all).forEach(function(key) {
     const match = key.match(new RegExp('^' + COMMIT_V2_PREFIX + '(.+)_DATA_\\d+$'));
-    if (match && !metaByDraft[match[1]]) properties.deleteProperty(key);
+    // JSON破損やdraftId不一致でも、METAキーが存在するDATAは孤児ではない。
+    // 復旧の証拠を失わないよう、METAの解析結果を削除根拠にしない。
+    if (match && !Object.prototype.hasOwnProperty.call(all, commitMetaKey_(match[1]))) properties.deleteProperty(key);
   });
 }
 
@@ -1113,7 +1123,7 @@ function writeFlightFields_(sheet, slot, fields) {
     '使用バッテリー':['使用バッテリー'], '離陸場所':['離陸場所'], '着陸場所':['着陸場所'],
     '離陸時刻':['離陸時刻'], '着陸時刻':['着陸時刻'], '飛行時間':['飛行時間'],
     '総飛行時間':['総飛行時間','総飛行時間（累計時間）'],
-    '安全に影響した事項':['安全に影響した事項','飛行の安全に影響した事項'],
+    '安全に影響した事項':['安全に影響した事項','飛行の安全に影響した事項','飛行の安全に影響のあった事項'],
     'バッテリー異常・所感':['バッテリー異常・所感']
   };
   Object.keys(fields).forEach(key => {
@@ -1395,6 +1405,13 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     discardBlockReasons: []
   };
 
+  // loadと同じversion境界を診断・TEST破棄にも適用する。
+  if (Number(meta.version) !== COMMIT_PLAN_VERSION) {
+    report.resumeBlockReasons.push('保存計画のバージョンを確認できません。');
+    report.discardBlockReasons.push('保存計画のバージョンを確認できません。');
+    return report;
+  }
+
   // 1. DATA chunkの読み取り確認（read-only）
   const chunks = [];
   let chunksMissing = false;
@@ -1618,10 +1635,14 @@ function diagnosePendingCommitPlans_() {
     if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
     try {
       const meta = JSON.parse(all[key]);
+      if (!meta || commitMetaKey_(meta.draftId) !== key) throw new Error('META identity mismatch');
+      validateDraftId_(meta.draftId);
       if (meta && meta.draftId && meta.state !== 'complete') {
         pendingDrafts.push(meta);
       }
-    } catch (ignored) {}
+    } catch (error) {
+      throw new Error('保存計画METAが破損しています。入力内容を保持したまま管理者へ連絡してください。');
+    }
   });
 
   if (!pendingDrafts.length) {
@@ -1690,7 +1711,7 @@ function ensureCommitPlanCapacity_(input) {
   const estimated = estimatedCommitPlanBytes_(input);
   if (estimated > SECURITY_MAX_COMMIT_PLAN_BYTES) throw new Error('保存計画の容量が上限を超えています。');
   if (propertyStorageBytes_() + estimated > SECURITY_MAX_PROPERTY_STORE_BYTES) {
-    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+    throw new Error('保存用領域の空き容量が不足しています。入力内容を保持し、保存領域の保守を依頼してください。重複防止のため過去の完了証明は削除しないでください。');
   }
 }
 
@@ -1867,10 +1888,14 @@ function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, prope
     if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
     try {
       const meta = JSON.parse(all[key]);
+      if (!meta || commitMetaKey_(meta.draftId) !== key) throw new Error('META identity mismatch');
+      validateDraftId_(meta.draftId);
       if (meta && meta.draftId && meta.draftId !== currentDraftId && meta.state !== 'complete') {
         pendingMetas.push(meta);
       }
-    } catch (ignored) {}
+    } catch (error) {
+      throw new Error('保存計画METAが破損しています。入力内容を保持したまま管理者へ連絡してください。');
+    }
   });
 
   if (!pendingMetas.length) return [];
@@ -1919,6 +1944,7 @@ function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, prope
 
 function recoverPendingCommitPlan_(draftId) {
   if (!draftId) throw new Error('復旧対象のdraftIdが指定されていません。');
+  validateDraftId_(draftId);
   return locked_(function() {
     cleanupCommitPlans_();
     const meta = readCommitMeta_(draftId);
@@ -1945,6 +1971,7 @@ function recoverPendingCommitPlan_(draftId) {
 
 function discardPendingTestCommitPlan_(draftId) {
   if (!draftId) throw new Error('破棄対象のdraftIdが指定されていません。');
+  validateDraftId_(draftId);
   return locked_(function() {
     const meta = readCommitMeta_(draftId);
     if (!meta) throw new Error('指定された保存計画が見つかりません。すでに解除されている可能性があります。');
@@ -4471,7 +4498,7 @@ function renderCommitDiagnosisResult(reports){
           '<div style="font-size:12px;color:#047857;margin-bottom:10px;line-height:1.4;">' +
             '前回の続きの書き込みを安全に完了し、保留状態を解除します。<br>（重複記録や累計の二重加算は発生しません）' +
           '</div>' +
-          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" onclick="executeCommitRecovery(\'' + esc(r.draftId) + '\')">' +
+          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" data-draft-id="' + esc(r.draftId) + '" onclick="executeCommitRecovery(this.dataset.draftId)">' +
             '🚀 前回の保存を安全に復旧する' +
           '</button>' +
         '</div>';
@@ -4483,7 +4510,7 @@ function renderCommitDiagnosisResult(reports){
             'TEST日付シートは既に削除されており、BAT履歴や機体累計にも書き込まれていません。<br>' +
             'このテスト保存計画を破棄して保留ロックを解除し、現在の入力内容を保存できるようにします。' +
           '</div>' +
-          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" onclick="executeTestCommitDiscard(\'' + esc(r.draftId) + '\')">' +
+          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" data-draft-id="' + esc(r.draftId) + '" onclick="executeTestCommitDiscard(this.dataset.draftId)">' +
             '🗑️ このTEST保存を破棄して解除' +
           '</button>' +
         '</div>';
@@ -4620,7 +4647,10 @@ function callServer(name, arg, onSuccess){
     }
     STATE.session.pendingPostflightInput = cloneData(arg || {});
     persistOperationDraft();
-    arg = { session:cloneData(STATE.session), postflight:arg || {} };
+    var commitSession = cloneData(STATE.session);
+    // 戻る履歴は端末専用。正常な複数飛行が通信入力の上限に達するのを防ぐ。
+    delete commitSession.navigationHistory;
+    arg = { session:commitSession, postflight:arg || {} };
   }
 
   busy(true);

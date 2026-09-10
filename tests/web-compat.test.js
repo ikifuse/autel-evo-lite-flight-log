@@ -105,7 +105,13 @@ function browser(source, seed = {}, options = {}) {
   return {context,elements,storage,events,pending,field(id,value,checked){const e=elements.get(id)||element(id);e.value=value;if(checked!==undefined)e.checked=checked;return e;}};
 }
 function snapshot(e) {
-  return { state:clone(e.context.STATE), storage:[...e.storage.entries()], events:clone(e.events),
+  const events = clone(e.events);
+  // Audit fix: navigationHistory remains local; it is not normalized business input.
+  // Compare every other RPC field exactly against the unchanged B baseline.
+  events.forEach(event => {
+    if (event[0] === 'rpc' && event[1] === 'finishAircraft') delete event[2][0].session.navigationHistory;
+  });
+  return { state:clone(e.context.STATE), storage:[...e.storage.entries()], events,
     app:normalizeHtml(e.elements.get('app').innerHTML),
     badge:e.elements.get('appStatusBadge').innerText,
     back:e.elements.get('globalBackButton').style.display,

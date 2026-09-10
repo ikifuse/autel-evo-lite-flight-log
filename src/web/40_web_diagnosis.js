@@ -106,7 +106,7 @@ function renderCommitDiagnosisResult(reports){
           '<div style="font-size:12px;color:#047857;margin-bottom:10px;line-height:1.4;">' +
             '前回の続きの書き込みを安全に完了し、保留状態を解除します。<br>（重複記録や累計の二重加算は発生しません）' +
           '</div>' +
-          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" onclick="executeCommitRecovery(\'' + esc(r.draftId) + '\')">' +
+          '<button type="button" class="btn btn-success" style="font-size:15px;padding:13px;width:100%;font-weight:700;" data-draft-id="' + esc(r.draftId) + '" onclick="executeCommitRecovery(this.dataset.draftId)">' +
             '🚀 前回の保存を安全に復旧する' +
           '</button>' +
         '</div>';
@@ -118,7 +118,7 @@ function renderCommitDiagnosisResult(reports){
             'TEST日付シートは既に削除されており、BAT履歴や機体累計にも書き込まれていません。<br>' +
             'このテスト保存計画を破棄して保留ロックを解除し、現在の入力内容を保存できるようにします。' +
           '</div>' +
-          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" onclick="executeTestCommitDiscard(\'' + esc(r.draftId) + '\')">' +
+          '<button type="button" class="btn btn-danger" style="font-size:15px;padding:13px;width:100%;font-weight:700;background:#dc2626;color:#ffffff;border:none;border-radius:6px;" data-draft-id="' + esc(r.draftId) + '" onclick="executeTestCommitDiscard(this.dataset.draftId)">' +
             '🗑️ このTEST保存を破棄して解除' +
           '</button>' +
         '</div>';

@@ -17,7 +17,10 @@ function callServer(name, arg, onSuccess){
     }
     STATE.session.pendingPostflightInput = cloneData(arg || {});
     persistOperationDraft();
-    arg = { session:cloneData(STATE.session), postflight:arg || {} };
+    var commitSession = cloneData(STATE.session);
+    // 戻る履歴は端末専用。正常な複数飛行が通信入力の上限に達するのを防ぐ。
+    delete commitSession.navigationHistory;
+    arg = { session:commitSession, postflight:arg || {} };
   }
 
   busy(true);

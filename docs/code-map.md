@@ -24,7 +24,7 @@
 | 読戻し・セル属性API | `24_sheet_integrity.gs` + `03_gas_sheet_adapter.gs` | 値/書式照合、Formula安全出力、GAS API境界 |
 | ScriptLock・flush位置 | `02_gas_runtime.gs` + `17_commit_recovery.gs` | 互換試験の呼出順。実時間・同時実行は実GASで別検証 |
 | active reservation | `18_commit_identity.gs` + `14_commit_plan.gs` | BAT行/No.枠予約、他pending保護 |
-| complete証明・保持整理 | `19_commit_retention.gs` + `15_commit_store.gs` | 30日保持、未完了非削除、complete後の手動編集 |
+| complete証明・保持整理 | `19_commit_retention.gs` + `15_commit_store.gs` | 無期限証明・30日後詳細縮小、未完了非削除、complete後の手動編集 |
 | JSON/UUID入力・業務規則 | `11_server_validation.gs` + `05_operation_policy.gs` | 入力境界・無変更拒否 |
 | 型・時間表現 | `01_commit_codec.gs` + `06_operation_time.gs` | canonical JSON、Date、HH:MM |
 | 下書き復元・画面戻る | `37_web_storage.js` + `41_web_workflow.js` + 対象画面`35`/`36` | 旧READY、Storage障害、各画面capture |

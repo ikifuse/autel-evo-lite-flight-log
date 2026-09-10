@@ -149,7 +149,15 @@
 
 最終確認では `--allow-legacy-diagnostic-html` を付けない。実DOMでのスクリプト実行、レイアウト、ブラウザ権限、実ネットワーク通信はこの試験の範囲外。
 
+### 7.2.1 分割後監査の追加安全性検証
+
+`node tests/audit-safety.test.js` は、破損METAのDATA保持・診断と新規保存の安全停止、復旧/TEST破棄のUUID検証、未知versionの診断拒否、診断ボタンへのJavaScript注入防止を確認する。
+
+Webで0/1/7/8/14/28/30飛行を作り、実際のRPC payloadをNode上のサーバー入口へ渡してcompleteまで確認する。`navigationHistory`は端末に保持し通信からのみ除外する。除外前後の正規化済み入力が一致することを個別検証し、Web互換比較ではこのフィールドだけを比較対象外とする。基準commitは変更しない。APP_HTMLハッシュ更新は、この通信修正と診断ボタンのdata属性化を反映したもの。
+
 ### 7.3 責務境界とチェック自体の検証
+
+長期再送対策は追加で `node tests/long-term-replay.test.js` を実行する。31/366/3660日後、TEST/通常運航、手動訂正・出力シート削除、署名変更拒否、complete前後障害、証明縮小の書込み前/後エラー、Properties満杯時の既存再送/新規保存停止を確認する。従来の「30日後にMETAが消える」期待値は廃止し、証明保持と無変更再送を検証する。通常保存の基準SHAは差し替えない。
 
 `scripts/check-boundaries.mjs` は両source-orderのファイル一覧、global重複、公開GAS入口6関数、internal末尾 `_`、凍結Legacyへの逆参照、純粋なcodec/time/compareへのGAS API・非純粋依存、server/Webの直接global参照による循環を検査する。`--json` で参照元の行とsymbolを含む依存一覧を出力できる。
 

@@ -25,6 +25,13 @@ function diagnoseSingleCommitPlan_(meta, spreadsheet, properties) {
     discardBlockReasons: []
   };
 
+  // loadと同じversion境界を診断・TEST破棄にも適用する。
+  if (Number(meta.version) !== COMMIT_PLAN_VERSION) {
+    report.resumeBlockReasons.push('保存計画のバージョンを確認できません。');
+    report.discardBlockReasons.push('保存計画のバージョンを確認できません。');
+    return report;
+  }
+
   // 1. DATA chunkの読み取り確認（read-only）
   const chunks = [];
   let chunksMissing = false;
@@ -248,10 +255,14 @@ function diagnosePendingCommitPlans_() {
     if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
     try {
       const meta = JSON.parse(all[key]);
+      if (!meta || commitMetaKey_(meta.draftId) !== key) throw new Error('META identity mismatch');
+      validateDraftId_(meta.draftId);
       if (meta && meta.draftId && meta.state !== 'complete') {
         pendingDrafts.push(meta);
       }
-    } catch (ignored) {}
+    } catch (error) {
+      throw new Error('保存計画METAが破損しています。入力内容を保持したまま管理者へ連絡してください。');
+    }
   });
 
   if (!pendingDrafts.length) {

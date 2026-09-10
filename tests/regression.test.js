@@ -341,7 +341,9 @@ function run() {
     const appStart=current.indexOf('const APP_HTML =');
     assert(appStart>=0,'T15 APP_HTML marker missing');
     const currentApp=current.slice(appStart);
-    const expectedHash='7a6530cce21a6963f0f0cb2cb376f139035b76b19202af9a0cd92119c43e2e88';
+    // Audit fixes: local-only navigationHistory and data-only diagnostic action IDs.
+    // Behavior is covered separately by audit-safety and B-baseline web compatibility.
+    const expectedHash='99ccdbe6354f11a6028cd21afd367bf01c53e695971abc180a4cf3de6eb247d4';
     const actualHash=crypto.createHash('sha256').update(currentApp,'utf8').digest('hex');
     assert(actualHash===expectedHash,'T15 APP_HTML changed without updating the approved snapshot hash: ' + actualHash);
     const tampered=currentApp.replace('ドローン運航記録','ドローン運航記録_意図しない変更');
@@ -653,7 +655,12 @@ function run() {
   {
     const e=makeEnvironment(); const oldInput=makeInput([{model:'EVO Lite',minutes:2}]); e.context.finishAircraft(oldInput);
     const key=`EVO_LITE_COMMIT_V2_${oldInput.session.draftId}_META`; const meta=JSON.parse(e.props.get(key)); meta.completedAt=new Date(Date.now()-31*86400000).toISOString(); e.props.set(key,JSON.stringify(meta));
-    e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:3}])); assert(!e.props.has(key),'expired complete proof remains'); reports.push('EXTRA complete proof retention cleanup OK');
+    e.context.finishAircraft(makeInput([{model:'EVO Lite',minutes:3}]));
+    assert(e.props.has(key),'long-term complete proof must remain');
+    assert(JSON.parse(e.props.get(key)).signature===meta.signature,'long-term signature lost');
+    const before=snapshotBusiness(e); e.context.finishAircraft(oldInput);
+    assert(snapshotBusiness(e)===before,'expired complete replay changed business cells');
+    reports.push('EXTRA permanent complete proof compaction and replay OK');
   }
 
   {

@@ -52,7 +52,7 @@ function storeCommitPlan_(plan, signature) {
     return total + utf8Length_(commitDataKey_(plan.draftId, index)) + utf8Length_(chunk);
   }, 0) + utf8Length_(commitMetaKey_(plan.draftId)) + 2000;
   if (propertyStorageBytes_() + additionalBytes > SECURITY_MAX_PROPERTY_STORE_BYTES) {
-    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+    throw new Error('保存用領域の空き容量が不足しています。入力内容を保持し、保存領域の保守を依頼してください。重複防止のため過去の完了証明は削除しないでください。');
   }
   chunks.forEach(function(chunk, index) { properties.setProperty(commitDataKey_(plan.draftId, index), chunk); });
   const reread = chunks.map(function(_chunk, index) {

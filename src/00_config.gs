@@ -15,7 +15,7 @@ const COMMIT_PLAN_PREFIX = 'EVO_LITE_COMMIT_PLAN_';
 const COMMIT_V2_PREFIX = 'EVO_LITE_COMMIT_V2_';
 const COMMIT_PLAN_VERSION = 2;
 const COMMIT_CHUNK_MAX_BYTES = 7000;
-const COMMIT_COMPLETE_RETENTION_DAYS = 30;
+const COMMIT_COMPLETE_RETENTION_DAYS = 30; // 詳細METAの保持期間。完了証明自体は無期限保持。
 // 未完了保存計画は日数で自動削除せず、整合性と状態（Web画面での復旧/破棄）で管理する。
 const COMMIT_STALE_DAYS = 0; // 0=未完了の日数自動削除・自動failed化は行わない
 const SECURITY_MAX_FLIGHTS = 30;

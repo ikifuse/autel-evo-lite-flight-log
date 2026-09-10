@@ -89,10 +89,14 @@ function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, prope
     if (key.indexOf(COMMIT_V2_PREFIX) !== 0 || !/_META$/.test(key)) return;
     try {
       const meta = JSON.parse(all[key]);
+      if (!meta || commitMetaKey_(meta.draftId) !== key) throw new Error('META identity mismatch');
+      validateDraftId_(meta.draftId);
       if (meta && meta.draftId && meta.draftId !== currentDraftId && meta.state !== 'complete') {
         pendingMetas.push(meta);
       }
-    } catch (ignored) {}
+    } catch (error) {
+      throw new Error('保存計画METAが破損しています。入力内容を保持したまま管理者へ連絡してください。');
+    }
   });
 
   if (!pendingMetas.length) return [];
@@ -141,6 +145,7 @@ function resolvePendingCommitPlansBeforeSave_(currentDraftId, spreadsheet, prope
 
 function recoverPendingCommitPlan_(draftId) {
   if (!draftId) throw new Error('復旧対象のdraftIdが指定されていません。');
+  validateDraftId_(draftId);
   return locked_(function() {
     cleanupCommitPlans_();
     const meta = readCommitMeta_(draftId);
@@ -167,6 +172,7 @@ function recoverPendingCommitPlan_(draftId) {
 
 function discardPendingTestCommitPlan_(draftId) {
   if (!draftId) throw new Error('破棄対象のdraftIdが指定されていません。');
+  validateDraftId_(draftId);
   return locked_(function() {
     const meta = readCommitMeta_(draftId);
     if (!meta) throw new Error('指定された保存計画が見つかりません。すでに解除されている可能性があります。');

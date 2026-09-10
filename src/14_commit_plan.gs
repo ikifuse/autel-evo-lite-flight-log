@@ -16,7 +16,7 @@ function ensureCommitPlanCapacity_(input) {
   const estimated = estimatedCommitPlanBytes_(input);
   if (estimated > SECURITY_MAX_COMMIT_PLAN_BYTES) throw new Error('保存計画の容量が上限を超えています。');
   if (propertyStorageBytes_() + estimated > SECURITY_MAX_PROPERTY_STORE_BYTES) {
-    throw new Error('保存用領域の空き容量が不足しています。古い保存計画を整理してから再試行してください。');
+    throw new Error('保存用領域の空き容量が不足しています。入力内容を保持し、保存領域の保守を依頼してください。重複防止のため過去の完了証明は削除しないでください。');
   }
 }
 

@@ -141,7 +141,7 @@ DATEブロックとBAT行のownershipは、Script Propertiesへ永続化した�
 | `16_commit_compare.gs` | before/intended/conflictの同値規則 | codec。純粋処理 |
 | `17_commit_recovery.gs` | 段階実行、進捗、先行pending解決、復旧/TEST破棄の実行 | store、retention、diagnostics、integrity、runtime、app state |
 | `18_commit_identity.gs` | 再送signature、complete判定、active reservation | codec、runtime、store |
-| `19_commit_retention.gs` | complete保持期限と整理判断 | store、runtime |
+| `19_commit_retention.gs` | complete証明の永久保持・詳細縮小と整理判断 | store、runtime |
 | `20_sheet_core.gs` | 帳票構造・見出し・空きブロック・日付シート作成 | config、runtime、Spreadsheet |
 | `21_sheet_records.gs` | ヘッダー・飛行・点検・場所の帳票写像 | sheet core、capture、time、runtime |
 | `22_battery_history.gs` | BAT空き行選択と固定行への写像 | sheet core、capture、time |
@@ -195,7 +195,7 @@ Webは `43_web_bootstrap.js` が依存を注入し、イベント登録→下書
 | `recoverPendingCommitPlan` | `12` → `17_commit_recovery.gs` | 同じplanを安全条件下でroll-forward |
 | `discardPendingTestCommitPlan` | `12` → `17` → `15_commit_store.gs` | 安全条件を満たすTEST計画のPropertiesだけを削除 |
 
-構造整理の基準は`b8e1ab6723784216b119c27d6bf9c2c540e5adb5`。Propertiesキー、plan version、canonical JSON、operation順・stage順、draftId/signature/planHash、DATA→照合→META、complete→DATA削除の順、ScriptLock、flush/readback、30日complete保持、未完了の日数非削除を維持する。変更は[互換試験](test-spec.md)で基準と比較する。ファイル分割による高速化は主張せず、APIバッチ化・flush削減・lock短縮は別の変更として検討する。
+構造整理の基準は`b8e1ab6723784216b119c27d6bf9c2c540e5adb5`。Propertiesキー、plan version、canonical JSON、operation順・stage順、draftId/signature/planHash、DATA→照合→META、complete→DATA削除の順、ScriptLock、flush/readback、未完了の日数非削除を維持する。2026-09-10の長期再送対策で、complete証明の30日削除だけは無期限保持・詳細縮小へ意図的に変更した。通常の保存・旧pending互換は[互換試験](test-spec.md)、長期再送は専用試験で検証する。ファイル分割による高速化は主張せず、APIバッチ化・flush削減・lock短縮は別の変更として検討する。
 
 complete後は利用者の手動修正を尊重する。将来の出力形式・DIPS補助は現在の帳票から業務データを読む別責務として追加する構想であり、未実装である。削除済みDATAや過去planを最新の業務記録として扱わない。新しい保存backendは再試行・整合性の契約設計から行う。
 
