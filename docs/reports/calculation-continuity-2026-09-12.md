@@ -1,5 +1,10 @@
 # 手修正後の計算継続：調査・実装・導入状況
 
+<!-- document-kind: historical-report -->
+> この文書は作成・追記日時点の作業・監査記録であり、現在仕様の正本ではありません。
+> `未実装`、`未commit`、`未deploy` 等は記録当時の状態です。現在仕様は [docs/index.md](../index.md) から正式文書を参照してください。
+> この報告に関係する現在の正式仕様：[spreadsheet-spec.md](../spreadsheet-spec.md)、[rebuild-guide.md](../rebuild-guide.md)、[test-spec.md](../test-spec.md)。
+
 ## 状態
 
 ローカル実装・ローカル検証完了。本番への導入は未実施。従前のREADME・サンプル修正とは別作業であり、ここで「実装」と記載するものを本番稼働済みとは扱わない。

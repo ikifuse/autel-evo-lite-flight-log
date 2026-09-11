@@ -130,4 +130,28 @@ UI、下書き（LocalStorage）、入力検証、署名、固定保存計画、
 
 ## ホーム画面アイコンの更新
 
-画像の正本は`src/web/assets/icon.png`（512×512 RGB PNG）。`icon.svg`は編集用図案。buildはroot `icon.png`へ同一画像をコピーし、画像hashをGASのアイコンURLへ反映する。`--check`は画像コピーも確認する。root画像だけを直接変更しない。GASへdistだけを反映してもGitHub公開画像は更新されないため、別途承認された公開時に既存mainの画像とGASの更新を揃える。[実装報告と端末確認](home-screen-icon-review.md)を参照。
+画像の正本は`src/web/assets/icon.png`（512×512 RGB PNG）。`icon.svg`は編集用図案。buildはroot `icon.png`へ同一画像をコピーし、画像hashをGASのアイコンURLへ反映する。`--check`は画像コピーも確認する。root画像だけを直接変更しない。GASへdistだけを反映してもGitHub公開画像は更新されないため、別途承認された公開時に既存mainの画像とGASの更新を揃える。検証は [テスト仕様](test-spec.md#ホーム画面アイコン検証) に従う。
+
+現行doGetはfaviconにqueryなしの `APP_ICON_URL`（末尾 `.png`）を使用し、HTML内touch iconには画像revision付きURLを使用する。HtmlServiceのtitle、viewport、mobile-web-app-capable、apple-mobile-web-app-capableを設定する。GAS内側HTMLにはmanifest・Service Workerによるoffline shellを提供しない。PNGが取得可能なことと、Safariが外側ページのホーム画面アイコンへ採用することは別である。
+
+アイコン変更後はまず既存ホーム画面アイコンから本体を開き、画像だけ古い場合に再追加を検討する。下書きがある状態でブラウザデータを消去しない。GitHubのmain画像は可変であり、非公開化・削除・障害の影響を受ける。画像の公開確認とGASコード反映・実機確認を区別する。
+
+## 計算継続の導入と確認
+
+仕様と対象セルは [Spreadsheet仕様8](spreadsheet-spec.md#8-手修正後の計算継続導入型)、試験は [テスト仕様](test-spec.md#手修正後の計算継続の検証) を参照する。
+
+既存GASプロジェクトへ検証済みの `dist/Code.gs` を反映し、所有者がGASエディタから `installCalculationContinuity_` を一度実行する。必要なGoogle認証は所有者が行う。インストール型編集トリガーを同じプロジェクトに追加するため、新しいWebアプリURLは不要。既存Webアプリのデプロイ更新をこの機能のためだけに要求しない。
+
+本番へ適用する前に、入力値・対応シート・独自修正の有無を再読取りする。既存の台帳参照式がすでに数値に変更されている場合は、どちらを採用するか自動推定せず停止する。
+
+導入前後で現在表示が維持されることを確認し、許可された検証環境で手修正→新規履歴追加→差分加算、台帳からBATへの反映、TEST除外を確認する。Googleの数式再計算・編集権限・実トリガーはローカルmockだけでは確認できない。コード反映・認証・導入・実検証を別々に記録し、未確認を完了扱いしない。
+
+2026-09-12確認時点ではローカル実装・検証・commit/pushまで完了、本番GAS反映・管理シート作成・トリガー導入は未実施。導入実施時にこの状態を更新する。
+
+## 保存証明と旧pendingの移行条件
+
+完了証明は無期限保持し、30日後は同じMETAキーを `version / draftId / signature / state / stage / chunkCount / completedAt` に縮小する。pendingのplan/hash/operationは維持する。400KiBの保護上限で新規保存を停止し、完了証明を追い出さない。件数が増えれば全履歴照会を維持する容量移行が必要で、永久に容量不足にならない保証ではない。
+
+旧TTLコードで消失済みの証明や手動消去済み証明は復元できない。移行時は保持状況と旧cleanupの影響を確認し、欠落があれば証拠のあるバックアップや旧入力受付の別設計を検討する。帳票の現在値からcompleteを推測せず、旧TTL削除版へ戻さない。
+
+旧pendingに必要な出力operationが元からない場合も、新しいplanへ作り直さない。該当が確認された場合に限り、元plan完了後の手動訂正か、復旧を止めた業務確認かを決める。報告の「未確認」を実データに欠落がある証拠として扱わない。

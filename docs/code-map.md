@@ -261,5 +261,5 @@
 - 担当: `src/26_sheet_calculation_continuity.gs`
 - 入口: 所有者が `installCalculationContinuity_` を実行し、`continueCalculationsAfterEdit_` の編集トリガーを導入する。Web保存入口からは呼ばない。
 - 対象: BAT集計とバッテリー台帳の68式。機体正式累計・過去飛行行は対象外。
-- 仕様・導入状態・制約: [計算継続](calculation-continuity-2026-09-12.md)。未導入時に本番で動作すると解釈しない。
+- 仕様・制約: [Spreadsheet仕様8](spreadsheet-spec.md#8-手修正後の計算継続導入型)。導入手順・状態: [再構築ガイド](rebuild-guide.md#計算継続の導入と確認)。未導入時に本番で動作すると解釈しない。
 - 試験: `tests/calculation-continuity.test.js`、既存保存回帰・互換試験。

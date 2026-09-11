@@ -1,5 +1,10 @@
 # 長期再送対策・実帳票照合（2026-09-10 続報）
 
+<!-- document-kind: historical-report -->
+> この文書は作成・追記日時点の作業・監査記録であり、現在仕様の正本ではありません。
+> `未実装`、`未commit`、`未deploy` 等は記録当時の状態です。現在仕様は [docs/index.md](../index.md) から正式文書を参照してください。
+> この報告に関係する現在の正式仕様：[invariants.md](../invariants.md)、[rebuild-guide.md](../rebuild-guide.md)。
+
 前回の局所修正を維持して、長期再送の二重保存と帳票欠損を調査した。今回のローカル実装は、完了証明の永久保持・詳細縮小と、実原本の安全事項見出しへの対応。全般的な帳票欠損時の拒否仕様は下記の具体案として分離し、未実装。commit / push / deploy、実Spreadsheet・実Propertiesの変更は行っていない。
 
 ## 1. 30日超過再送をどう解決したか

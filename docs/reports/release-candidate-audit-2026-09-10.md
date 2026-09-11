@@ -1,5 +1,10 @@
 # Release Candidate総合監査（2026-09-10）
 
+<!-- document-kind: historical-report -->
+> この文書は作成・追記日時点の作業・監査記録であり、現在仕様の正本ではありません。
+> `未実装`、`未commit`、`未deploy` 等は記録当時の状態です。現在仕様は [docs/index.md](../index.md) から正式文書を参照してください。
+> この報告に関係する現在の正式仕様：[spreadsheet-spec.md](../spreadsheet-spec.md)、[architecture.md](../architecture.md)、[test-spec.md](../test-spec.md)。
+
 ## 1. 判定と対象
 
 **C. NOT READY（無条件の次期本番リリース承認は保留）**。
@@ -108,7 +113,7 @@ RC生成物 `dist/Code.gs` SHA-256：
 - `src/web/32_web_core.js`、`33_web_engine.js`、`37_web_storage.js`、`41_web_workflow.js`、`43_web_bootstrap.js`
 - `dist/Code.gs`（build生成）
 - `tests/regression.test.js`、`tests/web-compat.test.js`、新規`tests/release-candidate.test.js`
-- `docs/index.md`、`docs/invariants.md`、`docs/test-spec.md`、`docs/long-term-replay-review.md`、本報告
+- `docs/index.md`、`docs/invariants.md`、`docs/test-spec.md`、`docs/reports/long-term-replay-review.md`、本報告
 
 一時ログは `/private/tmp/evo-rc-verified-*.log` ほか `/private/tmp/evo-rc-*`。PWA段階へ渡す前の生成物コピーとチェックポイントも同ディレクトリ側へ保持する。
 

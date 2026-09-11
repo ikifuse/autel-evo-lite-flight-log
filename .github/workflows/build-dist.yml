@@ -5,6 +5,9 @@ on:
     branches:
       - main
     paths:
+      - '**.[mM][dD]'
+      - 'scripts/check-docs.mjs'
+      - 'tests/docs-structure.test.mjs'
       - 'src/**'
       - 'dist/Code.gs'
       - 'scripts/build.mjs'
@@ -17,6 +20,9 @@ on:
       - '.github/workflows/build-dist.yml'
   pull_request:
     paths:
+      - '**.[mM][dD]'
+      - 'scripts/check-docs.mjs'
+      - 'tests/docs-structure.test.mjs'
       - 'src/**'
       - 'dist/Code.gs'
       - 'scripts/build.mjs'
@@ -45,6 +51,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Verify documentation structure and links
+        run: |
+          node tests/docs-structure.test.mjs
+          node scripts/check-docs.mjs
 
       - name: Verify pull request already contains current dist
         if: github.event_name == 'pull_request'

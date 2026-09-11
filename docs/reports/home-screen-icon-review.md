@@ -1,5 +1,10 @@
 # ホーム画面アイコン・GAS配信の実装結果
 
+<!-- document-kind: historical-report -->
+> この文書は作成・追記日時点の作業・監査記録であり、現在仕様の正本ではありません。
+> `未実装`、`未commit`、`未deploy` 等は記録当時の状態です。現在仕様は [docs/index.md](../index.md) から正式文書を参照してください。
+> この報告に関係する現在の正式仕様：[rebuild-guide.md](../rebuild-guide.md)、[test-spec.md](../test-spec.md)。
+
 RC監査を完了し、[RC最終報告](release-candidate-audit-2026-09-10.md)を提示した後に開始した第2課題。RC完了時の生成物SHAは`f12dbc8afff9e4e386e18501671cd9551e759d31007c4354ff71333b69ae03a7`。保存系の問題をこの作業へ混ぜていない。
 
 ## 1. 最終判定
