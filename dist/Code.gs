@@ -923,7 +923,13 @@ function getOrCreateDateSheet_(spreadsheet, date, forceNew, startSequence, appTe
     if (!sheet) {
       const template = spreadsheet.getSheetByName(TEMPLATE_NAME);
       if (!template) throw new Error('日常点検シートが見つかりません。');
-      sheet = template.copyTo(spreadsheet).setName(name);
+      sheet = template.copyTo(spreadsheet);
+      // コピーだけを整形する。既存日付シート・原本・保存済みplanには触れない。
+      flightBlocks_(sheet).forEach(function(block) {
+        const col = flightColumn_(sheet, block, ['総飛行時間', '総飛行時間（累計時間）', '総飛行時間（HH:MM）']);
+        if (col) sheet.getRange(block.headerRow, col).setValue('総飛行時間（HH:MM）');
+      });
+      sheet.setName(name);
       return sheet;
     }
     if (appTest && !dateSheetStructureUsable_(sheet)) {
@@ -1141,7 +1147,7 @@ function writeFlightFields_(sheet, slot, fields) {
   const aliases = {
     '使用バッテリー':['使用バッテリー'], '離陸場所':['離陸場所'], '着陸場所':['着陸場所'],
     '離陸時刻':['離陸時刻'], '着陸時刻':['着陸時刻'], '飛行時間':['飛行時間'],
-    '総飛行時間':['総飛行時間','総飛行時間（累計時間）'],
+    '総飛行時間':['総飛行時間','総飛行時間（累計時間）','総飛行時間（HH:MM）'],
     '安全に影響した事項':['安全に影響した事項','飛行の安全に影響した事項','飛行の安全に影響のあった事項'],
     'バッテリー異常・所感':['バッテリー異常・所感']
   };

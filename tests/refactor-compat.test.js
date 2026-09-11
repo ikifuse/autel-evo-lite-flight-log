@@ -134,10 +134,23 @@ function persistedPlan(environment, draftId) {
   return { meta, chunks, text: chunks.join('') };
 }
 
+// Intentional 2026-09-11 change: only copied flight headers gain the unit label.
+// Keep plan JSON/hash/chunks and every other cell/format/event comparison exact.
+function normalizeGeneratedHeaders(snapshot) {
+  const sheets = JSON.parse(snapshot);
+  for (const sheet of sheets) if (/^(?:TEST_)?\d{4}\.\d{1,2}\.\d{1,2}(?:_\d+)?$/.test(sheet.name)) {
+    for (const col of [8, 23]) if (sheet.data[31][col] === '総飛行時間（HH:MM）') sheet.data[31][col] = '総飛行時間';
+  }
+  return json(sheets);
+}
+function isGeneratedHeaderWrite(event) {
+  return event[0] === 'sheet.setValue' && /^Copy /.test(event[1]) && event[2] === 32 && [9,24].includes(event[3]) &&
+    event[4] === 1 && event[5] === 1 && event[6] === '総飛行時間（HH:MM）';
+}
 function compareEnvironments(left, right, label) {
-  assert.equal(current.snapshotBusiness(right), baseline.snapshotBusiness(left), `${label}: business values/formats/formulas`);
+  assert.equal(normalizeGeneratedHeaders(current.snapshotBusiness(right)), normalizeGeneratedHeaders(baseline.snapshotBusiness(left)), `${label}: business values/formats/formulas`);
   assert.equal(current.snapshotProperties(right), baseline.snapshotProperties(left), `${label}: persisted Properties`);
-  assert.equal(json(right.events), json(left.events), `${label}: ordered cell writes / Properties / flush / Lock trace`);
+  assert.equal(json(right.events.filter(event => !isGeneratedHeaderWrite(event))), json(left.events), `${label}: ordered cell writes / Properties / flush / Lock trace`);
 }
 
 function checkRpcBoundary(source, label) {
