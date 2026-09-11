@@ -255,3 +255,11 @@
 | 新しい保存形式 | `15_commit_store.gs` / `01_commit_codec.gs` / `17_commit_recovery.gs` / `24_sheet_integrity.gs` | 未実装。key/version/旧pending移行・原子性・再送契約を先に設計する |
 | TEST運用拡張 | `05_operation_policy.gs` / `14_commit_plan.gs` / `23_aircraft_totals.gs` / `25_commit_diagnostics.gs` | 正式累計非更新、BAT履歴、TEST破棄条件を維持 |
 | 複数端末 | `18_commit_identity.gs` / `17_commit_recovery.gs` / `02_gas_runtime.gs` / Web `37` | 現行の単一pending保護。端末間下書き同期は未実装、Lock短縮・予約変更は別設計 |
+
+## 手修正後の計算継続（導入型）
+
+- 担当: `src/26_sheet_calculation_continuity.gs`
+- 入口: 所有者が `installCalculationContinuity_` を実行し、`continueCalculationsAfterEdit_` の編集トリガーを導入する。Web保存入口からは呼ばない。
+- 対象: BAT集計とバッテリー台帳の68式。機体正式累計・過去飛行行は対象外。
+- 仕様・導入状態・制約: [計算継続](calculation-continuity-2026-09-12.md)。未導入時に本番で動作すると解釈しない。
+- 試験: `tests/calculation-continuity.test.js`、既存保存回帰・互換試験。

@@ -18,6 +18,7 @@
   "src/07_app_state.gs",
   "src/24_sheet_integrity.gs",
   "src/25_commit_diagnostics.gs",
+  "src/26_sheet_calculation_continuity.gs",
   "src/14_commit_plan.gs",
   "src/17_commit_recovery.gs",
   "src/12_commit_engine.gs",

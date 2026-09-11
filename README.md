@@ -129,12 +129,12 @@
 </tr>
 </table>
 
-左のNo.1枠は **EVO Lite：12:35 → 12:45 → 12:55**、右のNo.2枠は **EVO Lite+：04:10 → 04:20 → 04:30**。どちらも今回の飛行は10分を2回、計20分ですが、「総飛行時間（HH:MM）」は過去からの累計です。
+左のNo.1枠は **EVO Lite：00:00 → 00:10 → 00:20**、右のNo.2枠は **EVO Lite+：00:00 → 00:10 → 00:20**。どちらも今回の飛行は10分を2回、計20分ですが、このサンプルの見出しは「総飛行時間（00:00）」です。時間：分で表し、両機体とも管理開始からの累計を示しています。
 
 | 機体 | 開始累計（原本） | 1飛行目・10分後 | 2飛行目・10分後 | 保存後の原本 |
 |---|---|---|---|---|
-| EVO Lite | 12:35 | 12:45 | 12:55 | 12:55 |
-| EVO Lite+ | 04:10 | 04:20 | 04:30 | 04:30 |
+| EVO Lite | 00:00 | 00:10 | 00:20 | 00:20 |
+| EVO Lite+ | 00:00 | 00:10 | 00:20 | 00:20 |
 
 点検整備記録の現在累計を引き継ぎ、各飛行の実飛行時間を順次加算して日付シートへ記録し、最終保存で原本の累計も更新します。正式な開始値は、新しい保存計画を作る時点で原本から読み取ります。再試行では既存の保存計画を使います。
 
@@ -145,12 +145,12 @@
 <table>
 <tr><th>EVO Lite</th><th>EVO Lite+</th></tr>
 <tr>
-<td><a href="./docs/pdf/inspection-lite.pdf"><img src="./docs/images/sheet-inspection-lite.png" width="400" alt="EVO Lite点検整備記録：総飛行時間12:55の例"></a><br><a href="./docs/pdf/inspection-lite.pdf">PDFを開いて拡大：EVO Lite</a></td>
-<td><a href="./docs/pdf/inspection-lite-plus.pdf"><img src="./docs/images/sheet-inspection-lite-plus.png" width="400" alt="EVO Lite+点検整備記録：総飛行時間04:30の例"></a><br><a href="./docs/pdf/inspection-lite-plus.pdf">PDFを開いて拡大：EVO Lite+</a></td>
+<td><a href="./docs/pdf/inspection-lite.pdf"><img src="./docs/images/sheet-inspection-lite.png" width="400" alt="EVO Lite点検整備記録：総飛行時間00:20の例"></a><br><a href="./docs/pdf/inspection-lite.pdf">PDFを開いて拡大：EVO Lite</a></td>
+<td><a href="./docs/pdf/inspection-lite-plus.pdf"><img src="./docs/images/sheet-inspection-lite-plus.png" width="400" alt="EVO Lite+点検整備記録：総飛行時間00:20の例"></a><br><a href="./docs/pdf/inspection-lite-plus.pdf">PDFを開いて拡大：EVO Lite+</a></td>
 </tr>
 </table>
 
-機種ごとの「点検時の総飛行時間」は **EVO Liteが12:55、EVO Lite+が04:30**。上の日付シートの各機体の最終行と一致します。この点検整備記録は日常点検とは別の帳票です。定期点検・整備の結果欄は運航保存で自動的に埋まるものではないため、未記入のまま掲載しています。
+機種ごとの「点検時の総飛行時間」は **EVO Liteが00:20、EVO Lite+が00:20**。上の日付シートの各機体の最終行と一致します。この点検整備記録は日常点検とは別の帳票です。定期点検・整備の結果欄は運航保存で自動的に埋まるものではないため、未記入のまま掲載しています。
 
 ### バッテリー台帳
 
