@@ -2,20 +2,27 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkDocs, formalDocs, rootDesign, reportNotice, links } from '../scripts/check-docs.mjs';
+import { checkDocs, formalDocs, designChapters, rootDesign, reportNotice, links } from '../scripts/check-docs.mjs';
+
+const chapterPaths = designChapters.map(f => 'docs/design/' + f);
+let fixtureCount = 0;
 
 function fixture(change, expected) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-doc-check-'));
   const write = (file, text) => { fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); fs.writeFileSync(path.join(root, file), text); };
   try {
     for (const name of formalDocs) write('docs/' + name, '# formal\n');
-    write(rootDesign, '# design');
+    for (const file of chapterPaths) write(file, '# design chapter\n[目次](../../' + rootDesign + ')\n');
+    write(rootDesign, '# design\n' + chapterPaths.map(f => `[chapter](${f})`).join('\n'));
     write('docs/reports/history.md', `# history\n${reportNotice}\n> 現在仕様の正本ではありません。記録当時の状態。\n> [入口](../index.md) [仕様](../invariants.md)\n`);
-    write('docs/index.md', [rootDesign, ...formalDocs.filter(f => f !== 'index.md').map(f => 'docs/' + f), 'docs/reports/history.md'].map(f => `[doc](${path.relative('docs', f)})`).join('\n'));
+    write('docs/index.md', [rootDesign, ...formalDocs.filter(f => f !== 'index.md').map(f => 'docs/' + f), ...chapterPaths, 'docs/reports/history.md'].map(f => `[doc](${path.relative('docs', f)})`).join('\n'));
     change(write, root);
     const errors = checkDocs(root);
-    if (expected) assert.ok(errors.some(e => e.includes(expected)), JSON.stringify(errors));
+    if (expected) {
+      for (const message of [expected].flat()) assert.ok(errors.some(e => e.includes(message)), JSON.stringify(errors));
+    }
     else assert.deepEqual(errors, []);
+    fixtureCount++;
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 fixture(() => {});
@@ -32,5 +39,26 @@ fixture(w => { w('docs/with space.md.txt', 'asset'); w('README.md', '[asset](doc
 fixture(w => w('README.md', '<img src="docs/missing.png">'), 'リンク切れ');
 fixture(w => w('README.md', '[sample][ref]\n[ref]: docs/missing.pdf'), 'リンク切れ');
 fixture(w => w('README.md', '[bad](../outside.md)'), 'repository外');
+
+// Chapters require both explicit permission and a root table-of-contents link.
+fixture(w => w('docs/design/extra.md', '# extra'), ['設計章許可一覧外', '設計章目次未登録 docs/design/extra.md']);
+fixture(w => w('docs/design/EXTRA.MD', '# extra'), '設計章許可一覧外');
+fixture(w => w('docs/design/nested/extra.md', '# extra'), '設計章許可一覧外');
+fixture(w => w('docs/design/nested/EXTRA.MD', '# extra'), '設計章許可一覧外');
+fixture((w, root) => {
+  w('docs/design/extra.md', '# extra');
+  w(rootDesign, fs.readFileSync(path.join(root, rootDesign), 'utf8') + '\n[extra](docs/design/extra.md)');
+  w('docs/index.md', fs.readFileSync(path.join(root, 'docs/index.md'), 'utf8') + '\n[extra](design/extra.md)');
+}, '設計章許可一覧外');
+fixture((w, root) => w(rootDesign, fs.readFileSync(path.join(root, rootDesign), 'utf8').replace(`[chapter](${chapterPaths[0]})`, '')), '設計章目次未登録 ' + chapterPaths[0]);
+fixture((w, root) => fs.unlinkSync(path.join(root, chapterPaths[0])), chapterPaths[0] + ': 正式文書がありません');
+fixture((w, root) => w('docs/index.md', fs.readFileSync(path.join(root, 'docs/index.md'), 'utf8').replace(`[doc](design/${designChapters[0]})`, '')), '索引未登録 ' + chapterPaths[0]);
+fixture(w => w(chapterPaths[0], '[broken chapter](missing.md)'), chapterPaths[0] + ': リンク切れ');
+fixture(w => w(chapterPaths[0], '[broken detail](../missing.md)'), chapterPaths[0] + ': リンク切れ');
+
+// Formal chapters and historical reports keep separate roles.
+fixture(w => w(chapterPaths[0], `# chapter\n${reportNotice}\n`), '設計章に履歴注意書き');
+fixture(w => w(chapterPaths[0], '# chapter\n```markdown\n' + reportNotice + '\n```\n'));
+fixture(w => w('docs/reports/history.md', `# history\n${reportNotice}\n> 現在仕様の正本ではありません。記録当時の状態。\n> [入口](../index.md) [設計章](../design/${designChapters[0]})\n`));
 assert.deepEqual(links('[a](x(y).md) [b](<with space.md>)'), ['x(y).md', 'with space.md']);
-console.log('PASS: 文書チェック自己試験（14 fixtures + link syntax）');
+console.log(`PASS: 文書チェック自己試験（${fixtureCount} fixtures + link syntax）`);

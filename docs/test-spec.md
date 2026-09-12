@@ -218,6 +218,6 @@ Web互換試験では今回意図したイベント追加、保持案内文、�
 
 ## 文書構造の検証
 
-`node scripts/check-docs.mjs` は、docs直下の正式Markdown8件を明示した許可一覧、正式文書の存在、indexから正式文書・全reportsへの登録、reports冒頭の履歴注意書きと担当正式文書へのリンクを検査する。rootとdocs配下のMarkdown内のローカルファイル参照（通常リンク・画像・参照定義・HTML href/src）も確認する。コード例は除外する。外部URLの到達性、見出しアンカー、Markdownの全構文、文書の意味や仕様転記漏れは検査範囲外で、レビューで補完する。
+`node scripts/check-docs.mjs` は、docs直下の正式Markdown8件を明示した許可一覧、`docs/design/` の8章の許可一覧、正式文書の存在、01目次から全設計章への登録、indexから正式文書（設計章を含む）・全reportsへの登録、reports冒頭の履歴注意書きと担当正式文書へのリンクを検査する。rootとdocs配下のMarkdown内のローカルファイル参照（通常リンク・画像・参照定義・HTML href/src）も確認する。設計章の未許可Markdownは下位ディレクトリ・大文字拡張子も検出し、章への履歴マーカー混入を拒否する。コード例は除外する。外部URLの到達性、見出しアンカー、Markdownの全構文、文書の意味や仕様転記漏れは検査範囲外で、レビューで補完する。
 
-`node tests/docs-structure.test.mjs` は一時ディレクトリだけで正常配置・未許可Markdown・正式文書欠落・索引未登録・注意書き欠落・リンク切れ・空白/括弧付きURL・画像/参照リンク等を検証する。両コマンドを既存 `build-dist.yml` に接続し、Markdownまたは検査コード変更でもCIが起動する。新しい報告書をdocs直下へ追加すると検査は終了コード1で失敗する。許可一覧を広げて報告混入を回避しない。
+`node tests/docs-structure.test.mjs` は一時ディレクトリだけで正常配置・未許可Markdown・正式文書欠落・設計章目次未登録・索引未登録・design/reportsの区別・注意書き欠落・リンク切れ・空白/括弧付きURL・画像/参照リンク等を検証する。両コマンドを既存 `build-dist.yml` に接続し、Markdownまたは検査コード変更でもCIが起動する。新しい報告書をdocs直下へ追加すると検査は終了コード1で失敗する。章の新設は01目次・index・designChapters許可一覧を同時更新する。許可一覧を広げて報告混入を回避しない。

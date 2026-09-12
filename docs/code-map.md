@@ -6,7 +6,7 @@
 
 変更目的に応じて、以下の仕様書・ガイドを併せて参照すること。
 
-- **アプリの全体設計・画面遷移・一括保存アーキテクチャ**: [01_ドローン運航記録_設計書.md](../01_ドローン運航記録_設計書.md)
+- **設計理由・画面遷移・保存方針**: [01設計書目次](../01_ドローン運航記録_設計書.md)から担当章だけ読む。詳細な依存関係・保存契約は [architecture](architecture.md)
 - **Spreadsheet帳票構造・セル配置・原本・場所表示書式**: [docs/spreadsheet-spec.md](spreadsheet-spec.md)
 - **回帰テスト・障害注入・セキュリティー試験・検証仕様**: [docs/test-spec.md](test-spec.md)
 - **ゼロからの環境再構築・GASデプロイ・変更時チェックリスト**: [docs/rebuild-guide.md](rebuild-guide.md)

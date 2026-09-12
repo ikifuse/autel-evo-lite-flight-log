@@ -213,6 +213,12 @@ complete後は利用者の手動修正を尊重する。将来の出力形式・
 
 ### 6.1 進行中下書きと日付
 
+| LocalStorageキー | 保持する内容 |
+|---|---|
+| `EVO_LITE_ACTIVE_OPERATION_V2` | 運航中のSTATE/session下書き |
+| `EVO_LITE_LAST_OPERATION` | 前回条件引用用データ |
+| `EVO_LITE_ASSISTANT_HISTORY_V1` | 補助者氏名履歴 |
+
 PRE / READY / BATTERY_CHANGE / LANDING / POST_ALLの入力はinput・change・pagehideで同期退避し、setItem後のgetItem一致を確認する。圏外の確定でも最新入力をcaptureし、保存を確認できた場合だけ保持済みと案内する。読込失敗・JSON破損は警告し、元データを削除しない。保存キー・session形式は維持する。
 
 開始前フォームはsessionがなく退避対象外。GPSのプログラム代入は次の操作/pagehideまで未保存の場合がある。OSによるイベント省略、ブラウザデータ削除、大量履歴の同期保存負荷は自動退避だけでは解決しない。新規運航日は開始時の端末時計によるJST日付を採用し、開始済み下書きの日付を変更しない。端末時計の補正や旧下書きの日付推測はしない。開始前の「本日」表示は起動時のままの場合がある。
@@ -225,7 +231,7 @@ PRE / READY / BATTERY_CHANGE / LANDING / POST_ALLの入力はinput・change・pa
 
 ## 7. 関連仕様書へのリンク
 
-* 詳細な全体仕様・各画面仕様: [01_ドローン運航記録_設計書.md](../01_ドローン運航記録_設計書.md)
+* 設計理由・各画面仕様: [01設計書目次（担当章だけ読む）](../01_ドローン運航記録_設計書.md)
 * 壊してはならない設計ルール: [docs/invariants.md](invariants.md)
 * 各ファイルの担当関数と索引: [docs/code-map.md](code-map.md)
 * スプレッドシート帳票構造: [docs/spreadsheet-spec.md](spreadsheet-spec.md)

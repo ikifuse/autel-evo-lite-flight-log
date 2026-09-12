@@ -7,6 +7,12 @@ export const formalDocs = [
   'index.md', 'architecture.md', 'code-map.md', 'invariants.md',
   'feature-guide.md', 'spreadsheet-spec.md', 'test-spec.md', 'rebuild-guide.md',
 ];
+// One design book: add a chapter here only with its root table-of-contents entry.
+export const designChapters = [
+  '01-principles.md', '02-legal-operation.md', '03-workflow-ui.md',
+  '04-save-recovery.md', '05-records-manual.md', '06-aircraft-battery-totals.md',
+  '07-maintenance-start.md', '08-security-quality.md',
+];
 export const rootDesign = '01_ドローン運航記録_設計書.md';
 export const reportNotice = '<!-- document-kind: historical-report -->';
 
@@ -50,7 +56,12 @@ export function checkDocs(directory) {
   for (const entry of fs.readdirSync(docs, { withFileTypes: true })) {
     if (entry.isFile() && /\.md$/i.test(entry.name) && !formalDocs.includes(entry.name)) errors.push(`docs/${entry.name}: 正式文書一覧外。履歴はdocs/reports/へ`);
   }
-  const required = [rootDesign, ...formalDocs.map(f => 'docs/' + f)];
+  const chapters = designChapters.map(f => 'docs/design/' + f);
+  const designFiles = markdown.filter(f => f.startsWith('docs/design/'));
+  for (const file of designFiles) {
+    if (!chapters.includes(file)) errors.push(`${file}: 設計章許可一覧外。章追加は01設計書目次・索引・許可一覧の同時更新が必要。履歴はdocs/reports/へ`);
+  }
+  const required = [rootDesign, ...formalDocs.map(f => 'docs/' + f), ...chapters];
   for (const f of required) if (!fs.existsSync(path.join(root, f))) errors.push(`${f}: 正式文書がありません`);
   const targets = new Map();
   for (const file of markdown) {
@@ -64,6 +75,7 @@ export function checkDocs(directory) {
       } catch (error) { errors.push(`${file}: 不正な参照 ${url} (${error.message})`); }
     }
     targets.set(file, refs);
+    if (file.startsWith('docs/design/') && prose(text).includes(reportNotice)) errors.push(`${file}: 設計章に履歴注意書きがあります。docs/design/は正式本文、履歴はdocs/reports/へ`);
     if (file.startsWith('docs/reports/')) {
       const head = text.split('\n').slice(0, 12).join('\n');
       if (!head.includes(reportNotice) || !head.includes('現在仕様の正本ではありません') || !head.includes('記録当時の状態')) errors.push(`${file}: 冒頭の履歴注意書きが不足`);
@@ -76,6 +88,10 @@ export function checkDocs(directory) {
   for (const file of [...required.filter(f => f !== 'docs/index.md'), ...markdown.filter(f => f.startsWith('docs/reports/'))]) {
     if (!indexRefs.includes(file)) errors.push(`docs/index.md: 索引未登録 ${file}`);
   }
+  const designRefs = targets.get(rootDesign) || [];
+  for (const file of new Set([...chapters, ...designFiles])) {
+    if (!designRefs.includes(file)) errors.push(`${rootDesign}: 設計章目次未登録 ${file}`);
+  }
   return errors;
 }
 
@@ -83,5 +99,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const root = fileURLToPath(new URL('../', import.meta.url));
   const errors = checkDocs(root);
   if (errors.length) { console.error(errors.join('\n')); process.exitCode = 1; }
-  else console.log('PASS: 文書配置・索引・reports注意書き・ローカルリンク');
+  else console.log('PASS: 文書配置・設計章目次・索引・reports注意書き・ローカルリンク');
 }
