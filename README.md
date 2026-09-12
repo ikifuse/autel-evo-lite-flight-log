@@ -1,4 +1,4 @@
-![Autel EVO Lite / Lite+ ドローン運航記録](./docs/images/social-preview-1280x640-under-1MB.jpg)
+![Autel EVO Lite / Lite+ ドローン運航記録](./docs/images/social-preview-autel-evo-lite.jpg)
 
 <h1 align="center">Autel EVO Lite / Lite+ ドローン運航記録</h1>
 
