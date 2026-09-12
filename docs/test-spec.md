@@ -4,7 +4,7 @@
 
 本書は、Autel EVO Lite / Lite+ ドローン運航記録システムにおける回帰テスト、障害注入テスト、セキュリティ試験、およびアプリテストの動作検証仕様を定めたドキュメントである。
 
-- 関連正本仕様書: [01_ドローン運航記録_設計書.md](../01_ドローン運航記録_設計書.md)
+- 関連正本仕様書: [01設計書の目次](../01_ドローン運航記録_設計書/00_目次.md)
 - スプレッドシート帳票仕様: [docs/spreadsheet-spec.md](spreadsheet-spec.md)
 - コード対応索引: [docs/code-map.md](code-map.md)
 - テスト実装ファイル: `tests/regression.test.js`、`tests/refactor-compat.test.js`、`tests/web-compat.test.js`
@@ -218,6 +218,6 @@ Web互換試験では今回意図したイベント追加、保持案内文、�
 
 ## 文書構造の検証
 
-`node scripts/check-docs.mjs` は、docs直下の正式Markdown8件を明示した許可一覧、`docs/design/` の8章の許可一覧、正式文書の存在、01目次から全設計章への登録、indexから正式文書（設計章を含む）・全reportsへの登録、reports冒頭の履歴注意書きと担当正式文書へのリンクを検査する。rootとdocs配下のMarkdown内のローカルファイル参照（通常リンク・画像・参照定義・HTML href/src）も確認する。設計章の未許可Markdownは下位ディレクトリ・大文字拡張子も検出し、章への履歴マーカー混入を拒否する。コード例は除外する。外部URLの到達性、見出しアンカー、Markdownの全構文、文書の意味や仕様転記漏れは検査範囲外で、レビューで補完する。
+`node scripts/check-docs.mjs` は、docs直下の正式Markdown8件を明示した許可一覧、`01_ドローン運航記録_設計書/` 内の `00_目次.md` と8章の許可一覧、正式文書の存在、01目次から全設計章への登録、indexから正式文書（設計章を含む）・全reportsへの登録、reports冒頭の履歴注意書きと担当正式文書へのリンクを検査する。root直下・設計書フォルダ・docs配下のMarkdown内のローカルファイル参照（通常リンク・画像・参照定義・HTML href/src）も確認する。設計章の未許可Markdownは下位ディレクトリ・大文字拡張子も検出し、章への履歴マーカー混入を拒否する。コード例は除外する。外部URLの到達性、見出しアンカー、Markdownの全構文、文書の意味や仕様転記漏れは検査範囲外で、レビューで補完する。
 
-`node tests/docs-structure.test.mjs` は一時ディレクトリだけで正常配置・未許可Markdown・正式文書欠落・設計章目次未登録・索引未登録・design/reportsの区別・注意書き欠落・リンク切れ・空白/括弧付きURL・画像/参照リンク等を検証する。両コマンドを既存 `build-dist.yml` に接続し、Markdownまたは検査コード変更でもCIが起動する。新しい報告書をdocs直下へ追加すると検査は終了コード1で失敗する。章の新設は01目次・index・designChapters許可一覧を同時更新する。許可一覧を広げて報告混入を回避しない。
+`node tests/docs-structure.test.mjs` は一時ディレクトリだけで正常配置・未許可Markdown・正式文書欠落・設計章目次未登録・索引未登録・設計書フォルダとreportsの区別・注意書き欠落・リンク切れ・空白/括弧付きURL・画像/参照リンク等を検証する。両コマンドを既存 `build-dist.yml` に接続し、Markdownまたは検査コード変更でもCIが起動する。新しい報告書をdocs直下へ追加すると検査は終了コード1で失敗する。章の新設は01目次・index・designChapters許可一覧を同時更新する。許可一覧を広げて報告混入を回避しない。

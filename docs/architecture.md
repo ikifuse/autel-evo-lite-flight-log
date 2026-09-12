@@ -231,7 +231,7 @@ PRE / READY / BATTERY_CHANGE / LANDING / POST_ALLの入力はinput・change・pa
 
 ## 7. 関連仕様書へのリンク
 
-* 設計理由・各画面仕様: [01設計書目次（担当章だけ読む）](../01_ドローン運航記録_設計書.md)
+* 設計理由・各画面仕様: [01設計書目次（担当章だけ読む）](../01_ドローン運航記録_設計書/00_目次.md)
 * 壊してはならない設計ルール: [docs/invariants.md](invariants.md)
 * 各ファイルの担当関数と索引: [docs/code-map.md](code-map.md)
 * スプレッドシート帳票構造: [docs/spreadsheet-spec.md](spreadsheet-spec.md)
