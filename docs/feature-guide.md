@@ -1,130 +1,39 @@
 # 機能追加・変更ガイド（標準開発手順）
 
-本書は、本システムに新しい入力項目、画面要素、保存データ、外部API連携、または集計ロジックを追加・変更する際の**標準手順と全層チェックリスト**を定めた文書である。
-
----
+本書は変更時の手順と影響確認の正本。現行仕様・数値・コード位置は担当文書へ参照し、変更が必要な層だけ更新する。
 
 ## 1. 変更作業の基本ステップ
 
-AIエージェントおよび開発者は、機能追加・変更時に以下の順序で作業を進めること。
-
-```text
-Step 1: 01目次で担当設計章を特定 → コード影響範囲の特定 (docs/code-map.md)
-  │
-Step 2: 不変条件の確認 (docs/invariants.md)
-  │
-Step 3: 正本コードの修正 (src/ または src/web/)
-  │
-Step 4: ビルド・構文整合性・責務境界チェック
-  │
-Step 5: 関連テスト、最終回帰・互換確認 (docs/test-spec.md)
-```
-
-1. **Step 1: 影響範囲の特定**:
-   * 設計・仕様変更ではまず [01設計書目次](../01_ドローン運航記録_設計書/00_目次.md) から担当章を選び、その章と必要な正式仕様を読む。次に [docs/code-map.md](code-map.md) で担当ファイル・主要関数を確認する。通常作業で設計書全章や関係のないファイルは読み込まない。
-2. **Step 2: 不変条件の確認**:
-   * [docs/invariants.md](invariants.md) を確認し、計画中の変更が「手動編集の許容」「UUID冪等性」「ロールフォワード」「アプリテスト分離」などの前提を侵害しないか検証する。
-3. **Step 3: 正本コードの修正**:
-   * `src/*.gs` または `src/web/*` のみ編集する（`dist/Code.gs` の直接編集は禁止）。
-   * ファイル追加・移動時は `scripts/source-order.json` / `scripts/web-source-order.json` を更新する。Webの依存注入・初回起動は `43_web_bootstrap.js` に置き、最後に結合する。
-   * [docs/architecture.md](architecture.md) の依存方向を守り、上位のengineやbootstrapを下位機能から直接呼び戻さない。`13_legacy_compat.gs` は新機能の変更先にしない。
-4. **Step 4: ビルド実行と整合性確認**:
-   * `node scripts/build.mjs` を実行して `dist/Code.gs` を生成し、`--check` で整合性を確認する。
-   * `node scripts/check-boundaries.mjs` で公開入口・内部名・global重複・直接参照の循環を確認する。portsの実行時結線は別途確認する。
-5. **Step 5: テスト実行**:
-   * 小変更の途中は関連する確認を先に行い、最終確認では [docs/test-spec.md](test-spec.md) の回帰・障害・互換・境界チェックを実行する。必要な挙動を検証するテストだけを追加する。
-   * 構造整理では `tests/refactor-compat.test.js` と `tests/web-compat.test.js` により、基準B案との保存形式・処理順・画面動作の互換性を確認する。機能変更時は意図した差と互換を維持する範囲を明示し、期待値だけを更新して通さない。
-   * NodeのPASSを実GAS・実ブラウザ・実機の確認済みとは扱わない。確認した環境と残る未検証範囲を分けて報告する。
-
----
+1. [01目次](../01_ドローン運航記録_設計書/00_目次.md) で担当章を選び、必要な設計前提と専門docsの該当節を読む。[code-map](code-map.md) で担当ファイルを特定する。
+2. [invariants](invariants.md) の保護条件と、[architectureの依存方向](architecture.md#4-責務と依存方向)への影響を確認する。仕様とコードが食い違う場合は [文書管理規則](index.md) に従い原因を判断する。
+3. srcの担当責務を編集する。UI文言・スタイルと保存計画・帳票ロジックの変更は分離する。Legacyを新機能の変更入口にしない。
+4. ソース追加・移動時は `scripts/source-order.json` / `scripts/web-source-order.json` を更新する。Webの結線と初回起動はbootstrapを最後に置き、下位機能から上位のengine・bootstrapへ呼び戻さない。
+5. [test-specの選択表](test-spec.md#8-テスト実行コマンドと合否判定) に従ってビルド・関連試験・最終確認を行う。機能変更の意図した差と互換を維持する範囲を示し、期待値だけを更新して通さない。Nodeと実GAS・実ブラウザ・実機の確認を区別する。
 
 ## 2. 入力項目追加時の「全層チェックリスト」
 
-保存する入力項目（フォーム、チェックボックス、選択肢など）を追加する場合、データの不整合や保存漏れを防ぐため、**以下の全7層への影響を確認し、変更が必要な層だけ更新すること**。項目追加のたびにstoreやrecoveryを書き換える構造にしない。
+保存する項目の追加では7層への影響を確認する。項目追加のたびにstore・recoveryを改修する前提にせず、関係する層だけ変更する。
 
-### 層1: クライアント状態（State & UI）
-- [ ] `src/web/41_web_workflow.js`:
-  - `STATE.session` の初期化・ローカル操作・phase遷移に新しいプロパティを反映したか。
-- [ ] `src/web/42_web_catalog.js`:
-  - 公開してよい選択肢・点検名・表示説明だけを追加したか。サーバー側の非公開設定をそのまま転送していないか。
-- [ ] 各画面JS（`src/web/34_web_start.js`, `35_web_flight.js`, `36_web_postflight.js` 等）:
-  - 画面レンダリング関数に入力要素を追加したか。
-  - 入力値をworkflowの操作または画面退避へ渡しているか。共通DOM・表示補助は `32_web_core.js`、描画の振り分けは `33_web_engine.js`、結線は `43_web_bootstrap.js` の責務を維持しているか。
-  - 最低タップ領域（高さ44px以上）を確保しているか。
+| 層 | 確認すること | 担当コードを選ぶ入口 |
+|---|---|---|
+| 1. クライアント状態・UI | 初期化・phase・画面入力からworkflow/退避へ値が渡るか。catalogには公開可能な選択肢だけを置き、サーバーの非公開設定を送らない。DOM補助・controller・画面・bootstrapの責務を保つ | [workflow](code-map.md#24-web運航workflow)、[画面](code-map.md#17-飛行前点検bat交換待機飛行着陸)、[catalog](code-map.md#25-webカタログ) |
+| 2. 下書き | 新項目が保存・復元され、戻る・画面移動・保存失敗でも未確定入力を失わないか。旧キー・下書き互換を守るか | [storage](code-map.md#20-web下書き直前履歴)、[退避契約](architecture.md#61-進行中下書きと日付) |
+| 3. 通信・入力境界 | payloadへ必要項目を含め、成功/失敗時の保持順を守るか。正規化の許可項目、型・文字数・許可リスト・点検条件、raw/正規化後の容量・深さ・件数・UUID・危険キーの検査を通るか。正規化だけで検証済みとしない | [入力検証](code-map.md#3-入力検証)、[RPC](code-map.md#21-web-rpc) |
+| 4. 再送同一性 | 新項目が正規化入力の署名に入り、同じ入力で一致するか。signatureは入力同一性、planHashはplan整合性であり認証ではない。Legacy署名を変更入口にしない | [保存・同一性](code-map.md#4-固定保存計画--冪等性--roll-forward) |
+| 5. 固定計画 | writer→captureで保存先とbefore/intended・書式を固定するか。自由入力はtrackedSetUserText_とadapterの安全化を通し直接setterで迂回しないか。新形式は旧pending読込・復旧を先に設計し、既存planを新項目や既定値で再生成しないか | [plan](code-map.md#4-固定保存計画--冪等性--roll-forward)、[記録writer](code-map.md#7-飛行記録) |
+| 6. 帳票実行 | 探索・写像・累計を担当writer内で扱い、見出し・[帳票仕様](spreadsheet-spec.md)を守るか。intendedならskip、beforeだけ書込み、第三値停止・readbackを保ち、完了後の手修正を復元しないか | [日付](code-map.md#5-日付シート生成とno1no2枠)、[BAT](code-map.md#9-bat履歴)、[正式累計](code-map.md#10-機体公式累計) |
+| 7. 検証 | 新項目を含む正常保存と途中障害後の同UUID再送、旧pendingのplan/hash、完了後の手修正保持を検査するか。画面追加時の結線・起動・戻る・退避・保存後遷移も確認するか | [試験仕様](test-spec.md#8-テスト実行コマンドと合否判定) |
 
-### 層2: クライアント下書き保存（LocalStorage）
-- [ ] `src/web/37_web_storage.js`:
-  - `persistOperationDraft` / `restoreOperationDraft` で、新しいプロパティが欠落せずLocalStorageへ保存・復元されるか。
-  - ブラウザをリロードした際に、入力中の値が正しく画面に復元されるか。
-- [ ] `35_web_flight.js` / `36_web_postflight.js` の画面退避と `33_web_engine.js` の退避呼出し:
-  - 戻る・画面移動・保存失敗でも未確定の入力を保持するか。既存の保存キーと旧下書き互換を維持しているか。
-
-### 層3: サーバー間通信・入力正規化（Validation）
-- [ ] `src/web/38_web_rpc.js` と呼出し元 `33_web_engine.js`（保存）/ `40_web_diagnosis.js`（診断）:
-  - 必要な項目が保存payloadに含まれ、成功・失敗時の下書き保持順を変えていないか。
-- [ ] `src/11_server_validation.gs`:
-  - `normalizedCommitInput_` の許可したプロパティへ追加したか。正規化だけで全ての型変換・検証が済むと仮定していないか。
-  - raw入力・正規化後のサイズ/深さ/件数、UUID、危険プロパティ名の検査を迂回していないか。
-- [ ] `src/05_operation_policy.gs`:
-  - `validateCommitBusinessInput_` に型・文字数・許可リスト・数値範囲・点検条件を反映したか。設定値は `00_config.gs`、日付/時間変換は `06_operation_time.gs` を参照する。
-
-### 層4: 再送同一性・plan整合性
-- [ ] `src/18_commit_identity.gs` / `src/01_commit_codec.gs`:
-  - 正規化した新項目が `commitSignatureV2_` の計算対象に入り、同じ内容の再送で署名が一致するか。
-  - 入力署名は内容の同一性、`15_commit_store.gs` のplanHashは保存planの整合性の検査であり、利用者の認証と混同していないか。
-  - Legacyの `commitSignature_` を変更入口にしていないか。保持中のpendingを現在の設定や新項目の既定値で再生成していないか。
-
-### 層5: 固定保存計画（Fixed Commit Plan）
-- [ ] `src/14_commit_plan.gs` (`buildFixedCommitPlan_`) と対象帳票writer:
-  - 新しい項目の保存先セル（または行）を計画段階で一意に決定しているか。
-  - `21_sheet_records.gs` / `22_battery_history.gs` / `23_aircraft_totals.gs` の該当写像から、`04_commit_capture.gs` を通してoperationsに保存前値・予定値・書式が入るか。
-  - **自由入力の場合**: `trackedSetUserText_` → `03_gas_sheet_adapter.gs` のFormula Injection対策を通すか。任意の直接setterで迂回していないか。
-  - `15_commit_store.gs` / `17_commit_recovery.gs` に個別項目の業務条件を追加していないか。保存形式を変える場合は旧pendingの読込・復旧契約を先に設計したか。
-
-### 層6: スプレッドシート帳票書き込み（Spreadsheet Execution）
-- [ ] 帳票構造 `20_sheet_core.gs`、日付記録 `21_sheet_records.gs`、BAT `22_battery_history.gs`、正式累計 `23_aircraft_totals.gs`:
-  - 対象帳票の探索・写像・読取りを該当責務内で変更しているか。
-  - シート側の既存見出し文字列（「使用バッテリー」等）を壊していないか。
-  - [docs/spreadsheet-spec.md](spreadsheet-spec.md) の帳票仕様と矛盾していないか。
-- [ ] `24_sheet_integrity.gs` / `16_commit_compare.gs` / `03_gas_sheet_adapter.gs`:
-  - intendedはskip、beforeだけ書込み、第三値はconflict停止という既存契約を保つか。readbackを省略していないか。
-  - 保存完了後の手動編集を過去planで復元していないか。
-
-新しい出力形式は、完了後に手動編集された現在の帳票を読む独立した責務として設計する。新しい保存backendは、永続化・予約・復旧・容量・結果照合の契約を別途定義する。ファイル分割やadapterの差替えだけで同じ安全性が得られると扱わない。
-
-### 層7: テストと検証（Tests）
-- [ ] `tests/regression.test.js`:
-  - 新規項目を含む運航データでテストを実行し、エラーなく保存されるか。
-  - 障害注入テスト（T16〜T23）でも、同一UUID再送時に二重加算や二重書き込みが起きないか。
-- [ ] 構造整理のサーバー/Web互換・責務境界試験:
-  - 旧pendingのplan JSON・hashを維持して復旧でき、complete後の手動編集を保持するか。
-  - 新しい画面やportsを `43_web_bootstrap.js` に結線し、起動・戻る・下書き退避・保存後の状態遷移を検証したか。
-  - checker自体を変更した場合は `node scripts/check-boundaries.mjs --self-test` を実行したか。
-
----
+保存フェーズ追加では進捗永続化、flush、readbackと障害注入を一緒に確認する。境界checker自体を変更したときはその自己試験も実行する。新しい出力は手修正を含む現在の帳票を読む独立責務、新しい保存backendは永続化・予約・復旧・容量・結果照合の契約から設計する。adapter差替えやファイル分割だけで安全性が得られるとは扱わない。
 
 ## 3. UIデザイン・スタイル変更時の手順
 
-* **最初に読むファイル**: `src/web/30_web_styles.css`。HTML構造の変更が必要ならシェルまたは対象画面も確認する。
-* **確認事項**:
-  * Pixel 6aの縦向きを基準に、ページ本体は最大幅760px。430px以下は1列優先、431〜599pxは基本1列、600px以上は既存の2列入力グループを2列、761px以上は幅760pxで中央固定する。文字・余白を詰めすぎず、各幅で崩れがないか。
-  * `env(safe-area-inset-*)` が確保され、スマホのノッチやホームバーと重ならないか。
-  * 他のJSファイルを変更する必要がないか確認する。
-
----
+[code-mapのUI入口](code-map.md#12-webスタイルデザインcss)からCSSを読み、HTML構造に関係する場合だけシェル・対象画面へ進む。[設計第3章の端末幅・操作高・Safe Area](../01_ドローン運航記録_設計書/03_画面・運航フロー.md#端末幅と操作性)を基準に各幅で確認する。文字・余白を詰めすぎず、ノッチ・ホームバー・キーボードとの重なりを確認する。表示変更だけで保存データやphaseを分岐させない。
 
 ## 4. 外部API連携時の注意（GPS・逆ジオコーディング等）
 
-* **GPSの編集対象ファイル**: `src/web/39_web_gps.js`（サーバーRPC共通は `38_web_rpc.js`）
-* **確認事項**:
-  * 現行は `navigator.geolocation.getCurrentPosition` を高精度で呼び、8秒timeoutはその位置取得に対する指定であり、逆ジオコーディングの `fetch` に同じtimeoutがあるとは扱わない。通信制御の追加は責務分割と分けて検証する。
-  * 国土地理院API等の失敗時に座標表示へfallbackできることと、GPS権限拒否時のエラー表示・手入力を確認する。
-  * 操縦者の個人情報や機体情報を無関係な外部サービスへ送信しないこと。
+[code-mapのGPS入口](code-map.md#22-web-gps)と[設計第3章の動作仕様](../01_ドローン運航記録_設計書/03_画面・運航フロー.md#場所入力とgps)を読む。位置取得と住所取得の失敗・待ち時間を別々に確認し、拒否時の手入力と住所取得失敗時の座標fallbackを保つ。通信制御の変更は責務分割と分けて検証する。外部送信範囲は [設計第8章](../01_ドローン運航記録_設計書/08_セキュリティ・品質.md#公開範囲端末位置情報) に従い、無関係な個人・機体情報を送らない。
 
 ## 5. 文書更新を完了条件にする
 
-追加実装・仕様変更では、01目次で特定した担当章に必要な設計変更を反映し、次に [文書索引の役割表](index.md) に従って必要な既存正式文書を更新する。通常の修正で報告書を自動作成しない。独立した履歴を残す条件・reports冒頭書式は [文書管理ルール](index.md#文書更新の恒久ルール) に従う。報告で確定した仕様・制約を報告だけに残さない。
-
-文書追加・移動時には索引と参照元を更新し、`node scripts/check-docs.mjs` と `node tests/docs-structure.test.mjs` を実行する。レビューでは正式仕様への反映漏れと過去報告への依存がないかを確認する。
-
-レビューでは01設計書が「01_ドローン運航記録_設計書/内の00_目次.md＋8章」で一冊として維持され、必要章だけ読めるかを確認する。通常は新章を作らない。既存8章に収まらない独立した恒久的設計領域だけ新設を検討し、責務・既存章で不足する理由を説明して01目次・index・designChapters許可一覧へ同時登録する。既存正式docsの責務と詳細の集約を維持し、各章から必要な専門docsを参照する。通常の追加実装のたびに新しいdocsを作らない。
+担当章の判断と必要な専門docsを更新し、同じ詳細説明を長文で複製しない。通常は新章・報告書を作らず、追加条件・索引・許可一覧の扱いは [文書管理規則](index.md#文書更新の恒久ルール) に従う。レビューでは参照の整合性、固有情報の保持、必要章だけ読めること、現在仕様をreportsだけに残していないことを確認する。

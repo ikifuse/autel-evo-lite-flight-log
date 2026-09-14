@@ -1,58 +1,25 @@
 # AGENTS.md
 
-## 正本
+## 正本と作業範囲
 
-- 正本は `src/`。
-- `dist/Code.gs` は自動生成物。直接編集禁止。
-- ルートに `Code.gs` は置かない。GASへ反映する場合は `dist/Code.gs` だけを使用する。
+- 編集の正本は `src/`。`dist/Code.gs` は自動生成物で直接編集しない。ルートに `Code.gs` を置かず、GASへの反映にはdistだけを使う。
+- 依頼範囲に限定し、無関係なリファクタリングや、挙動変更を伴わない整理でのロジック変更をしない。既存の未commit変更・利用者の並行更新を保全する。
+- commit / pushは明示された依頼範囲で行う。GAS反映・deploy・本番データ操作は別の明示依頼が必要。
 
-## 作業原則
+## 必要な情報だけ読む
 
-- 設計・仕様変更では最初に [01設計書の目次](01_ドローン運航記録_設計書/00_目次.md) から担当章を特定し、その章と必要な正式文書だけを読む。通常作業で設計書全文・全章を一括読込しない。
-- コード調査は `docs/code-map.md` から対象機能を特定する。
-- ロジック変更時は、必ず `docs/invariants.md` の不変条件に違反しないことを確認する。
-- 対象機能に記載されたファイルから読み、必要性が確認できるまで探索を広げない。
-- 無関係なリファクタリングは禁止。
-- 挙動変更を依頼されていない構造整理では、ロジックを変更しない。
-- 小変更では関連テストのみ実行し、全回帰テストは最終確認時に実行する。
-- 公開GAS入口・永続化済みplan形式・内部関数の末尾 `_` を構造整理で変更しない。
-- 依存方向は `docs/architecture.md` に従う。比較・永続化・GAS操作をengineへ戻さない。
-- 構造整理の最終確認は回帰・ビルド整合性に加え、`tests/refactor-compat.test.js` と `tests/web-compat.test.js` を実行する。
-- `commit`、`push`、`deploy` は行わない。
+- 設計・仕様変更： [01設計書の目次](01_ドローン運航記録_設計書/00_目次.md) → 担当章 → 必要な専門docsの該当節 → [code-map](docs/code-map.md)の担当コード。通常作業で設計書8章や専門docsを一括読込しない。
+- コードの所在調査はcode-mapの目的別入口から2〜4ファイルを起点にし、必要性が分かってから探索を広げる。
+- 文書だけの変更は [文書索引・管理規則](docs/index.md) と対象文書から始める。通常保守でreportsを読まず、過去の判断・検証を追うときだけ参照する。
 
-## コード入口
+## 変更時の保護と検証
 
-- 設定・入力境界 → `src/00_config.gs`、`src/11_server_validation.gs`、`src/05_operation_policy.gs`
-- 保存入口 → `src/12_commit_engine.gs`。plan/store/compare/recovery等の最短入口は `docs/code-map.md` を参照する。
-- GAS実行・セル操作 → `src/02_gas_runtime.gs`、`src/03_gas_sheet_adapter.gs`
-- 帳票構造・日付記録 → `src/20_sheet_core.gs`、`src/21_sheet_records.gs`
-- BAT履歴・正式累計 → `src/22_battery_history.gs`、`src/23_aircraft_totals.gs`
-- Web → `src/web/33_web_engine.js` はcontroller、画面は `34`～`36`。その他の責務は `docs/code-map.md` を参照する。
-- 旧方式互換 → `src/13_legacy_compat.gs`（凍結。通常作業では読まない・書き換えない）
-- 結合順 → `scripts/source-order.json`、`scripts/web-source-order.json`
+- ロジック変更は [invariants](docs/invariants.md) の条件を確認する。依存方向は [architecture](docs/architecture.md#4-責務と依存方向) に従い、比較・永続化・GAS操作をengineへ戻さない。
+- コード構造整理で公開GAS入口・保存済みplan形式・内部関数末尾 `_` を変えない。`src/13_legacy_compat.gs` は凍結し、通常の探索・変更先にしない。
+- 入力追加等の全層確認は [feature-guide](docs/feature-guide.md)。ファイル追加・移動時は `scripts/source-order.json` / `scripts/web-source-order.json` を更新する。
+- 検証は [test-specの選択表](docs/test-spec.md#8-テスト実行コマンドと合否判定) に従う。文書だけなら文書checker・自己試験、コード構造整理の最終確認では回帰・ビルド・境界・サーバー/Web互換を行う。NodeのPASSを実GAS・実機確認と混同しない。
 
-## 仕様・ドキュメント入口
+## 文書更新
 
-- 目的別文書インデックス → `docs/index.md`
-- 壊してはいけない条件・掟 → `docs/invariants.md`
-- 全体構造・データフロー → `docs/architecture.md`
-- 機能追加・変更手順 → `docs/feature-guide.md`
-- コード対応索引 → `docs/code-map.md`
-- 設計書の目次・変更目的別案内 → [01設計書](01_ドローン運航記録_設計書/00_目次.md)。必要時に同フォルダの `00_目次.md` を見て、担当章だけ読む。
-- Spreadsheet・帳票・原本仕様 → `docs/spreadsheet-spec.md`
-- テスト・障害検証仕様 → `docs/test-spec.md`
-- 再構築・デプロイ手順 → `docs/rebuild-guide.md`
-
-## 文書管理
-
-- 01設計書は `01_ドローン運航記録_設計書/` 内の `00_目次.md` と8章で一冊を構成する。目次へ本文全体を再集約せず、章には設計理由・前提・仕様間の関係を置く。既存正式docsの責務・詳細の集約・reportsの履歴用途を維持する。設計章は独立した8冊の仕様書ではなく同じ1冊の本文であり、必要な専門docsを参照する。
-- 追加実装・仕様変更は「目次で担当章を特定 → その章の必要な設計を更新 → 必要な担当正式文書を更新」の順とし、通常は新しい設計章を作らない。
-- 設計章の新設は既存8章に自然に収まらない独立した恒久的設計領域だけに限る。責務と既存章で不足する理由を示し、01目次・docs/index.md・scripts/check-docs.mjsのdesignChapters許可一覧を同時更新する。設計書フォルダへ作業記録や未登録Markdownを置かない。
-- 作業単位で正式文書を作らない。既存の責務に収まらない独立領域だけ新設を検討し、恒久的責務・既存文書で不足する理由・index上の位置付け・配置チェック登録を同時に整える。
-
-- 新規文書を作る前に既存正式文書への追記で足りるか確認する。通常の変更では報告書を自動作成しない。
-- `docs/` 直下は `docs/index.md` に定める正式文書専用。新規Markdownを安易に追加しない。
-- 現在の仕様・制約・運用判断は既存の担当正式文書へ反映する。報告書だけに仕様判断を残さない。
-- 独立した履歴が必要な監査・調査・実装記録は `docs/reports/` に置く。reportsを現在仕様の正本として扱わない。
-- reports冒頭に履歴であること・状態表記は記録当時であること・正式文書へのリンクを付ける。書式と作成条件は `docs/index.md` に従う。
-- 文書追加・移動時は `docs/index.md` の索引と全参照を更新し、`node scripts/check-docs.mjs` と `node tests/docs-structure.test.mjs` を実行する。
+- 設計書は目次＋8章で1冊を維持する。担当章の設計判断と必要な専門docsを更新し、同じ詳細仕様を長文で二重管理しない。
+- 通常は新章・新docs・報告書を作らない。例外の条件、正本の役割、索引・許可一覧・参照の更新は [文書管理規則](docs/index.md#文書更新の恒久ルール) に従う。

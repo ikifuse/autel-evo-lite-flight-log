@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Change only when the documented roles themselves intentionally change.
+export const rootMarkdown = ['AGENTS.md', 'README.md'];
 export const formalDocs = [
   'index.md', 'architecture.md', 'code-map.md', 'invariants.md',
   'feature-guide.md', 'spreadsheet-spec.md', 'test-spec.md', 'rebuild-guide.md',
@@ -57,8 +58,9 @@ export function checkDocs(directory) {
   if (fs.existsSync(path.join(root, designDirectory))) collect(designDirectory, true);
   if (markdown.some(f => f.toLowerCase() === (designDirectory + '.md').toLowerCase())) errors.push(`${designDirectory}.md: 旧設計書配置。入口は${rootDesign}`);
   if (fs.existsSync(path.join(docs, 'design'))) errors.push(`docs/design/: 旧設計書配置。正式本文は${designDirectory}/へ`);
-  for (const entry of fs.readdirSync(docs, { withFileTypes: true })) {
-    if (entry.isFile() && /\.md$/i.test(entry.name) && !formalDocs.includes(entry.name)) errors.push(`docs/${entry.name}: 正式文書一覧外。履歴はdocs/reports/へ`);
+  for (const file of markdown) {
+    if (!file.includes('/') && !rootMarkdown.includes(file)) errors.push(`${file}: ルートMarkdown許可一覧外。設計本文・正式文書・履歴の担当先へ`);
+    if (file.startsWith('docs/') && !file.startsWith('docs/reports/') && !formalDocs.some(f => file === 'docs/' + f)) errors.push(`${file}: 正式文書一覧外。履歴はdocs/reports/へ`);
   }
   const chapters = designChapters.map(f => designDirectory + '/' + f);
   const designFiles = markdown.filter(f => f.startsWith(designDirectory + '/'));
@@ -89,7 +91,7 @@ export function checkDocs(directory) {
     }
   }
   const indexRefs = targets.get('docs/index.md') || [];
-  for (const file of [...required.filter(f => f !== 'docs/index.md'), ...markdown.filter(f => f.startsWith('docs/reports/'))]) {
+  for (const file of [...required.filter(f => f !== 'docs/index.md' && !chapters.includes(f)), ...markdown.filter(f => f.startsWith('docs/reports/'))]) {
     if (!indexRefs.includes(file)) errors.push(`docs/index.md: 索引未登録 ${file}`);
   }
   const designRefs = targets.get(rootDesign) || [];

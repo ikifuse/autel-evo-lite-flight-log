@@ -52,38 +52,65 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Classify changed paths
+        id: changes
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          let docsOnly = false;
+          try {
+            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+            const base = process.env.GITHUB_EVENT_NAME === 'pull_request' ? event.pull_request?.base?.sha
+              : process.env.GITHUB_EVENT_NAME === 'push' ? event.before : null;
+            if (/^[a-f0-9]{40}$/i.test(base || '') && !/^0+$/.test(base)) {
+              const files = execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', base, process.env.GITHUB_SHA], { encoding: 'utf8' })
+                .split('\0').filter(Boolean);
+              docsOnly = files.length > 0 && files.every(file => /\.[mM][dD]$/.test(file)
+                || file === 'scripts/check-docs.mjs' || file === 'tests/docs-structure.test.mjs');
+            }
+          } catch (error) {
+            console.warn('Changed paths could not be determined; running application checks.');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'docs_only=' + docsOnly + '\n');
+          console.log(docsOnly ? 'Documentation-only changes.' : 'Application checks required.');
+          NODE
+
       - name: Verify documentation structure and links
         run: |
           node tests/docs-structure.test.mjs
           node scripts/check-docs.mjs
 
       - name: Verify pull request already contains current dist
-        if: github.event_name == 'pull_request'
+        if: steps.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request'
         run: node scripts/build.mjs --check
 
       - name: Generate dist from src
-        if: github.event_name != 'pull_request'
+        if: steps.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
         run: node scripts/build.mjs
 
       - name: Verify generated dist
-        if: github.event_name != 'pull_request'
+        if: steps.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
         run: node scripts/build.mjs --check
 
       - name: Run regression tests against dist
+        if: steps.changes.outputs.docs_only != 'true'
         run: node tests/regression.test.js dist/Code.gs
 
       - name: Verify responsibility boundaries
+        if: steps.changes.outputs.docs_only != 'true'
         run: |
           node scripts/check-boundaries.mjs --self-test
           node scripts/check-boundaries.mjs
 
       - name: Compare server and Web behavior with the B baseline
+        if: steps.changes.outputs.docs_only != 'true'
         run: |
           node tests/refactor-compat.test.js dist/Code.gs
           node tests/web-compat.test.js dist/Code.gs
 
       - name: Commit generated dist to main
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        if: steps.changes.outputs.docs_only != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch')
         run: |
           if [ -z "$(git status --porcelain -- dist/Code.gs)" ]; then
             echo 'dist/Code.gs is already current.'
@@ -96,7 +123,7 @@ jobs:
           git push
 
       - name: Verify repository copy after automatic update
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        if: steps.changes.outputs.docs_only != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch')
         run: |
           git fetch origin main
           git show origin/main:dist/Code.gs > "$RUNNER_TEMP/remote-Code.gs"

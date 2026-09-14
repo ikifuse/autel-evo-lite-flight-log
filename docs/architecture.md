@@ -1,6 +1,6 @@
 # システム全体構造・アーキテクチャ
 
-本書は、Autel EVO Lite / Lite+ ドローン運航記録システムのデータフロー、実行構造、およびビルド構造を簡潔に把握するためのアーキテクチャ概要書である。
+本書は実行時の依存方向・データ契約・入力境界の正本である。変更箇所に応じて [依存方向](#4-責務と依存方向)、[端末下書き](#61-進行中下書きと日付)、[session](#8-sessionのデータ契約)、[固定保存計画](#9-固定保存計画の詳細契約)、[入力上限](#10-入力境界の詳細) の必要な節だけ読む。設計判断は [01設計書](../01_ドローン運航記録_設計書/00_目次.md)、対象ファイル・関連試験の探索は [code-map](code-map.md#0-不具合変更目的別の最短入口) を参照する。
 
 ---
 
@@ -12,14 +12,10 @@
 [現場操作 (スマートフォン)]
   │
   ▼
-[Web UI (HTML / CSS / JavaScript)]
-  │  ・画面入力、GPS取得、タイマー計測
-  │  ・画面遷移ごとにクライアント内 STATE.session を更新
-  │
-  ▼
-[Web Storage (LocalStorage)]
-  │  ・運航中の下書き (draftId: op_UUID) を自動退避
-  │  ・ブラウザ再読込や画面戻る操作時に即座に復元
+[Web UI / STATE.session]
+  │  ・画面入力、GPS取得、タイマー計測、状態遷移
+  │  ・「戻る」はメモリ内navigationHistoryから復元
+  ├─ LocalStorageへ下書きを退避（再読込時の復元元。詳細は6.1）
   │
   ▼ (submitAllPostflight → controller → RPC。失敗時は同UUIDで再送)
 [GAS 保存入口 (finishAircraft / google.script.run)]
@@ -29,31 +25,11 @@
   │  ・構造・文字数・UUID・許可リスト・業務条件を検証
   │
   ▼
-[12_commit_engine.gs → 14_commit_plan.gs / 15_commit_store.gs]
-  │  ・新規時だけ保存先・値を固定、DATAを永続化・照合してからMETAを公開
-  │  ・既存pendingは元のplanを読み、completeは追加書込みなしで応答
+[固定保存計画の生成・読込 → 適用・照合 → 完了証明（詳細は9）]
+  │  ・日付帳票、BAT履歴、飛行後点検、正式累計へ保存
   │
   ▼
-[17_commit_recovery.gs → 24_sheet_integrity.gs → 03_gas_sheet_adapter.gs]
-  │  ├─ Phase 1: 日常点検シート (ヘッダー・点検・飛行行)
-  │  ├─ Phase 2: バッテリー個別履歴 (BAT_1〜7)
-  │  ├─ Phase 3: 飛行後点検記録
-  │  └─ Phase 4: 機体公式累計更新 (点検整備記録原本 ※通常運航時のみ)
-  │
-  ▼
-[flush & 読み戻し照合]
-  │  ・全セルの値・書式がfixed planの計画値と一致するか確認
-  │
-  ▼
-[完了確定 (complete)]
-  │  ・Script Properties に完了証明を記録
-  │  ・CacheService へ補助キャッシュ
-  │
-  ▼
-[クライアント応答]
-     ・STATE を初期状態 (active:false) へ更新
-     ・トップ画面の描画成功後にLocalStorageの下書きをクリア
-     ・完了通知（描画失敗時は下書きを保持）
+[クライアント応答 → 状態採用・描画・下書き消去（詳細は6.1）]
 ```
 
 ---
@@ -81,40 +57,18 @@
   └── dist/Code.gs
 
        │
-       ▼ (テスト検証)
-  tests/regression.test.js (回帰・障害注入)
-  tests/refactor-compat.test.js (B基準の保存契約・GAS作用比較)
-  tests/web-compat.test.js (B基準のWeb状態・表示・通信作用比較)
-
-       │
-       ▼ (手動コピー & GASエディタ貼付)
+       ▼ (test-specに従って検証後、別途承認された本番反映)
 [本番環境]
   Google Apps Script (Webアプリケーション)
 ```
+
+試験の選択・実行コマンドは [test-spec](test-spec.md)、GASへの反映操作は [rebuild-guide](rebuild-guide.md) を正本とする。
 
 ---
 
 ## 3. 保存状態遷移（Commit Plan Lifecycle）
 
-障害発生時の安全性を保証するため、保存処理は以下のステータスで管理される。
-
-```text
-[未着手]
-  │
-  ▼ (buildFixedCommitPlan_ → storeCommitPlan_)
-[pending] ── 全保存先と計画セル値を確定・Properties永続化
-  │
-  ▼ (applyCommitOperations_)
-[writing] ── 各フェーズ (シート/BAT/点検/累計) を順次書込み
-  │          ※途中で失敗・例外発生時は [failed] へ移行
-  │          ※同一UUIDの再試行は全段階を照合し、intendedをskipして未反映分を進める
-  │
-  ▼ (verifyCommitPlanResult_ & flush)
-[complete] ─ 全書込みの読み戻し照合が完了、完了証明を発行
-             ※complete証明が残る同一UUID・同一署名の再送は、追加書込みなしで応答
-```
-
-DATEブロックとBAT行のownershipは、Script Propertiesへ永続化した同一`draftId`のfixed commit plan、active reservation、Script Lock、対象セルのbefore/intended/conflict判定を正本とする。Spreadsheet上に既存のDeveloper Metadataがあっても読み書き・削除せず、保存成功・復旧・二重書込み防止の条件には使用しない。
+保存状態・段階実行は [9.3](#93-plan状態と進捗)、DATE/BATの予約とownershipは [9.6](#96-datebat-ownership) に集約する。端末の画面phaseとは別の状態である。
 
 ---
 
@@ -122,32 +76,12 @@ DATEブロックとBAT行のownershipは、Script Propertiesへ永続化した�
 
 各ファイルは同一GASグローバルへ結合する。ES Modulesやファイル単位privateは導入していない。manifestは結合順であり、runtime import機構ではない。内部関数の末尾 `_` と最小の公開入口を維持する。
 
-| ファイル（`src/`） | 責務 | 主要依存・境界 |
-|---|---|---|
-| `00_config.gs` | 機体・帳票・点検・上限・保存形式の定数 | 保存ロジックを追加しない |
-| `01_commit_codec.gs` | Date表現、canonical JSON、UTF-8長 | 純粋処理 |
-| `02_gas_runtime.gs` | Spreadsheet接続、日時、hash、ScriptLock、fault/log | GAS実行基盤 |
-| `03_gas_sheet_adapter.gs` | operationの値・書式I/O、Formula安全出力 | codec、Spreadsheet Range |
-| `04_commit_capture.gs` | writerをoperationへ捕捉、最初のbeforeを保持 | codec、adapter。業務セルを書かないcaptureモード |
-| `05_operation_policy.gs` | 運航・点検・TESTの業務検証 | config、validation、time、runtime |
-| `06_operation_time.gs` | 運航日・HH:MM・時間表示 | config。Spreadsheet非依存 |
-| `07_app_state.gs` | 当日・BAT候補・正式累計の画面状態 | runtime、time、正式累計 |
-| `10_server_core.gs` | `doGet`と初期HTML出力 | app state、HtmlService |
-| `11_server_validation.gs` | 外部JSON構造、UUID、文字列・点検map、正規化 | config、codec |
-| `12_commit_engine.gs` | 公開保存入口と新規/再送分岐 | validation、policy、plan、store、identity、retention、recovery、diagnostics |
-| `13_legacy_compat.gs` | 凍結した旧方式互換 | 現行機能の追加先にしない |
-| `14_commit_plan.gs` | 新規割当、容量見積、各帳票計画の組立 | policy、identity、store、帳票20～23、capture |
-| `15_commit_store.gs` | Script Properties、chunk/hash照合、complete圧縮、応答cache | codec、runtime。plan生成へ逆依存しない |
-| `16_commit_compare.gs` | before/intended/conflictの同値規則 | codec。純粋処理 |
-| `17_commit_recovery.gs` | 段階実行、進捗、先行pending解決、復旧/TEST破棄の実行 | store、retention、diagnostics、integrity、runtime、app state |
-| `18_commit_identity.gs` | 再送signature、complete判定、active reservation | codec、runtime、store |
-| `19_commit_retention.gs` | complete証明の永久保持・詳細縮小と整理判断 | store、runtime |
-| `20_sheet_core.gs` | 帳票構造・見出し・空きブロック・日付シート作成 | config、runtime、Spreadsheet |
-| `21_sheet_records.gs` | ヘッダー・飛行・点検・場所の帳票写像 | sheet core、capture、time、runtime |
-| `22_battery_history.gs` | BAT空き行選択と固定行への写像 | sheet core、capture、time |
-| `23_aircraft_totals.gs` | 正式累計原本の探索・開始/最終値・更新写像 | capture、time、runtime |
-| `24_sheet_integrity.gs` | operation適用と段階/最終readback | adapter、compare、codec、runtime。書込みも担当 |
-| `25_commit_diagnostics.gs` | pendingの読取り診断・復旧/TEST破棄可否の説明 | store、adapter、compare、policy、time、runtime。変更を実行しない |
+ファイルごとの探索入口は [code-map](code-map.md#0-不具合変更目的別の最短入口) に集約する。本書では依存を変更するときの境界を定める。
+
+- `00`は定数専用、`01` codec・`16` compareは純粋処理、`06` timeはSpreadsheetに依存しない。
+- `12`は入口の統括を担当し、比較・永続化・セル操作を取り込まない。`15` storeはplan生成へ逆依存しない。
+- `04` captureはwriterから最初のbeforeと操作を捕捉し、capture中に業務セルを書かない。実適用とreadbackは`24`、読取り診断だけは`25`、復旧・破棄の実行は`17`へ分ける。
+- `13` Legacyは凍結し、現行機能の追加先にしない。
 
 主要な依存方向は次のとおり（共通config/runtimeと凍結Legacyの辺は省略）。下位から公開入口を呼び返さず、循環を作らない。
 
@@ -219,7 +153,9 @@ complete後は利用者の手動修正を尊重する。将来の出力形式・
 | `EVO_LITE_LAST_OPERATION` | 前回条件引用用データ |
 | `EVO_LITE_ASSISTANT_HISTORY_V1` | 補助者氏名履歴 |
 
-PRE / READY / BATTERY_CHANGE / LANDING / POST_ALLの入力はinput・change・pagehideで同期退避し、setItem後のgetItem一致を確認する。圏外の確定でも最新入力をcaptureし、保存を確認できた場合だけ保持済みと案内する。読込失敗・JSON破損は警告し、元データを削除しない。保存キー・session形式は維持する。
+PRE / READY / BATTERY_CHANGE / LANDING / POST_ALLの入力はinput・change・pagehideで同期退避し、setItem後のgetItem一致を確認する。同期方式はdebounce待ち中に終了して入力が失われる窓を作らないためである。圏外の確定でも最新入力をcaptureし、保存を確認できた場合だけ保持済みと案内する。読込失敗・JSON破損は警告し、元データを削除しない。保存キー・session形式は維持する。
+
+再読込はLocalStorageの下書きから、「戻る」はメモリ内navigationHistoryのsnapshotから復元する。保存成功時はサーバー応答の初期状態（`active:false`）をSTATEへ採用 → トップ画面render → 下書き消去 → 成功通知の順とし、RPC失敗・render失敗時には下書きを消去しない。
 
 開始前フォームはsessionがなく退避対象外。GPSのプログラム代入は次の操作/pagehideまで未保存の場合がある。OSによるイベント省略、ブラウザデータ削除、大量履歴の同期保存負荷は自動退避だけでは解決しない。新規運航日は開始時の端末時計によるJST日付を採用し、開始済み下書きの日付を変更しない。端末時計の補正や旧下書きの日付推測はしない。開始前の「本日」表示は起動時のままの場合がある。
 
@@ -270,23 +206,30 @@ Google Sheetsには複数シート・複数行をまたぐ一般的なトラン�
 - 各機体累計セル、開始値、加算値、最終値
 - 各セルの保存前値、保存予定値、値種別・書式操作
 
-計画作成時に、別の未完了draftが同じ保存先を予約していないか確認する。再試行時に新しい保存先を探さない。
+計画作成時に、別の未完了draftが同じ保存先を予約していないか確認する。再試行時に新しい保存先を探さず、競合しても別の枠・行へ逃がさない。ScriptLockは計画確認から最終確定までを覆い、取得を最大20秒待つ。
 
 ### 9.3 plan状態と進捗
 
-状態は `pending`, `writing`, `failed`, `complete`。進捗は日付帳票、BAT履歴、飛行後点検、機体累計、最終照合などの段階単位で永続化する。各セル操作は次の判定で処理する。
+```text
+未着手 → plan作成・永続化 → pending → writing → 最終照合 → complete
+                                      └─ 途中失敗 → failed → 同じplanで再試行
+```
+
+進捗は日付帳票、BAT履歴、飛行後点検、機体累計（通常運航のみ）、最終照合の段階単位で永続化する。同じUUIDの再試行は全段階を照合し、各セル操作を次の判定で処理する。
 
 - 現在値が保存前値: 保存予定値を上書きする。
 - 現在値が保存予定値: 既に成功済みとして進む。
 - どちらでもない: 第三者変更・競合として停止する。
 
-これにより、同じ固定セルへの再実行が冪等になる。
+これにより、同じ固定セルへの再実行が冪等になる。固定保存計画はcomplete再送でも入力署名を照合し、不一致なら拒否する。同一UUID・同一署名のcomplete証明が残る場合だけ追加書込みなしで応答する。
+
+新規保存前は、他の未完了planを作成日時の古い順に処理する。各planの実行直前に実セルで再診断し、安全復旧の直後にはflushして次の診断へ反映する。安全条件を満たさないものが1件でもあれば、新規保存を停止する。
 
 ### 9.4 PropertiesService
 
-計画はScript Propertiesへ保存する。METAに状態、署名、ハッシュ、チャンク数、進捗等を置き、DATAはUTF-8で最大7000バイト相当に分割する。読み出し時にバージョン、チャンク欠落、件数、SHA-256を検査し、不完全・改ざん状態では書込みを開始しない。
+計画はScript Propertiesへ保存する。METAに状態、署名、ハッシュ、チャンク数、進捗等を置き、DATAはUTF-8で最大7000バイト相当に分割する。DATAの永続化・照合を完了してからMETAを公開する。読み出し時にバージョン、チャンク欠落、件数、SHA-256を検査し、不完全・改ざん状態では書込みを開始しない。
 
-上限は、正規化後計画300KiB、最大44チャンク、Properties全体400KiBである。complete後は詳細チャンクを削除する。30日後は詳細METAを同一キーの小さな完了証明へ置換し、証明自体は無期限保持する。容量不足時も証明は削除せず、新規保存を停止する。
+上限は、正規化後計画300KiB、最大44チャンク、Properties全体400KiBである。容量不足時も完了証明は削除せず、新規保存を停止する。完了後のDATA削除・META縮小は [9.8](#98-古い計画の整理) に従う。
 
 ### 9.5 CacheService
 
@@ -298,7 +241,7 @@ DATEブロックとBAT行のownershipは、`draftId`、Script Propertiesへ永�
 
 - 日付シート: fixed planへ`sheetName`と`blockNo`を固定し、同じpendingの再試行では再選択しない。
 - BAT履歴: fixed planへ`sheetName`、`row`、`flightIndex`を固定し、同じpendingの再試行では別行へ追記しない。
-- 書込み時は各対象セルの現在値をbefore/intendedと比較し、intendedなら既書込みとしてskip、beforeなら書込み、それ以外は第三者変更として競合停止する。
+- 固定した対象セルへ [9.3の比較規則](#93-plan状態と進捗) を適用する。
 
 Spreadsheetに既に存在するDeveloper Metadataは削除しないが、新しい保存・診断・復旧・新規行選択・二重書込み防止では読み書きせず、必須条件にも使用しない。表示セルを保存完了後に利用者が空欄化した場合、将来の新しいUUIDは空き領域を再利用できる。pending中の対象セル変更と別active pendingの固定予約だけを競合として止める。
 
@@ -308,7 +251,7 @@ Spreadsheetに既に存在するDeveloper Metadataは削除しないが、新し
 
 ### 9.8 古い計画の整理
 
-- complete証明: 無期限保持。30日後はversion/draftId/signature/state/stage/chunkCount/completedAtだけを同一METAキーへ残す。削除してから移行しない。詳細のplanHash/resultHash等はこの時点で省略するが、pendingのplan/hashには触れない。
+- complete証明: complete確定後に詳細DATAを削除し、証明は無期限保持する。30日後はversion/draftId/signature/state/stage/chunkCount/completedAtだけを同一METAキーへ残す。削除してから移行しない。詳細のplanHash/resultHash等はこの時点で省略するが、pendingのplan/hashには触れない。
 - pending / writing / failed: 経過日数だけでは削除・failed化しない。数週間、数か月、1年後でも、計画・実データ・競合状態を再診断する。
 - 安全復旧可能なら同じfixed planをロールフォワードする。
 - TESTかつfixed plan対象の実データ・公式累計変更がない場合だけ、安全破棄を許可する。
